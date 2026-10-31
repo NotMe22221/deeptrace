@@ -1,0 +1,187 @@
+@import "tailwindcss";
+
+/* ------------------------------------------------------------------
+   DEEPTRACE design tokens
+   Midnight navy / graphite base; one hue per infrastructure system.
+------------------------------------------------------------------- */
+@theme {
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Space Grotesk", "Inter Variable", ui-sans-serif, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, monospace;
+
+  --color-ink-950: #04060b;
+  --color-ink-900: #070b14;
+  --color-ink-850: #0a101d;
+  --color-ink-800: #0e1524;
+  --color-ink-700: #151d2f;
+  --color-ink-600: #1e283d;
+  --color-ink-500: #2b374f;
+  --color-ink-400: #45526d;
+  --color-ink-300: #6b7791;
+  --color-ink-200: #a1abc0;
+  --color-ink-100: #d3d9e6;
+  --color-ink-50: #eef1f7;
+
+  /* infrastructure systems */
+  --color-water: #22d3ee;
+  --color-power: #f5b83d;
+  --color-telecom: #a78bfa;
+  --color-transport: #34d399;
+  --color-underground: #94a3b8;
+  --color-facility: #e2e8f0;
+
+  /* states */
+  --color-alert: #f43f5e;
+  --color-warn: #fb923c;
+  --color-ok: #4ade80;
+  --color-backup: #facc15;
+
+  /* provenance */
+  --color-prov-verified: #e2e8f0;
+  --color-prov-mapped: #7dd3fc;
+  --color-prov-estimated: #e9c46a;
+  --color-prov-simulated: #8f9bb3;
+
+  --animate-pulse-soft: pulse-soft 2.4s ease-in-out infinite;
+  --animate-scan: scan 3.2s linear infinite;
+}
+
+@keyframes pulse-soft {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes scan {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+:root {
+  color-scheme: dark;
+  --panel-bg: rgba(8, 12, 22, 0.74);
+  --panel-bg-strong: rgba(8, 12, 22, 0.9);
+  --panel-border: rgba(148, 163, 184, 0.13);
+  --panel-border-strong: rgba(148, 163, 184, 0.24);
+  --panel-shadow: 0 18px 50px -20px rgba(0, 0, 0, 0.85), 0 0 0 1px rgba(255, 255, 255, 0.02) inset;
+}
+
+html,
+body {
+  height: 100%;
+  background: #04060b;
+  color: var(--color-ink-50);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+}
+
+/* Glass panel used by every floating interface surface */
+.dt-panel {
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  box-shadow: var(--panel-shadow);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  border-radius: 14px;
+}
+
+.dt-panel-strong {
+  background: var(--panel-bg-strong);
+  border: 1px solid var(--panel-border-strong);
+  box-shadow: var(--panel-shadow);
+  backdrop-filter: blur(22px) saturate(150%);
+  -webkit-backdrop-filter: blur(22px) saturate(150%);
+  border-radius: 14px;
+}
+
+.dt-hairline {
+  border-color: var(--panel-border);
+}
+
+.dt-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-ink-300);
+}
+
+.dt-num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.dt-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.25) transparent;
+}
+.dt-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.dt-scroll::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.22);
+  border-radius: 6px;
+}
+
+/* Focus ring for keyboard users */
+:focus-visible {
+  outline: 2px solid rgba(125, 211, 252, 0.7);
+  outline-offset: 2px;
+}
+
+/* Hide Cesium chrome we replace with our own UI, keep attribution visible */
+.cesium-viewer-bottom {
+  opacity: 0.55;
+  font-size: 10px !important;
+}
+.cesium-viewer-bottom:hover {
+  opacity: 1;
+}
+.cesium-widget-credits {
+  font-family: var(--font-sans) !important;
+}
+.cesium-credit-logoContainer {
+  filter: grayscale(1) brightness(1.4);
+  opacity: 0.6;
+}
+.cesium-viewer .cesium-widget-credits {
+  left: auto !important;
+  right: 8px;
+}
+
+/* Vignette over the 3D canvas for cinematic depth */
+.dt-vignette {
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse at 50% 45%, transparent 55%, rgba(2, 4, 9, 0.55) 100%),
+    linear-gradient(to bottom, rgba(2, 4, 9, 0.35), transparent 14%, transparent 82%, rgba(2, 4, 9, 0.5));
+}
+
+/* Hatched fill used to mark SIMULATED data */
+.dt-hatch {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgba(143, 155, 179, 0.18) 0 4px,
+    transparent 4px 8px
+  );
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}
