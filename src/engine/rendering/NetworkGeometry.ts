@@ -203,13 +203,13 @@ export class NetworkGeometry {
     this.update(this.params, true);
   }
 
-  /** Resample a [lon,lat] polyline so no segment is longer than ~22 m (keeps original vertices). */
+  /** Resample a [lon,lat] polyline so no segment is longer than ~28 m (keeps original vertices). */
   private resample(geom: [number, number][]): [number, number][] {
     const f = this.frame;
     const local = geom.map(([lo, la]) => f.toLocal(lo, la));
     let total = 0;
     for (let i = 1; i < local.length; i++) total += Math.hypot(local[i][0] - local[i - 1][0], local[i][1] - local[i - 1][1]);
-    const step = clamp(total / 48, 6, 22);
+    const step = clamp(total / 32, 8, 28);
     const out: [number, number][] = [geom[0]];
     for (let i = 1; i < local.length; i++) {
       const [ax, ay] = local[i - 1];
@@ -227,7 +227,7 @@ export class NetworkGeometry {
   }
 
   private arcPoints(a: NodeGeom, b: NodeGeom): [number, number][] {
-    const N = 33;
+    const N = 25;
     const out: [number, number][] = [];
     for (let i = 0; i < N; i++) {
       const t = i / (N - 1);
@@ -250,6 +250,11 @@ export class NetworkGeometry {
       g.up[i * 3 + 1] = nrm.y;
       g.up[i * 3 + 2] = nrm.z;
     }
+  }
+
+  /** Total displayed vertex count (diagnostics). */
+  vertexCount(): number {
+    return this.edges.reduce((a, e) => a + e.n, 0);
   }
 
   /** All cartographic sample points (nodes first, then edge vertices) for terrain sampling. */

@@ -65,7 +65,8 @@ export class StrataLayer {
     const rect = C.Rectangle.fromDegrees(w, s, e, n);
     const ground = f.height;
     this.up = C.Cartesian3.clone(f.up);
-    const [cwLon, cwLat] = f.toLonLat(cx - half + 40, cy - half + 40);
+    // labels sit on the west edge of the district (left side of the home and deep views)
+    const [cwLon, cwLat] = f.toLonLat(cx - (half - 380) * 0.92, cy + (half - 380) * 0.15);
     this.corner = C.Cartesian3.fromDegrees(cwLon, cwLat, ground);
     const lines = Math.max(8, Math.round((half * 2) / 100));
     const mk = (depth: number, rgb: RGB, label: string | null, surface: boolean) => {
@@ -127,8 +128,8 @@ export class StrataLayer {
       p.prim.show = a > 0.01;
       const offset = -p.depth * depthScale * deepT;
       C.Matrix4.fromTranslation(C.Cartesian3.multiplyByScalar(this.up, offset, this.tmp), p.prim.modelMatrix);
-      setColor(p.mat.uniforms.color, p.rgb, a * (p.surface ? 0.75 : 0.6));
-      setParams(p.mat, (p.mat.uniforms.params as Cesium.Cartesian4).x, p.surface ? 0.0 : 0.04, p.surface ? 0.16 : 0.11, 0.2);
+      setColor(p.mat.uniforms.color, p.rgb, a * (p.surface ? 0.75 : 0.7));
+      setParams(p.mat, (p.mat.uniforms.params as Cesium.Cartesian4).x, p.surface ? 0.0 : 0.055, p.surface ? 0.16 : 0.15, 0.2);
       if (p.label) {
         p.label.show = a > 0.2;
         p.label.position = C.Cartesian3.add(this.corner, C.Cartesian3.multiplyByScalar(this.up, offset, this.tmp), new C.Cartesian3());

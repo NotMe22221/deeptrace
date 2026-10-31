@@ -91,7 +91,7 @@ export class EffectsLayer {
   addRings(specs: RingSpec[], rgb: RGB, radius: number, duration: number, alpha = 0.9, thickness = 0.06) {
     if (!specs.length) return;
     const C = this.C;
-    const mat = createMaterial(C, "ring", setColor(this.tmpColor, rgb, alpha), [0, thickness, 0.18, 0]);
+    const mat = createMaterial(C, "ring", setColor(this.tmpColor, rgb, alpha), [0, thickness, 0.07, 0]);
     try {
       const prim = this.ringPrimitive(specs.slice(0, 40), radius, mat);
       this.rings.push({ prim, mat, start: performance.now() / 1000, duration, alpha, thickness });
@@ -102,13 +102,13 @@ export class EffectsLayer {
 
   shockwave(specs: RingSpec[], positions: Cesium.Cartesian3[]) {
     const red: RGB = [0.96, 0.25, 0.37];
-    this.addRings(specs, red, 620, 2.6, 0.95, 0.045);
-    this.addRings(specs, [1, 0.55, 0.45], 260, 1.5, 0.7, 0.08);
+    this.addRings(specs, red, 640, 2.8, 0.9, 0.022);
+    this.addRings(specs, [1, 0.6, 0.5], 260, 1.6, 0.6, 0.035);
     for (const p of positions.slice(0, 12)) this.flare(p, [1, 0.42, 0.42], 220, 0.9);
   }
 
   ripple(specs: RingSpec[], rgb: RGB) {
-    this.addRings(specs, rgb, 140, 1.7, 0.85, 0.08);
+    this.addRings(specs, rgb, 150, 1.8, 0.7, 0.032);
   }
 
   flare(position: Cesium.Cartesian3, rgb: RGB, size: number, duration: number) {
@@ -179,7 +179,7 @@ export class EffectsLayer {
           this.scene.primitives.remove(r.prim);
           continue;
         }
-        setParams(r.mat, easeOutCubic(Math.max(0, k)), r.thickness, 0.18, 0);
+        setParams(r.mat, easeOutCubic(Math.max(0, k)), r.thickness, 0.07, 0);
         keep.push(r);
       }
       this.rings = keep;

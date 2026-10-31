@@ -110,6 +110,7 @@ export class NodeRenderer {
   private readonly scratch2: Cesium.Cartesian3;
   private readonly tmpColor: Cesium.Color;
   private glyphDirty = true;
+  private glyphStylesDirty = true;
   private measure: CanvasRenderingContext2D | null = null;
 
   constructor(C: CesiumModule, scene: Cesium.Scene) {
@@ -169,12 +170,13 @@ export class NodeRenderer {
         disableDepthTestDistance: Number.POSITIVE_INFINITY,
         scaleByDistance: near,
       });
+      // important assets are labelled by default; every other node gets a label shown while selected
       const labelAllowed = LABEL_TYPES.has(n.type) || n.critical;
       let label: Cesium.Label | null = null;
       let labelW = 0;
       let labelFar = 0;
-      if (labelAllowed) {
-        labelFar = tier === "major" ? (n.critical ? 6500 : 4200) : 2400;
+      {
+        labelFar = labelAllowed ? (tier === "major" ? (n.critical ? 6500 : 4200) : 2400) : 1800;
         label = this.labels.add({
           position: g.pos,
           text: n.name,
@@ -341,10 +343,8 @@ export class NodeRenderer {
     }
     this.glyphStylesDirty = true;
   }
-  private glyphStylesDirty = true;
 
   private styleIcon(e: NodeEntry, v: NodeVisual, time: number) {
-    const C = this.C;
     const show = v.visible && v.alpha > 0.03;
     const deep = this.deepT;
     // underground nodes are understated in surface mode unless they matter right now
@@ -383,7 +383,11 @@ export class NodeRenderer {
     }
     if (e.label) {
       const lab = e.label;
-      const labelShow = show && this.showLabels && v.alpha > 0.3 && (!e.g.underground || deep > 0.5 || v.emphasis > 0 || v.impacted);
+      const selected = this.selected === e.g.id;
+      const labelShow =
+        show &&
+        (selected ||
+          (e.labelAllowed && this.showLabels && v.alpha > 0.3 && (!e.g.underground || deep > 0.5 || v.emphasis > 0 || v.impacted)));
       (lab as unknown as { _dtWant: boolean })._dtWant = labelShow;
       if (!labelShow) lab.show = false;
       const col = v.impacted ? v.rgb : null;
@@ -450,7 +454,7 @@ export class NodeRenderer {
       attrs.show = C.ShowGeometryInstanceAttribute.toValue(show, attrs.show);
       if (!v) continue;
       let a = e.glyph.alpha * v.alpha * (e.g.underground ? smoothstep(0.08, 0.6, deep) : 1);
-      if (e.glyph.shape === "disc") a = e.glyph.alpha * (v.impacted ? 2.2 : 1) * v.alpha;
+      if (e.glyph.shape === "disc") a = e.glyph.alpha * (v.impacted ? 1.5 : 1) * v.alpha;
       const c = v.rgb;
       const k = e.glyph.shape === "disc" ? 1 : 0.78;
       attrs.color = C.ColorGeometryInstanceAttribute.toValue(setColor(this.tmpColor, [c[0] * k, c[1] * k, c[2] * k], Math.min(1, a)), attrs.color);
@@ -463,7 +467,6 @@ export class NodeRenderer {
 
   /** Per-frame animation (pulses, selection ring) + deferred glyph work. */
   animate(time: number) {
-    const C = this.C;
     if (this.glyphDirty) {
       this.glyphDirty = false;
       this.buildGlyphPrimitive();
@@ -503,7 +506,6 @@ export class NodeRenderer {
       this.selReticle.rotation = 0;
       this.selReticle.color = setColor(this.tmpColor, [1, 1, 1], 0.95);
     }
-    void C;
   }
 
   /** Greedy screen-space label decluttering by priority. */

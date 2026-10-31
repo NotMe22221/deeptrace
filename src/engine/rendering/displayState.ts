@@ -384,8 +384,9 @@ export function computeDisplay(geom: NetworkGeometry, s: DisplayInput): DisplayM
       if (upEdges.has(e.id) || downEdges.has(e.id) || focusEdges.has(e.id)) {
         trace = depEdges.has(e.id) ? "dep" : upEdges.has(e.id) ? "up" : downEdges.has(e.id) ? "down" : "up";
         alpha = 1;
-        widthMul = Math.max(widthMul, trace === "up" ? 1.55 : 1.3);
-        core = trace === "up" ? 0.95 : trace === "down" ? 0.25 : 0.1;
+        // upstream (toward sources) = white-hot core; downstream = pure system colour
+        widthMul = Math.max(widthMul, trace === "up" ? 1.6 : 1.2);
+        core = trace === "up" ? 1 : 0;
         if (trace === "dep") visible = sv.visible || dv.visible;
         if (flow) {
           flow = { ...flow, sizeMul: flow.sizeMul * 1.2, speedMul: flow.speedMul * 1.1 };

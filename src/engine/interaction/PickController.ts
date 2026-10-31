@@ -19,7 +19,6 @@ const isPickId = (v: unknown): v is PickId =>
   !!v && typeof v === "object" && "dt" in (v as object) && "id" in (v as object) && typeof (v as PickId).id === "string";
 
 export class PickController {
-  private readonly C: CesiumModule;
   private readonly scene: Cesium.Scene;
   private readonly handler: Cesium.ScreenSpaceEventHandler;
   private readonly h: PickHandlers;
@@ -31,7 +30,6 @@ export class PickController {
   private readonly cleanup: (() => void)[] = [];
 
   constructor(C: CesiumModule, viewer: Cesium.Viewer, handlers: PickHandlers) {
-    this.C = C;
     this.scene = viewer.scene;
     this.h = handlers;
     // our own interaction model: no entity tracking / selection
@@ -116,6 +114,5 @@ export class PickController {
     if (this.timer !== null) window.clearTimeout(this.timer);
     this.cleanup.forEach((f) => f());
     if (!this.handler.isDestroyed()) this.handler.destroy();
-    void this.C;
   }
 }

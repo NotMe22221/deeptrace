@@ -171,7 +171,7 @@ export class EdgeRenderer {
     }
     const emph = v.trace !== "none" || v.core > 0.3 || v.widthMul > 1.2;
     const core = Math.min(1, v.core + pulseCore);
-    const rgb = v.trace === "up" ? mixRgb(v.rgb, WHITE, 0.25) : v.rgb;
+    const rgb = v.trace === "up" ? mixRgb(v.rgb, WHITE, 0.3) : v.rgb;
 
     if (g.cls === "dependency") {
       const show = v.visible && v.alpha > 0.02;
@@ -224,7 +224,7 @@ export class EdgeRenderer {
     const tubeA = v.alpha * pulseA * (1 - ghostiness) * (emph ? 1.4 : 1);
     e.main.show = show && tubeA > 0.01;
     if (e.main.show) {
-      setColor(e.mainMat.uniforms.color, v.impacted || emph ? rgb : rgb, Math.min(1, tubeA));
+      setColor(e.mainMat.uniforms.color, rgb, Math.min(1, tubeA));
       setParams(e.mainMat, 1, 0, 0, 0);
       const w = lerp(6, 20, deep) * v.widthMul * pulseW;
       if (e.main.width !== w) e.main.width = w;

@@ -86,14 +86,14 @@ ${zoneCalls}
   float win = smoothstep(0.14, 0.22, fr.x) * (1.0 - smoothstep(0.78, 0.86, fr.x))
             * smoothstep(0.26, 0.34, fr.y) * (1.0 - smoothstep(0.74, 0.82, fr.y));
   vec2 block = floor(vec2(dot(rel, u_east), dot(rel, u_north)) / 55.0);
-  float occupancy = 0.18 + 0.22 * dtHash(block * 3.7 + 1.3);
+  float occupancy = 0.12 + 0.2 * dtHash(block * 3.7 + 1.3);
   float lit = step(1.0 - occupancy, dtHash(cell + block * 17.0));
   float warmth = dtHash(cell * 1.7 + 3.1);
   vec3 winCol = mix(vec3(1.0, 0.7, 0.36), vec3(0.72, 0.84, 1.0), step(0.86, warmth));
   float nearF = 1.0 - smoothstep(650.0, 2400.0, dist);
   float groundCut = smoothstep(3.0, 6.0, h);
   float windowGlow = facade * groundCut * (win * lit * nearF + (1.0 - nearF) * occupancy * 0.32);
-  col += winCol * windowGlow * 0.78 * (1.0 - dark);
+  col += winCol * windowGlow * 0.7 * (1.0 - dark);
   // blackout: darker massing, faint emergency-lighting tint on lower floors
   col *= mix(1.0, 0.42, dark);
   col += vec3(0.32, 0.07, 0.04) * dark * facade * (1.0 - smoothstep(4.0, 26.0, h)) * 0.12;
@@ -138,6 +138,8 @@ export class BuildingStyler {
   private readonly scratch: Cesium.Cartesian3;
   private readonly zoneVec: Cesium.Cartesian4[];
   private destroyed = false;
+  /** additional glTF models styled like the city (kept in sync with the x-ray state) */
+  private readonly models = new Set<{ customShader: Cesium.CustomShader | undefined; isDestroyed(): boolean }>();
 
   constructor(C: CesiumModule, scene: Cesium.Scene, frame: LocalFrame) {
     this.C = C;
@@ -270,8 +272,10 @@ export class BuildingStyler {
     const C = this.C;
     this.xrayT = xray;
     const want = xray > 0.0005 ? "xray" : "opaque";
-    if (this.tileset && want !== this.active) {
-      this.tileset.customShader = want === "xray" ? this.xray : this.opaque;
+    if (want !== this.active) {
+      const sh = want === "xray" ? this.xray : this.opaque;
+      if (this.tileset) this.tileset.customShader = sh;
+      for (const m of this.models) if (!m.isDestroyed()) m.customShader = sh;
     }
     this.active = want;
     const sh = want === "xray" ? this.xray : this.opaque;
@@ -297,9 +301,18 @@ export class BuildingStyler {
     }
   }
 
-  /** Testing hook: apply the building shader to an arbitrary Model. */
-  applyTo(model: { customShader: Cesium.CustomShader | undefined }, xray = false) {
-    model.customShader = xray ? this.xray : this.opaque;
+  /** Style an arbitrary glTF Model like the city buildings (lit windows, blackout, x-ray). */
+  addModel(model: { customShader: Cesium.CustomShader | undefined; isDestroyed(): boolean }) {
+    this.models.add(model);
+    model.customShader = this.active === "xray" ? this.xray : this.opaque;
+  }
+
+  get hasModels() {
+    return this.models.size > 0;
+  }
+
+  removeModel(model: { customShader: Cesium.CustomShader | undefined; isDestroyed(): boolean }) {
+    this.models.delete(model);
   }
 
   get xrayValue() {
@@ -308,6 +321,8 @@ export class BuildingStyler {
 
   destroy() {
     this.destroyed = true;
+    for (const m of this.models) if (!m.isDestroyed()) m.customShader = undefined;
+    this.models.clear();
     if (this.tileset && !this.tileset.isDestroyed()) {
       this.scene.primitives.remove(this.tileset);
     }

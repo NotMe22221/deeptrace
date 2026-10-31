@@ -77,7 +77,7 @@ czm_material czm_getMaterial(czm_materialInput materialInput)
 }
 `;
 
-/** Expanding shockwave ring on a flat ellipse. params: x progress 0..1, y thickness, z fill */
+/** Expanding shockwave ring on a flat ellipse. params: x progress 0..1, y thickness, z inner fill */
 const RING_SRC = `
 uniform vec4 color;
 uniform vec4 params;
@@ -87,14 +87,14 @@ czm_material czm_getMaterial(czm_materialInput materialInput)
   czm_material material = czm_getDefaultMaterial(materialInput);
   float r = length(materialInput.st - 0.5) * 2.0;
   float p = params.x;
-  float ring = 1.0 - smoothstep(0.0, params.y, abs(r - p));
-  float trail = (1.0 - smoothstep(0.0, p + 0.001, p - r)) * step(r, p) * 0.35;
-  float fill = params.z * (1.0 - smoothstep(p * 0.3, p, r)) * step(r, p);
-  float fade = 1.0 - smoothstep(0.55, 1.0, p);
-  float a = (ring + trail * ring + fill) * fade * color.a * step(r, 1.0);
+  float k = (r - p) / max(params.y, 0.002);
+  float ring = exp(-k * k);
+  float inner = step(r, p) * smoothstep(0.0, p + 1e-3, r) * params.z;
+  float fade = 1.0 - smoothstep(0.3, 1.0, p);
+  float a = (ring + inner) * fade * color.a * step(r, 1.0);
   if (a < 0.004) discard;
   material.diffuse = vec3(0.0);
-  material.emission = color.rgb * (1.0 + ring * 0.6);
+  material.emission = color.rgb * (1.0 + ring * 0.35);
   material.alpha = clamp(a, 0.0, 1.0);
   return material;
 }
@@ -145,9 +145,9 @@ czm_material czm_getMaterial(czm_materialInput materialInput)
 {
   czm_material material = czm_getDefaultMaterial(materialInput);
   float r = length(materialInput.st - 0.5) * 2.0;
-  float body = (1.0 - smoothstep(0.35, 1.0, r));
-  float rim = (1.0 - smoothstep(0.0, 0.06, abs(r - 0.94))) * 0.8;
-  float a = (body * 0.45 + rim) * color.a * (0.75 + 0.25 * params.x) * step(r, 1.0);
+  float body = (1.0 - smoothstep(0.2, 1.0, r));
+  float rim = (1.0 - smoothstep(0.0, 0.05, abs(r - 0.95))) * 0.22;
+  float a = (body * 0.5 + rim) * color.a * (0.8 + 0.2 * params.x) * step(r, 1.0);
   if (a < 0.003) discard;
   material.diffuse = vec3(0.0);
   material.emission = color.rgb;

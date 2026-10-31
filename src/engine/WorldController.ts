@@ -114,6 +114,8 @@ export class WorldController {
   deepT = 0;
   private deepTarget = 0;
   private deepAnim: { from: number; to: number; t0: number; dur: number } | null = null;
+  private lastPosPush = 0;
+  private lastPosCost = 0;
   private dirty = { display: true, positions: true, particles: true, trace: true };
   private lastFrame = performance.now() / 1000;
   private lastDeclutter = 0;
@@ -243,7 +245,7 @@ export class WorldController {
       scene.skyAtmosphere.perFragmentAtmosphere = true;
       scene.skyAtmosphere.hueShift = 0.0;
       scene.skyAtmosphere.saturationShift = 0.05;
-      scene.skyAtmosphere.brightnessShift = -0.58;
+      scene.skyAtmosphere.brightnessShift = -0.7;
     }
     // dusk: the atmosphere is lit by the real sun at a fixed evening time (blue hour over the city)
     const atmo = scene.atmosphere;
@@ -395,14 +397,16 @@ export class WorldController {
     // ---- buildings
     const region = useStore.getState().network?.region;
     const frame = this.geom?.frame ?? new LocalFrame(C, region?.center?.[1] ?? -84.39, region?.center?.[0] ?? 33.75, 0);
-    const styler = new BuildingStyler(C, this.viewer.scene, frame);
+    const styler = this.buildings ?? new BuildingStyler(C, this.viewer.scene, frame);
     this.buildings = styler;
     const offset = this.terrainMode === "ellipsoid" ? (region?.ground_elevation_m ?? 0) : 0;
     const ok = await styler.load(offset);
     if (this.destroyed) return;
     if (!ok) {
-      this.buildings = null;
-      styler.destroy();
+      if (!styler.hasModels) {
+        this.buildings = null;
+        styler.destroy();
+      }
     } else if (this.geom) {
       styler.setFrame(this.geom.frame);
       this.dirty.display = true;
@@ -558,6 +562,22 @@ export class WorldController {
     ui.set({ flash: ui.flash + 1 });
   }
 
+  /**
+   * Style any glTF Model like the city buildings (graphite massing, lit windows, blackout,
+   * Deep Mode x-ray). Works with or without Cesium OSM Buildings.
+   */
+  styleModel(model: Cesium.Model) {
+    if (this.destroyed) return;
+    if (!this.buildings) {
+      const C = this.C;
+      const region = useStore.getState().network?.region;
+      const frame = this.geom?.frame ?? new LocalFrame(C, region?.center?.[1] ?? -84.39, region?.center?.[0] ?? 33.75, 0);
+      this.buildings = new BuildingStyler(C, this.viewer.scene, frame);
+      this.dirty.display = true;
+    }
+    this.buildings.addModel(model);
+  }
+
   private onClick(id: PickId) {
     const st = useStore.getState();
     if (id.dt === "node") void st.selectNode(id.id);
@@ -708,7 +728,12 @@ export class WorldController {
         deepChanged = true;
       }
       let positionsChanged = false;
-      if (deepChanged || this.dirty.positions) {
+      // pushing ~10k polyline vertices costs a few ms: during transitions keep that work under
+      // roughly half of the frame budget (final state is always applied)
+      const throttle = deepChanged && !this.dirty.positions && this.deepAnim !== null && now - this.lastPosPush < Math.min(0.05, this.lastPosCost * 2);
+      if ((deepChanged || this.dirty.positions) && !throttle) {
+        const tp = performance.now();
+        this.lastPosPush = now;
         this.dirty.positions = false;
         geom.update({ depthScale: st.depthScale, deepT: this.deepT }, true);
         this.edges.updatePositions();
@@ -719,6 +744,9 @@ export class WorldController {
         this.strata.update(this.deepT, st.depthScale);
         positionsChanged = true;
         if (this.deepT > 0 && this.deepT < 1 && Math.abs(this.deepT - 0.5) < 0.04) this.dirty.particles = true;
+        this.lastPosCost = (performance.now() - tp) / 1000;
+      } else if (throttle) {
+        this.applyGlobe(this.deepT);
       }
 
       // ---- display state
