@@ -443,6 +443,8 @@ export interface DemoSnapshot {
   /** keyed by node id: single-node failure results for every node (lets the UI simulate offline) */
   single_failures?: Record<string, SimulationResult>;
   demo: DemoScript;
+  /** Recorded offline-analyst event streams keyed by question (replayed only when the backend is down). */
+  analyst_replays?: Record<string, AnalystEvent[]> | null;
 }
 
 export interface DemoStep {

@@ -77,6 +77,8 @@ export interface ChatMessage {
   tools: ToolActivity[];
   mode?: "llm" | "offline" | null;
   model?: string | null;
+  /** Why the analyst is in its current mode, e.g. "No ANTHROPIC_API_KEY configured" */
+  note?: string | null;
   pending?: boolean;
   error?: string | null;
 }
@@ -675,21 +677,10 @@ export const useStore = create<DeeptraceState>((set, get) => {
         panels: { ...s.panels, analyst: true },
       }));
 
-      if (s0.dataMode !== "live") {
-        patchMessage(asst.id, (m) => ({
-          ...m,
-          pending: false,
-          error:
-            "The AI analyst needs the DEEPTRACE engine (backend) so it can call simulation tools. It is not available in offline snapshot mode.",
-        }));
-        set({ analystPending: false });
-        return;
-      }
-
       const onEvent = (ev: AnalystEvent) => {
         switch (ev.type) {
           case "status":
-            patchMessage(asst.id, (m) => ({ ...m, mode: ev.mode, model: ev.model }));
+            patchMessage(asst.id, (m) => ({ ...m, mode: ev.mode, model: ev.model, note: ev.note ?? null }));
             break;
           case "tool_call":
             patchMessage(asst.id, (m) => ({
@@ -719,6 +710,30 @@ export const useStore = create<DeeptraceState>((set, get) => {
             break;
         }
       };
+
+      if (s0.dataMode !== "live") {
+        // Offline snapshot: replay a recorded offline-analyst answer when one exists for this
+        // exact question (demo safety net); otherwise explain that the analyst needs the engine.
+        const replay = s0.snapshot?.analyst_replays?.[trimmed];
+        if (replay?.length) {
+          for (const ev of replay) {
+            onEvent(ev);
+            if (ev.type === "tool_result") await sleep(220);
+          }
+          patchMessage(asst.id, (m) => ({ ...m, pending: false }));
+          set({ analystPending: false });
+          return;
+        }
+        patchMessage(asst.id, (m) => ({
+          ...m,
+          pending: false,
+          error:
+            "The AI analyst needs the DEEPTRACE engine (backend) so it can call simulation tools. It is not available in offline snapshot mode.",
+        }));
+        set({ analystPending: false });
+        return;
+      }
+
 
       try {
         await streamAnalyst(

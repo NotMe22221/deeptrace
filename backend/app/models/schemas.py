@@ -602,3 +602,7 @@ class DemoSnapshot(BaseModel):
     traces: dict[str, TraceResult]
     single_failures: dict[str, SimulationResult] | None = None
     demo: DemoScript
+    analyst_replays: dict[str, list[dict[str, Any]]] | None = Field(
+        default=None,
+        description="Recorded offline-analyst event streams keyed by question (used only when the backend is down)",
+    )
