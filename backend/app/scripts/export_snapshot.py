@@ -12,13 +12,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import shutil
 import time
 from datetime import datetime, timezone
 
 from app.config import PUBLIC_DEMO_DIR
 from app.ai.offline import run_offline
 from app.models.schemas import AnalystContext, AnalystRequest, DemoSnapshot, ScenarioInput
-from app.networks.loader import load_demo_script, load_presets
+from app.networks.loader import load_demo_script, load_presets, network_path
 from app.simulation import get_engine
 from app.simulation.engine import ENGINE_VERSION
 
@@ -138,9 +139,8 @@ def main() -> None:
     PUBLIC_DEMO_DIR.mkdir(parents=True, exist_ok=True)
     out = PUBLIC_DEMO_DIR / "snapshot.json"
     out.write_text(json.dumps(snap.model_dump(mode="json"), separators=(",", ":")))
-    (PUBLIC_DEMO_DIR / "network.json").write_text(
-        json.dumps(get_engine().network.model_dump(mode="json"), separators=(",", ":"))
-    )
+    # Mirror the region dataset byte-for-byte (the generator's tests require an identical copy).
+    shutil.copyfile(network_path(), PUBLIC_DEMO_DIR / "network.json")
     print(f"wrote {out} ({out.stat().st_size / 1e6:.1f} MB)")
 
 
