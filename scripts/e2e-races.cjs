@@ -47,15 +47,7 @@ async function routes(page) {
   let st = await S(() => { const s = window.__deeptraceStore.getState(); return { result: s.result?.scenario_id ?? null, slotA: s.slots.A?.scenario_id ?? null, sim: s.panels.simulation, status: s.simStatus }; });
   check('[0/32] stale simulate dropped after Restore world', !st.result && !st.slotA && !st.sim && st.status === 'idle', st);
 
-  // [0] overlapping runs: newest wins
-  await reset();
-  await S(async () => {
-    const s = window.__deeptraceStore.getState();
-    const A = s.presets.find((x) => x.id === 'A-DS-FIVEPOINTS').scenario, C = s.presets.find((x) => x.id === 'C-WATER-MAIN-DECATUR').scenario;
-    window.__pa = s.runSimulation(A);
-  });
-  delays['/api/simulate'] = 0;
-  // make the first slower by delaying before issuing second
+  // [0] overlapping runs: a slow older run must not replace a newer one
   await reset(); delays['/api/simulate'] = 2000;
   await S(() => { const s = window.__deeptraceStore.getState(); window.__pa = s.runSimulation(s.presets.find((x) => x.id === 'A-DS-FIVEPOINTS').scenario); });
   await sleep(400); delays['/api/simulate'] = 100;
