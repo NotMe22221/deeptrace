@@ -107,9 +107,9 @@ ${
   float xr = smoothstep(scanH - 14.0, scanH + 14.0, h);
   xr = u_xray >= 0.999 ? 1.0 : (u_xray <= 0.001 ? 0.0 : xr);
   float fres = pow(1.0 - abs(dot(nEC, V)), 2.0);
-  vec3 xcol = vec3(0.28, 0.55, 1.0) * (0.16 + 1.15 * fres) + vec3(0.55, 0.8, 1.0) * roof * 0.06;
+  vec3 xcol = vec3(0.3, 0.58, 1.0) * (0.24 + 1.3 * fres) + vec3(0.55, 0.8, 1.0) * roof * 0.1;
   xcol += winCol * windowGlow * 0.18 * (1.0 - dark);
-  float xa = 0.055 + 0.4 * fres + roof * 0.04;
+  float xa = 0.085 + 0.5 * fres + roof * 0.05;
   col = mix(col, xcol, xr);
   alpha = mix(1.0, xa, xr);
   float band = (1.0 - smoothstep(0.0, 6.0, abs(h - scanH))) * step(0.002, u_xray) * step(u_xray, 0.998);

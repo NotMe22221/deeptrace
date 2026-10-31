@@ -26,6 +26,9 @@ export class CameraDirector {
   private readonly viewer: Cesium.Viewer;
   private readonly ctx: CameraContext;
   private orbiting = false;
+  private orbitPending = false;
+  private flightSeq = 0;
+  private activeFlight = 0;
   private orbitCenter: Cesium.Cartesian3 | null = null;
   private readonly cleanup: (() => void)[] = [];
 
@@ -35,6 +38,7 @@ export class CameraDirector {
     this.ctx = ctx;
     const canvas = viewer.scene.canvas;
     const stop = () => {
+      this.orbitPending = false;
       if (this.orbiting) this.setOrbit(false);
     };
     for (const ev of ["pointerdown", "wheel", "touchstart"] as const) {
@@ -62,6 +66,25 @@ export class CameraDirector {
     // default_camera.height is an absolute altitude; on the bare ellipsoid the ground sits at 0
     const rel = cam.height > ge + 80 ? cam.height - ge : cam.height;
     return this.ground() + Math.max(120, rel);
+  }
+
+  /** camera.flyTo with flight tracking (orbit requests wait for the flight to finish). */
+  private fly(opts: Parameters<Cesium.Camera["flyTo"]>[0]) {
+    const id = ++this.flightSeq;
+    this.activeFlight = id;
+    const done = () => {
+      if (this.activeFlight === id) this.activeFlight = 0;
+    };
+    this.camera.flyTo({ ...opts, complete: done, cancel: done });
+  }
+
+  private flySphere(sphere: Cesium.BoundingSphere, opts: Parameters<Cesium.Camera["flyToBoundingSphere"]>[1]) {
+    const id = ++this.flightSeq;
+    this.activeFlight = id;
+    const done = () => {
+      if (this.activeFlight === id) this.activeFlight = 0;
+    };
+    this.camera.flyToBoundingSphere(sphere, { ...opts, complete: done, cancel: done });
   }
 
   /** Far establishing view (before / during arrival). */
@@ -93,7 +116,7 @@ export class CameraDirector {
     this.setOrbit(false);
     const C = this.C;
     const cam = r.default_camera;
-    this.camera.flyTo({
+    this.fly({
       destination: C.Cartesian3.fromDegrees(cam.longitude, cam.latitude, this.homeHeight(r)),
       orientation: { heading: cam.heading * D2R, pitch: cam.pitch * D2R, roll: (cam.roll ?? 0) * D2R },
       duration: opts?.duration ?? 2.2,
@@ -122,7 +145,7 @@ export class CameraDirector {
     const under = n.underground && deep;
     const range = opts?.range ?? (under ? 380 : n.node.type === "service_zone" ? 900 : 600);
     const pitch = under ? -16 * D2R : -34 * D2R;
-    this.camera.flyToBoundingSphere(new C.BoundingSphere(p, 1), {
+    this.flySphere(new C.BoundingSphere(p, 1), {
       offset: new C.HeadingPitchRange(this.camera.heading, pitch, range),
       duration: opts?.duration ?? 1.8,
       easingFunction: C.EasingFunction.CUBIC_IN_OUT,
@@ -141,7 +164,7 @@ export class CameraDirector {
     const bs = C.BoundingSphere.fromPoints(pts);
     const radius = Math.max(bs.radius, 180);
     const deep = this.ctx.deep();
-    this.camera.flyToBoundingSphere(new C.BoundingSphere(bs.center, radius), {
+    this.flySphere(new C.BoundingSphere(bs.center, radius), {
       offset: new C.HeadingPitchRange(this.camera.heading, (deep ? -24 : -42) * D2R, Math.max(520, radius * 2.5)),
       duration: opts?.duration ?? 2.0,
       easingFunction: C.EasingFunction.CUBIC_IN_OUT,
@@ -173,7 +196,7 @@ export class CameraDirector {
     // aim below the district centre so every stratum sits in frame
     const targetH = f.height - maxDepth * t.targetK;
     const pitch = Math.atan2(targetH - camH, dist);
-    this.camera.flyTo({
+    this.fly({
       destination: C.Cartesian3.fromDegrees(lon, lat, camH),
       orientation: { heading, pitch, roll: 0 },
       duration: opts?.duration ?? 3.0,
@@ -209,6 +232,12 @@ export class CameraDirector {
 
   setOrbit(enabled: boolean) {
     const C = this.C;
+    if (enabled && this.activeFlight) {
+      // start once the current flight lands
+      this.orbitPending = true;
+      return;
+    }
+    if (!enabled) this.orbitPending = false;
     if (enabled === this.orbiting) return;
     if (enabled) {
       this.orbitCenter = this.viewCenter();
@@ -223,11 +252,15 @@ export class CameraDirector {
   }
 
   isOrbiting() {
-    return this.orbiting;
+    return this.orbiting || this.orbitPending;
   }
 
   /** per-frame (orbit) */
   update(dt: number) {
+    if (this.orbitPending && !this.activeFlight) {
+      this.orbitPending = false;
+      this.setOrbit(true);
+    }
     if (this.orbiting) this.camera.rotateRight(-dt * 0.055);
   }
 
@@ -238,7 +271,7 @@ export class CameraDirector {
     const d = C.Cartesian3.distance(this.camera.positionWC, center);
     const amount = direction > 0 ? d * 0.42 : -d * 0.7;
     const dest = C.Cartesian3.add(this.camera.positionWC, C.Cartesian3.multiplyByScalar(this.camera.directionWC, amount, new C.Cartesian3()), new C.Cartesian3());
-    this.camera.flyTo({
+    this.fly({
       destination: dest,
       orientation: { heading: this.camera.heading, pitch: this.camera.pitch, roll: 0 },
       duration: 0.6,
@@ -251,7 +284,7 @@ export class CameraDirector {
     this.setOrbit(false);
     const center = this.viewCenter();
     const range = C.Cartesian3.distance(this.camera.positionWC, center);
-    this.camera.flyToBoundingSphere(new C.BoundingSphere(center, 0), {
+    this.flySphere(new C.BoundingSphere(center, 0), {
       offset: new C.HeadingPitchRange(0, this.camera.pitch, range),
       duration: 0.9,
       easingFunction: C.EasingFunction.CUBIC_IN_OUT,
@@ -265,7 +298,7 @@ export class CameraDirector {
     const range = C.Cartesian3.distance(this.camera.positionWC, center);
     const deep = this.ctx.deep();
     const pitch = clamp(this.camera.pitch + deltaDeg * D2R, -89.5 * D2R, (deep ? 25 : -6) * D2R);
-    this.camera.flyToBoundingSphere(new C.BoundingSphere(center, 0), {
+    this.flySphere(new C.BoundingSphere(center, 0), {
       offset: new C.HeadingPitchRange(this.camera.heading, pitch, range),
       duration: 0.6,
       easingFunction: C.EasingFunction.QUADRATIC_IN_OUT,

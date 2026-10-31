@@ -313,11 +313,21 @@ export class WorldController {
             maximumLevel: 19,
           });
     let failures = 0;
+    let loaded = 0;
+    // count successful tiles so an unreachable server (offline / blocked) can be detected
+    const request = provider.requestImage.bind(provider);
+    provider.requestImage = (x, y, level, req) => {
+      const p = request(x, y, level, req);
+      p?.then(() => loaded++).catch(() => {});
+      return p;
+    };
     provider.errorEvent.addEventListener((err: Cesium.TileProviderError) => {
-      // listening suppresses Cesium's console spam; report once if the tile server is unreachable
+      // listening suppresses Cesium's console spam; give up on a server that never answers
       failures++;
       err.retry = false;
-      if (failures === 8 && !this.destroyed) useStore.getState().setWorldStatus({ imagery: `${mode} (unreachable)` });
+      if (this.destroyed || loaded > 0) return;
+      if (failures === 8) useStore.getState().setWorldStatus({ imagery: `${mode} (unreachable)` });
+      if (failures === 24 && this.viewer.imageryLayers.contains(layer)) this.viewer.imageryLayers.remove(layer);
     });
     const layer = this.viewer.imageryLayers.addImageryProvider(provider);
     if (mode === "carto-dark") {

@@ -38,6 +38,7 @@ export class StrataLayer {
   readonly labels: Cesium.LabelCollection;
   private up: Cesium.Cartesian3;
   private corner: Cesium.Cartesian3;
+  private labelAnchors: Cesium.Cartesian3[] = [];
   private readonly tmp: Cesium.Cartesian3;
   private readonly tmpColor: Cesium.Color;
   private last = "";
@@ -65,9 +66,14 @@ export class StrataLayer {
     const rect = C.Rectangle.fromDegrees(w, s, e, n);
     const ground = f.height;
     this.up = C.Cartesian3.clone(f.up);
-    // labels sit on the west edge of the district (left side of the home and deep views)
-    const [cwLon, cwLat] = f.toLonLat(cx - (half - 380) * 0.92, cy + (half - 380) * 0.15);
-    this.corner = C.Cartesian3.fromDegrees(cwLon, cwLat, ground);
+    // labels sit along the west edge of the district (left side of the home and deep views),
+    // staggered north-south so neighbouring strata never overlap on screen
+    const inner = half - 380;
+    this.labelAnchors = STRATA.map((_, i) => {
+      const [lon, lat] = f.toLonLat(cx - inner * 0.92, cy + inner * (0.5 - 0.42 * i));
+      return C.Cartesian3.fromDegrees(lon, lat, ground);
+    });
+    this.corner = this.labelAnchors[0];
     const lines = Math.max(8, Math.round((half * 2) / 100));
     const mk = (depth: number, rgb: RGB, label: string | null, surface: boolean) => {
       const mat = createMaterial(C, "grid", setColor(this.tmpColor, rgb, 0), [lines, 0.05, 0.22, 0.12]);
@@ -98,8 +104,8 @@ export class StrataLayer {
       if (label) {
         lab = this.labels.add({
           position: this.corner,
-          text: label.toUpperCase(),
-          font: "600 10px 'JetBrains Mono Variable', ui-monospace, monospace",
+          text: label,
+          font: "500 10.5px 'JetBrains Mono Variable', ui-monospace, monospace",
           fillColor: C.Color.fromCssColorString("#cfe3ff"),
           showBackground: true,
           backgroundColor: C.Color.fromCssColorString("rgba(6,10,19,0.6)"),
@@ -132,7 +138,8 @@ export class StrataLayer {
       setParams(p.mat, (p.mat.uniforms.params as Cesium.Cartesian4).x, p.surface ? 0.0 : 0.055, p.surface ? 0.16 : 0.15, 0.2);
       if (p.label) {
         p.label.show = a > 0.2;
-        p.label.position = C.Cartesian3.add(this.corner, C.Cartesian3.multiplyByScalar(this.up, offset, this.tmp), new C.Cartesian3());
+        const anchor = this.labelAnchors[STRATA.findIndex((st) => st.depth === p.depth)] ?? this.corner;
+        p.label.position = C.Cartesian3.add(anchor, C.Cartesian3.multiplyByScalar(this.up, offset, this.tmp), new C.Cartesian3());
         p.label.fillColor = setColor(this.tmpColor, [0.82, 0.9, 1], a);
         p.label.backgroundColor = setColor(this.tmpColor, [0.024, 0.04, 0.075], 0.6 * a);
       }
