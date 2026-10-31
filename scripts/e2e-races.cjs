@@ -152,6 +152,91 @@ async function routes(page) {
   check('[35] Stop ends a stalled answer', before === true && !st.pending && !st.lastPending, { before, ...st });
   stallChat = false;
 
+  // R2: Exit demo while the simulate step's request is in flight -> it is dropped, no spinner
+  await reset(); delays['/api/simulate'] = 2500;
+  await S(async () => { window.__deeptraceStore.getState().startDemo(); await new Promise((r) => setTimeout(r, 200)); window.__pd = window.__deeptraceStore.getState().demoGoto(5); });
+  await sleep(400);
+  await S(() => window.__deeptraceStore.getState().exitDemo());
+  const rightAfterExit = await S(() => window.__deeptraceStore.getState().simStatus);
+  await S(() => window.__pd); await sleep(2600);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { result: s.result?.scenario_id ?? null, slotA: s.slots.A?.scenario_id ?? null, sim: s.panels.simulation, playing: s.playback.playing, status: s.simStatus }; });
+  check('R2 Exit demo drops the simulate step\'s in-flight run', rightAfterExit === 'idle' && !st.result && !st.slotA && !st.sim && !st.playing && st.status === 'idle', { rightAfterExit, ...st });
+
+  // R2: Exit demo while the compare step's request is in flight
+  await reset();
+  await S(async () => { const s = window.__deeptraceStore.getState(); s.startDemo(); await new Promise((r) => setTimeout(r, 200)); await window.__deeptraceStore.getState().demoGoto(5); await window.__deeptraceStore.getState().demoGoto(8); });
+  delays['/api/compare'] = 2500;
+  await S(() => { window.__pd = window.__deeptraceStore.getState().demoGoto(9); });
+  await sleep(400);
+  await S(() => window.__deeptraceStore.getState().exitDemo());
+  const cmpAfterExit = await S(() => window.__deeptraceStore.getState().compareStatus);
+  await S(() => window.__pd); await sleep(2600);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { cmp: !!s.comparison, view: s.compareView, panel: s.panels.comparison, status: s.compareStatus }; });
+  check('R2 Exit demo drops the compare step\'s in-flight comparison', cmpAfterExit === 'idle' && !st.cmp && st.view !== 'diff' && !st.panel && st.status === 'idle', { cmpAfterExit, ...st });
+
+  // R2: Exit demo mid reveal_layers turns the layers it had not revealed yet back on
+  await reset();
+  await S(async () => { window.__deeptraceStore.getState().startDemo(); await new Promise((r) => setTimeout(r, 200)); window.__pd = window.__deeptraceStore.getState().demoGoto(2); });
+  await sleep(1300);
+  await S(() => window.__deeptraceStore.getState().exitDemo());
+  st = await S(() => window.__deeptraceStore.getState().layers);
+  check('R2 Exit mid reveal_layers leaves every layer on', Object.values(st).every(Boolean), st);
+
+  // R2: a comparison that lands after slot A was re-run keeps the newer run
+  await reset();
+  await S(async () => { const s = window.__deeptraceStore.getState(); const P = (id) => s.presets.find((x) => x.id === id).scenario;
+    await s.runSimulation(P('A-DS-FIVEPOINTS'), 'A'); await window.__deeptraceStore.getState().runSimulation(P('B-EDGEWOOD-DUCTBANK'), 'B'); });
+  delays['/api/compare'] = 2500;
+  await S(() => { window.__pc = window.__deeptraceStore.getState().runComparison(); });
+  await sleep(200);
+  await S(async () => { const s = window.__deeptraceStore.getState(); await s.runSimulation(s.presets.find((x) => x.id === 'C-WATER-MAIN-DECATUR').scenario, 'A'); });
+  await S(() => window.__pc);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { slotA: s.slots.A?.scenario_id, result: s.result?.scenario_id, cmp: !!s.comparison, view: s.compareView, status: s.compareStatus }; });
+  check('R2 slow comparison does not overwrite a newer slot run', st.slotA === 'C-WATER-MAIN-DECATUR' && st.result === 'C-WATER-MAIN-DECATUR' && st.cmp && st.view !== 'diff' && st.status === 'idle', st);
+
+  // R2: show_comparison that moves the displayed result also moves playback
+  await reset();
+  st = await S(async () => { const s = window.__deeptraceStore.getState(); const P = (id) => s.presets.find((x) => x.id === id).scenario;
+    await s.runSimulation(P('C-WATER-MAIN-DECATUR'), 'A'); await window.__deeptraceStore.getState().runSimulation(P('B-EDGEWOOD-DUCTBANK'), 'B');
+    window.__deeptraceStore.getState().showSlot('A');
+    const c = await (await fetch('http://localhost:8000/api/compare', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scenario_a: P('F-TS-SOUTH'), scenario_b: P('B-EDGEWOOD-DUCTBANK') }) })).json();
+    window.__deeptraceStore.getState().applyUIAction({ kind: 'show_comparison', comparison: c, node_ids: [], edge_ids: [] });
+    const t = window.__deeptraceStore.getState(); const max = Math.max(0, ...t.result.affected_nodes.map((a) => a.step ?? 0));
+    return { result: t.result.scenario_id, isA: t.result === t.slots.A, maxStep: t.playback.maxStep, resultMax: max }; });
+  check('R2 show_comparison resets playback to the result it shows', st.result === 'F-TS-SOUTH' && st.isA && st.maxStep >= st.resultMax, st);
+
+  // R2: a failed slot run that a newer run overlapped still reports its error
+  await reset(); delays['/api/simulate'] = 1500;
+  await S(() => { const s = window.__deeptraceStore.getState(); window.__pa = s.runSimulation({ failed_nodes: ['NO-SUCH-NODE'], failed_edges: [], horizon_hours: 4, enable_restoration: true }, 'A'); });
+  await sleep(200); delays['/api/simulate'] = 0;
+  await S(async () => { const s = window.__deeptraceStore.getState(); await s.runSimulation(s.presets.find((x) => x.id === 'C-WATER-MAIN-DECATUR').scenario); });
+  await S(() => window.__pa);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { slotA: s.slots.A?.scenario_id ?? null, err: s.simError, result: s.result?.scenario_id, status: s.simStatus }; });
+  check('R2 overlapped failed slot run is reported', !st.slotA && /^Scenario A failed/.test(st.err ?? '') && st.result === 'C-WATER-MAIN-DECATUR' && st.status === 'idle', st);
+
+  // R2: clearSimulation during a comparison does not leave its spinner on
+  await reset();
+  await S(async () => { const s = window.__deeptraceStore.getState(); const P = (id) => s.presets.find((x) => x.id === id).scenario;
+    await s.runSimulation(P('A-DS-FIVEPOINTS'), 'A'); await window.__deeptraceStore.getState().runSimulation(P('B-EDGEWOOD-DUCTBANK'), 'B'); });
+  delays['/api/compare'] = 1500;
+  await S(() => { window.__pc = window.__deeptraceStore.getState().runComparison(); });
+  await sleep(200);
+  await S(() => window.__deeptraceStore.getState().clearSimulation());
+  await S(() => window.__pc);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { status: s.compareStatus, cmp: !!s.comparison }; });
+  check('R2 clearSimulation settles an in-flight comparison', st.status === 'idle' && !st.cmp, st);
+
+  // R2: a live result keeps its provenance after a failover (not relabelled "precomputed")
+  await reset();
+  st = await S(async () => { const s = window.__deeptraceStore.getState(); const r = await s.runSimulation({ failed_nodes: ['PWR-DS-FIVEPOINTS'], failed_edges: [], horizon_hours: 6, enable_restoration: true });
+    return { live: !!r }; });
+  const liveRes = st.live;
+  blockEngine = true;
+  await S(async () => { await window.__deeptraceStore.getState().selectNode('PWR-TS-SOUTH'); });
+  st = await S(() => ({ mode: window.__deeptraceStore.getState().dataMode, label: document.body.innerText.includes('precomputed (offline snapshot)') }));
+  check('R2 live result is not labelled precomputed after failover', liveRes && st.mode === 'snapshot' && !st.label, st);
+  blockEngine = false;
+
   // [26]/[27] engine dies mid-session -> snapshot failover; offline trace uses engine trace
   await reset(); blockEngine = true;
   await S(async () => { const s = window.__deeptraceStore.getState(); await s.runSimulation(s.presets.find((x) => x.id === 'A-DS-FIVEPOINTS').scenario, 'A'); });
@@ -172,6 +257,15 @@ async function routes(page) {
   await S(async () => { const s = window.__deeptraceStore.getState(); s.clearChat(); await s.runSimulation(s.presets.find((x) => x.id === 'A-DS-FIVEPOINTS').scenario); await window.__deeptraceStore.getState().sendAnalystMessage('Why did this happen, and what could we do differently?'); });
   st = await S(() => { const s = window.__deeptraceStore.getState(); const m = s.messages[s.messages.length - 1]; return { content: (m.content || '').slice(0, 60), tools: m.tools.length, pending: s.analystPending }; });
   check('[29] recorded replay still works for the demo scenario', st.content.length > 0 && st.tools > 0 && !st.pending, st);
+
+  // R2: snapshot mode, the ask_ai step reached by a step chip or Prev still replays its answer
+  await S(async () => { const s = window.__deeptraceStore.getState(); s.startDemo(); await new Promise((r) => setTimeout(r, 200)); await window.__deeptraceStore.getState().demoGoto(7); });
+  st = await S(() => { const s = window.__deeptraceStore.getState(); const m = s.messages[s.messages.length - 1]; return { mode: s.dataMode, result: s.result?.scenario_id ?? null, content: (m?.content || '').slice(0, 50), err: m?.error ?? null }; });
+  check('R2 snapshot ask_ai reached cold replays the recorded answer', st.mode === 'snapshot' && st.result === 'A-DS-FIVEPOINTS' && st.content.length > 0 && !st.err, st);
+  await S(async () => { await window.__deeptraceStore.getState().demoGoto(8); await window.__deeptraceStore.getState().demoPrev(); });
+  st = await S(() => { const s = window.__deeptraceStore.getState(); const m = s.messages[s.messages.length - 1]; return { step: s.demo.step, result: s.result?.scenario_id ?? null, content: (m?.content || '').slice(0, 50), err: m?.error ?? null }; });
+  check('R2 snapshot ask_ai reached by Prev replays the recorded answer', st.step === 7 && st.result === 'A-DS-FIVEPOINTS' && st.content.length > 0 && !st.err, st);
+  await S(() => window.__deeptraceStore.getState().exitDemo());
 
   check('no page errors', errors.length === 0, errors.slice(0, 5));
   await browser.close();

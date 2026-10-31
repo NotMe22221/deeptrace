@@ -295,7 +295,9 @@ API calls apart from optional Cesium streaming and the optional LLM. If the back
 mid-presentation, the app switches to the precomputed snapshot on the next engine call.
 Every async step is cancellable: **Exit demo**, **Reset demo** and **Restore world** stop the
 step, simulation, trace or analyst answer in flight, so a slow response can never re-apply
-state the presenter just cleared. A streaming analyst answer can be stopped at any time, and the
+state the presenter just cleared; exiting mid-reveal turns every layer back on. Steps can be
+reached in any order (step chips, ← →): a step that is about scenario A, such as the analyst
+question, puts A on screen first. A streaming analyst answer can be stopped at any time, and the
 backend sends SSE heartbeats so a stalled connection is detected (90 s without data) rather
 than hanging.
 
