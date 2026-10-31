@@ -72,7 +72,10 @@ export function Tooltip({
       className={cx(!/(^|\s)(block|flex|grid|hidden)(\s|$)/.test(className ?? "") && "inline-flex", className)}
       onPointerEnter={show}
       onPointerLeave={hide}
-      onFocus={show}
+      onFocus={(e) => {
+        // Only keyboard focus shows the tooltip (a click focuses the button too).
+        if ((e.target as HTMLElement).matches?.(":focus-visible")) show();
+      }}
       onBlur={hide}
       onPointerDown={hide}
     >

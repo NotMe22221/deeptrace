@@ -114,6 +114,13 @@ class WaterModel:
             if g.edges[e].source_node in self.node_set and g.edges[e].target_node in self.node_set
         ]
         self.pipe_cap = {e: as_float(g.edges[e].capacity) for e in self.pipes}
+        # valves modelled on the pipe itself (``properties.valve``) and closed pipes
+        self.pipe_valve = {
+            e
+            for e in self.pipes
+            if any(as_bool(g.edges[e].properties.get(k, False)) for k in ("valve", "has_valve", "isolation_valve"))
+        }
+        self.nc_pipes = {e for e in self.pipes if as_bool(g.edges[e].properties.get("normally_closed", False))}
         self.inc: dict[str, list[str]] = {n: [] for n in self.nodes}
         for e in self.pipes:
             ed = g.edges[e]
@@ -210,7 +217,7 @@ class WaterModel:
         for e in self.pipes:
             ed = g.edges[e]
             u, v = ed.source_node, ed.target_node
-            if u in self.nc_valves or v in self.nc_valves:
+            if u in self.nc_valves or v in self.nc_valves or e in self.nc_pipes:
                 continue
             w = g.edge_length(e)
             if not G.has_edge(u, v) or G[u][v]["w"] > w:
@@ -259,6 +266,9 @@ class WaterModel:
                             continue
                         iso_e.add(pe)
                         origin.setdefault(pe, rupture)
+                        if pe in self.pipe_valve:  # in-line valve closes this main
+                            closing.add(pe)
+                            continue
                         m = g.other_end(pe, n)
                         if m in fn or m in iso_n:
                             continue
@@ -286,6 +296,9 @@ class WaterModel:
                         continue
                     iso_e.add(pe)
                     origin.setdefault(pe, rupture)
+                    if pe in self.pipe_valve:  # in-line valve closes this main
+                        closing.add(pe)
+                        continue
                     m = g.other_end(pe, n)
                     if m in iso_n or m in fn:
                         continue
@@ -328,7 +341,7 @@ class WaterModel:
                 add(f"{p}@L", f"{p}@H", scaled(as_float(g.nodes[p].capacity)))
         pipe_ends: dict[str, tuple[str, str]] = {}
         for e in self.pipes:
-            if e in removed_e:
+            if e in removed_e or (e in self.nc_pipes and e not in opened):
                 continue
             ed = g.edges[e]
             u, v = ed.source_node, ed.target_node
@@ -494,7 +507,7 @@ class WaterModel:
 
         def issue_text(x: str) -> str | None:
             if x in fe:
-                return f"main {g.label(x)} ruptured" + (f" (corridor {g.label(cc[x])})" if x in cc else "")
+                return f"main {g.label(x)} ruptured" + (f" (common-cause damage in {g.cc_phrase(cc[x])})" if x in cc else "")
             if x in iso_e:
                 return f"main {g.label(x)} isolated around rupture {g.label(origin[x])}"
             if x in fn:
@@ -660,6 +673,8 @@ class WaterModel:
                 )
                 continue
             nc = [x for x in (u, v) if x in self.nc_valves and x not in inp.opened_valves]
+            if e in self.nc_pipes and e not in inp.opened_valves:
+                nc = [e]
             if nc and af <= EPS:
                 edge_out[e] = EdgeOutcome("normally_open", f"Behind normally-closed boundary valve {g.label(nc[0])}")
                 continue
@@ -717,8 +732,8 @@ class WaterModel:
         if deficit <= 0.05:
             return []
         out: list[AlternativePath] = []
-        for v in sorted(self.nc_valves):
-            if v in res.removed_nodes or v in inp.opened_valves:
+        for v in sorted(self.nc_valves | self.nc_pipes):
+            if v in res.removed_nodes or v in inp.opened_valves or v in res.isolated_edges:
                 continue
             trial = self.evaluate(
                 WaterInputs(
@@ -754,13 +769,18 @@ class WaterModel:
                     continue
                 if (a in self.nc_valves and a != v) or (b in self.nc_valves and b != v):
                     continue
+                if e in self.nc_pipes and e != v:
+                    continue
                 if not G.has_edge(a, b):
                     G.add_edge(a, b, eid=e, w=g.edge_length(e))
+            start = v if v in self.node_set else g.edges[v].source_node
             try:
-                path = nx.shortest_path(G, v, best, weight="w")
+                path = nx.shortest_path(G, start, best, weight="w")
                 epath = [G[a][b]["eid"] for a, b in zip(path, path[1:])]
             except (nx.NetworkXNoPath, nx.NodeNotFound):
-                path, epath = [v, best], [e for e in self.inc[v]]
+                path, epath = [start, best], list(self.inc.get(v, [v]))
+            if v in self.nc_pipes:
+                epath = [v] + [x for x in epath if x != v]
             out.append(
                 AlternativePath(
                     id=f"alt-water-valve-{v}",

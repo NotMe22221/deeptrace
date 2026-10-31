@@ -298,7 +298,7 @@ class TransportModel:
 
         def blocked_text(x: str) -> str:
             if x in g.edges:
-                return f"{g.label(x)} closed" + (f" (corridor {g.label(cc[x])})" if x in cc else "")
+                return f"{g.label(x)} closed" + (f" (common-cause damage in {g.cc_phrase(cc[x])})" if x in cc else "")
             return f"{g.label(x)} failed"
 
         def first_blocked(p: list[str], ep: list[str]) -> str | None:
@@ -428,6 +428,14 @@ class TransportModel:
             if out is not None:
                 node_out[n] = out
 
+        # ---- edges carrying rerouted O-D traffic: new edges on every changed route
+        detour_edges: set[str] = set()
+        if base is not None:
+            for key, ep in pair_epath.items():
+                bep = base.pair_epath.get(key)
+                if bep is not None and ep != bep:
+                    detour_edges |= set(ep) - set(bep)
+
         # ---- edges & flows
         base_counts = base.counts if base is not None else counts
         flows: dict[str, FlowRec] = {}
@@ -452,9 +460,12 @@ class TransportModel:
                 edge_out[e] = EdgeOutcome("interrupted", "Cut off from every district gateway")
             elif util > 1.0 + 1e-6 and counts[e] > base_counts.get(e, 0):
                 edge_out[e] = EdgeOutcome("overloaded", f"Detour traffic at {util * 100:.0f}% of capacity (O-D index)")
-            elif counts[e] > base_counts.get(e, 0) + EPS:
+            elif e in detour_edges:
+                delta = counts[e] - base_counts.get(e, 0)
                 edge_out[e] = EdgeOutcome(
-                    "rerouted", f"Carries detour traffic ({int(counts[e] - base_counts.get(e, 0))} more O-D routes)"
+                    "rerouted",
+                    "Carries detour traffic"
+                    + (f" ({int(delta)} more O-D routes than normal)" if delta > 0 else ""),
                 )
         for e in self.rail_edges:
             flows[e] = FlowRec(0, 0.0, 0.0, None)

@@ -174,7 +174,7 @@ class TelecomModel:
 
         def broken_text(x: str) -> str:
             if x in g.edges:
-                return f"fibre {g.label(x)} cut" + (f" (corridor {g.label(cc[x])})" if x in cc else "")
+                return f"fibre {g.label(x)} cut" + (f" (common-cause damage in {g.cc_phrase(cc[x])})" if x in cc else "")
             if x in unpowered:
                 return f"{g.label(x)} out of service (no power)"
             return f"{g.label(x)} failed"

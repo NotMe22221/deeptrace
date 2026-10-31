@@ -99,12 +99,13 @@ export function BootOverlay() {
                 <pre className="mt-1 overflow-x-auto rounded-md border border-white/[0.07] bg-black/40 px-2.5 py-2 font-mono text-[11px] text-ink-100">
                   cd backend && .venv/bin/uvicorn app.main:app --port 8000
                 </pre>
-                <p className="mt-2.5 text-[12px] text-ink-200">…or generate the offline snapshot:</p>
+                <p className="mt-2.5 text-[12px] text-ink-200">…or export the offline snapshot (no server needed afterwards):</p>
                 <pre className="mt-1 overflow-x-auto rounded-md border border-white/[0.07] bg-black/40 px-2.5 py-2 font-mono text-[11px] text-ink-100">
-                  cd backend && .venv/bin/python -m app.networks.generate
+                  make snapshot
                 </pre>
                 <p className="mt-1.5 text-[11px] text-ink-400">
-                  This writes public/demo/network.json (and the engine exports public/demo/snapshot.json).
+                  Runs <code className="font-mono">app.scripts.export_snapshot</code>, writing public/demo/network.json and
+                  public/demo/snapshot.json. Then press Retry.
                 </p>
                 <div className="mt-3 flex justify-end">
                   <Button size="sm" variant="primary" icon={<RotateCw className="size-3.5" />} onClick={() => void bootstrap()}>

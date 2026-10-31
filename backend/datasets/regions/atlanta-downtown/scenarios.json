@@ -1,0 +1,119 @@
+[
+  {
+    "id": "A-DS-FIVEPOINTS",
+    "name": "DS Five Points substation failure",
+    "scenario_type": "power_failure",
+    "description": "DS-2 Five Points (simulated) trips. Its three radial feeders lose supply; normally-open ties to Centennial, Capitol and Peachtree Center can only pick up part of the load, and the outage cascades into water pumping, telecom, signals and MARTA.",
+    "scenario": {
+      "scenario_id": "A-DS-FIVEPOINTS",
+      "name": "DS Five Points substation failure",
+      "scenario_type": "power_failure",
+      "failed_nodes": [
+        "PWR-DS-FIVEPOINTS"
+      ],
+      "failed_edges": [],
+      "horizon_hours": 4.0,
+      "enable_restoration": true,
+      "max_cascade_rounds": 8
+    },
+    "focus_node_id": "PWR-DS-FIVEPOINTS"
+  },
+  {
+    "id": "B-MARIETTA-DUCTBANK",
+    "name": "Excavation strike on Marietta St duct bank",
+    "scenario_type": "corridor_strike",
+    "description": "A contractor strikes the shared Marietta St duct bank between Broad St and Spring St, cutting every cable it hosts at once: a Five Points power feeder and the west fibre ring (common-cause failure).",
+    "scenario": {
+      "scenario_id": "B-MARIETTA-DUCTBANK",
+      "name": "Excavation strike on Marietta St duct bank",
+      "scenario_type": "corridor_strike",
+      "failed_nodes": [],
+      "failed_edges": [
+        "UGD-DB-01"
+      ],
+      "horizon_hours": 4.0,
+      "enable_restoration": true,
+      "max_cascade_rounds": 8
+    },
+    "focus_node_id": "UGD-VLT-01"
+  },
+  {
+    "id": "C-WATER-MAIN-DECATUR",
+    "name": "Transmission main break on Decatur St",
+    "scenario_type": "water_rupture",
+    "description": "A transmission water main ruptures on Decatur St east of Five Points; crews must close isolation valves, cutting supply to part of the low-pressure grid.",
+    "scenario": {
+      "scenario_id": "C-WATER-MAIN-DECATUR",
+      "name": "Transmission main break on Decatur St",
+      "scenario_type": "water_rupture",
+      "failed_nodes": [],
+      "failed_edges": [
+        "WTR-MAIN-0019"
+      ],
+      "horizon_hours": 4.0,
+      "enable_restoration": true,
+      "max_cascade_rounds": 8
+    },
+    "focus_node_id": "WTR-JN-07"
+  },
+  {
+    "id": "D-TELECOM-56MARIETTA",
+    "name": "56 Marietta St carrier hotel outage",
+    "scenario_type": "telecom_outage",
+    "description": "The core interconnection facility at 56 Marietta St (real building; modelled connections simulated) goes dark. Dual-homed rings fail over to the east core; single-homed sites may not.",
+    "scenario": {
+      "scenario_id": "D-TELECOM-56MARIETTA",
+      "name": "56 Marietta St carrier hotel outage",
+      "scenario_type": "telecom_outage",
+      "failed_nodes": [
+        "TEL-IX-56MARIETTA"
+      ],
+      "failed_edges": [],
+      "horizon_hours": 4.0,
+      "enable_restoration": true,
+      "max_cascade_rounds": 8
+    },
+    "focus_node_id": "TEL-IX-56MARIETTA"
+  },
+  {
+    "id": "E-ROADS-FIVEPOINTS",
+    "name": "Five Points road closures",
+    "scenario_type": "road_disruption",
+    "description": "Emergency closure of Peachtree St, Marietta St and Edgewood Ave where they meet at Five Points; traffic detours around the core.",
+    "scenario": {
+      "scenario_id": "E-ROADS-FIVEPOINTS",
+      "name": "Five Points road closures",
+      "scenario_type": "road_disruption",
+      "failed_nodes": [],
+      "failed_edges": [
+        "TRN-RD-0056",
+        "TRN-RD-0102",
+        "TRN-RD-0153",
+        "TRN-RD-0154"
+      ],
+      "horizon_hours": 4.0,
+      "enable_restoration": true,
+      "max_cascade_rounds": 8
+    },
+    "focus_node_id": "TRN-INT-0070"
+  },
+  {
+    "id": "F-TS-SOUTH",
+    "name": "Loss of TS-South bulk supply",
+    "scenario_type": "power_failure",
+    "description": "The TS-South 115 kV bulk supply point (simulated) is lost. Its substations shift onto alternate transmission lines that were never sized to carry their full load.",
+    "scenario": {
+      "scenario_id": "F-TS-SOUTH",
+      "name": "Loss of TS-South bulk supply",
+      "scenario_type": "power_failure",
+      "failed_nodes": [
+        "PWR-TS-SOUTH"
+      ],
+      "failed_edges": [],
+      "horizon_hours": 4.0,
+      "enable_restoration": true,
+      "max_cascade_rounds": 8
+    },
+    "focus_node_id": "PWR-TS-SOUTH"
+  }
+]

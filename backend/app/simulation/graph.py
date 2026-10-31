@@ -192,6 +192,10 @@ class NetworkGraphs:
         nm = self.name(item_id)
         return item_id if not nm or nm == item_id else f"{item_id} ({nm})"
 
+    def cc_phrase(self, src: str) -> str:
+        """How a common-cause source is named: 'corridor X (..)' or 'utility vault Y (..)'."""
+        return f"corridor {self.label(src)}" if src in self.edges else f"utility vault {self.label(src)}"
+
     def nprop(self, nid: str, *keys: str, default: Any = None) -> Any:
         props = self.nodes[nid].properties
         for k in keys:
@@ -217,7 +221,7 @@ class NetworkGraphs:
         return as_float(self.nprop(nid, "backup_power_hours", "backup_hours"), 0.0) or 0.0
 
     def water_backup_hours(self, nid: str) -> float:
-        return as_float(self.nprop(nid, "water_storage_hours"), 0.0) or 0.0
+        return as_float(self.nprop(nid, "water_storage_hours", "water_backup_hours"), 0.0) or 0.0
 
     def population(self, nid: str) -> float:
         """Residents/occupants associated with a service node (0 if unknown)."""

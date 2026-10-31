@@ -2,7 +2,7 @@
 import { ChevronLeft, ChevronRight, RotateCcw, X } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useStore } from "@/lib/store";
-import { Button, cx, IconButton, Kbd, Spinner, Tooltip } from "./ui";
+import { Button, cx, IconButton, Spinner, Tooltip } from "./ui";
 
 /** Guided walkthrough controller (top-centre while demo mode is active). */
 export function DemoBar() {
@@ -89,6 +89,7 @@ export function DemoBar() {
                 </motion.div>
               </AnimatePresence>
             </div>
+            <Tooltip label="Next step" shortcut="→">
             <Button
               size="sm"
               variant={demo.step === script.steps.length - 1 ? "subtle" : "primary"}
@@ -99,11 +100,7 @@ export function DemoBar() {
               {demo.step === script.steps.length - 1 ? "Done" : "Next"}
               {demo.step < script.steps.length - 1 && <ChevronRight className="size-3.5" />}
             </Button>
-          </div>
-          <div className="flex items-center justify-end gap-1.5 px-3 pb-1.5 text-[9.5px] text-ink-500">
-            <Kbd>←</Kbd>
-            <Kbd>→</Kbd>
-            <span>navigate · Restore world is always in the toolbar</span>
+            </Tooltip>
           </div>
         </motion.div>
       )}

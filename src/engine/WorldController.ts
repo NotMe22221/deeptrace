@@ -239,14 +239,16 @@ export class WorldController {
     if (scene.sun) scene.sun.show = false;
     if (scene.moon) scene.moon.show = false;
     if (scene.skyAtmosphere) {
-      scene.skyAtmosphere.hueShift = -0.02;
-      scene.skyAtmosphere.saturationShift = -0.25;
-      scene.skyAtmosphere.brightnessShift = -0.42;
+      scene.skyAtmosphere.perFragmentAtmosphere = true;
+      scene.skyAtmosphere.hueShift = 0.0;
+      scene.skyAtmosphere.saturationShift = -0.1;
+      scene.skyAtmosphere.brightnessShift = -0.3;
     }
+    // dusk: the atmosphere is lit by the real sun at a fixed evening time (blue hour over the city)
     const atmo = scene.atmosphere;
-    atmo.dynamicLighting = C.DynamicAtmosphereLightingType.NONE;
-    atmo.brightnessShift = -0.35;
-    atmo.saturationShift = -0.25;
+    atmo.dynamicLighting = C.DynamicAtmosphereLightingType.SUNLIGHT;
+    atmo.brightnessShift = -0.3;
+    atmo.saturationShift = -0.2;
     atmo.hueShift = 0.0;
     scene.fog.enabled = true;
     scene.fog.density = 2.4e-4;
@@ -259,7 +261,7 @@ export class WorldController {
     ssc.maximumZoomDistance = 2.5e7;
     ssc.enableCollisionDetection = true;
     // a fixed evening for anything that still reads the clock
-    this.viewer.clock.currentTime = C.JulianDate.fromIso8601("2026-10-31T22:40:00Z");
+    this.viewer.clock.currentTime = C.JulianDate.fromIso8601("2026-10-31T23:02:00Z");
     this.viewer.clock.shouldAnimate = false;
 
     // saturation-gated bloom + vignette / grade

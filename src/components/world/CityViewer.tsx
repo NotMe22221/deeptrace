@@ -55,6 +55,8 @@ export function CityViewer() {
 
   return (
     <div className="absolute inset-0 overflow-hidden bg-ink-950">
+      {/* attribution stays visible, moved bottom-right (below the right column / camera cluster) */}
+      <style>{`.dt-world .cesium-viewer-bottom{left:auto!important;right:10px!important;bottom:6px!important;padding:0!important;text-align:right}`}</style>
       <div ref={ref} className="dt-world absolute inset-0" />
       <WorldTooltip />
       <WorldOverlay />

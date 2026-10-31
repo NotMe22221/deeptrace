@@ -172,7 +172,7 @@ function ScenarioLibrary({ tab, setTab }: { tab: ScenarioType; setTab: (t: Scena
   const tabs = counts.custom ? [...TYPE_TABS, { type: "custom" as const, label: "Custom", Icon: FlaskConical, color: "#94a3b8" }] : TYPE_TABS;
   const list = presets.filter((p) => p.scenario_type === tab);
   return (
-    <div className="flex min-h-0 flex-col">
+    <div className="flex flex-col @3xl:min-h-0">
       <div role="tablist" aria-label="Scenario type" className="dt-scroll -mx-0.5 flex shrink-0 gap-1 overflow-x-auto px-0.5 pb-2">
         {tabs.map(({ type, label, Icon, color }) => {
           const active = tab === type;
@@ -195,7 +195,7 @@ function ScenarioLibrary({ tab, setTab }: { tab: ScenarioType; setTab: (t: Scena
           );
         })}
       </div>
-      <div className="dt-scroll min-h-0 flex-1 overflow-y-auto">
+      <div className="dt-scroll @3xl:min-h-0 @3xl:flex-1 @3xl:overflow-y-auto">
         {list.length ? (
           <div className="grid grid-cols-1 gap-1.5 @xl:grid-cols-2">
             {list.map((p) => (
@@ -238,7 +238,7 @@ function DraftBuilder() {
     void runSimulation(undefined, slot);
   };
   return (
-    <div className="flex min-h-0 flex-col rounded-lg border border-white/[0.07] bg-white/[0.02] p-2.5">
+    <div className="flex flex-col rounded-lg border border-white/[0.07] bg-white/[0.02] p-2.5 @3xl:min-h-0">
       <SectionLabel
         right={
           !empty && (
@@ -405,7 +405,7 @@ export function SimulationPanel({ narrow }: { narrow?: boolean }) {
       transition={{ duration: 0.2, ease: [0.2, 0.8, 0.2, 1] }}
       className={cx(
         "dt-panel pointer-events-auto relative @container/dock flex w-full flex-col overflow-hidden",
-        narrow ? "h-[62vh]" : "h-[min(360px,46vh)] min-h-[260px]",
+        narrow ? "h-[62vh]" : "h-[min(340px,40vh)] min-h-[240px]",
       )}
     >
       {simStatus === "running" && (
@@ -467,10 +467,10 @@ export function SimulationPanel({ narrow }: { narrow?: boolean }) {
               transition={{ duration: 0.12 }}
               className="dt-scroll grid h-full grid-cols-1 gap-3 overflow-y-auto p-3 @3xl:grid-cols-[1fr_300px] @3xl:overflow-hidden"
             >
-              <div className="flex min-h-0 flex-col">
+              <div className="flex flex-col @3xl:min-h-0">
                 <ScenarioLibrary tab={scenarioTab.tab} setTab={scenarioTab.setTab} />
               </div>
-              <div className="flex min-h-0 flex-col">
+              <div className="flex flex-col @3xl:min-h-0">
                 <DraftBuilder />
               </div>
             </motion.div>
@@ -483,10 +483,10 @@ export function SimulationPanel({ narrow }: { narrow?: boolean }) {
               transition={{ duration: 0.12 }}
               className="dt-scroll grid h-full grid-cols-1 overflow-y-auto @xl:grid-cols-[240px_1fr] @xl:overflow-hidden @4xl:grid-cols-[250px_1fr_270px]"
             >
-              <div className="dt-scroll min-h-0 border-white/[0.06] p-3 @xl:overflow-y-auto @xl:border-r">
+              <div className="dt-scroll border-white/[0.06] p-3 @xl:min-h-0 @xl:overflow-y-auto @xl:border-r">
                 <ResultOverview result={result} />
               </div>
-              <div className="dt-scroll min-h-0 p-3 @xl:overflow-y-auto">
+              <div className="dt-scroll p-3 @xl:min-h-0 @xl:overflow-y-auto">
                 <CascadeTimeline result={result} />
                 <div className="mt-3 @4xl:hidden">
                   <ResultDetails result={result} />

@@ -148,6 +148,9 @@ export class CameraDirector {
     });
   }
 
+  /** Deep view framing (exposed for tuning). Heights are fractions of the displayed max depth. */
+  deepView = { headingDeg: 22, distK: 0.82, camBelowK: 0.1, camAboveM: 0, targetK: 0.5 };
+
   /** Oblique cross-section vantage just under the surface, looking across the layered district. */
   flyToDeepView(opts?: { duration?: number }) {
     const C = this.C;
@@ -160,14 +163,15 @@ export class CameraDirector {
     const cy = (y0 + y1) / 2;
     const span = Math.max(x1 - x0, y1 - y0, 600);
     const maxDepth = Math.max(40, g.maxDisplayDepth(this.ctx.depthScale()));
-    const heading = 18 * D2R; // looking NNE across the grid
-    const dist = span * 0.78;
+    const t = this.deepView;
+    const heading = t.headingDeg * D2R;
+    const dist = span * t.distK;
     const camX = cx - Math.sin(heading) * dist;
     const camY = cy - Math.cos(heading) * dist;
     const [lon, lat] = f.toLonLat(camX, camY);
-    const camH = f.height + Math.min(span * 0.2, 340) - maxDepth * 0.15;
-    // aim at a point below the district centre so every stratum is in frame
-    const targetH = f.height - maxDepth * 0.55;
+    const camH = f.height - maxDepth * t.camBelowK + t.camAboveM;
+    // aim below the district centre so every stratum sits in frame
+    const targetH = f.height - maxDepth * t.targetK;
     const pitch = Math.atan2(targetH - camH, dist);
     this.camera.flyTo({
       destination: C.Cartesian3.fromDegrees(lon, lat, camH),

@@ -316,6 +316,9 @@
     {"id": "FAC-PEACHTREECENTER", "landmark": "PEACHTREECENTER-COMPLEX", "critical": false, "occupancy": 12000, "backup_power_hours": 4, "water_storage_hours": 2}
   ],
   "transport": {
+    "named_places": [
+      {"name": "Five Points", "at": "Peachtree St & Edgewood Ave", "near": [33.7546, -84.3902]}
+    ],
     "gateways": [
       {"id": "TRN-GW-I75-85-N", "name": "Downtown Connector north gateway", "near": [33.774, -84.391], "connects_to": "I-75/I-85 north (Midtown)"},
       {"id": "TRN-GW-I75-85-S", "name": "Downtown Connector south gateway", "near": [33.7425, -84.3848], "connects_to": "I-75/I-85 south"},

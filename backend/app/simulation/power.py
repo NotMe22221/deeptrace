@@ -2,14 +2,15 @@
 
 Model (deliberately simple and explainable — *no AC power flow*):
 
-1. **Energisation** – multi-source BFS from every operating ``transmission_substation``
-   over closed, operational elements. Normally-open elements (``tie_line`` edges with
-   status ``normally_open`` / ``properties.normally_open`` and ``switch`` nodes with
-   ``properties.normally_open``) are excluded. The BFS tree is the radial supply path;
-   every reached node knows its supplying distribution substation (``ds_of``) and
-   transmission source (``root_of``). Neighbours are visited in sorted order, so a
-   substation fed from two transmission sources is assigned to the first one reached
-   (deterministic).
+1. **Energisation** – multi-source shortest-path search (Dijkstra, ties broken by id)
+   from every operating ``transmission_substation`` over closed, operational elements.
+   Normally-open elements (``tie_line`` edges with status ``normally_open`` /
+   ``properties.normally_open`` and ``switch`` nodes with ``properties.normally_open``)
+   are excluded. Each hop costs 1; lines whose ``properties.role`` says alternate /
+   standby cost +100 (they only carry load when the primary path is lost) and larger
+   capacity wins ties. The resulting tree is the radial supply path: every reached node
+   knows its supplying distribution substation (``ds_of``) and transmission source
+   (``root_of``).
 2. **Restoration** (``scenario.enable_restoration``) – each de-energised island (connected
    component of the closed graph) is offered every normally-open *tie unit* (an open
    switch plus its incident edges, or a lone open edge) that joins it to an energised
@@ -17,18 +18,20 @@ Model (deliberately simple and explainable — *no AC power flow*):
    rating − served load). If headroom ≥ island load the whole island is restored;
    otherwise vaults are restored greedily in priority order (critical consumers first,
    then larger loads) as long as the energised path from the tie still fits — the
-   rest is sectionalised off and stays de-energised.
+   rest is sectionalised off and stays de-energised. The supplying substation's
+   transmission line headroom is checked too.
 3. **SCADA** – a tie whose switch has a ``control_link`` provider that is down can only
    be closed by a crew: allowed when ``horizon_hours ≥ manual_switch_hours`` (default
    3 h). Ties without a control link are assumed remotely controlled.
-4. **Loading** – the load of a substation is the sum of served demand below it in the
-   supply tree (radial approximation, unity power factor, no losses). Above 100 % of
-   rating the substation is ``overloaded``; above the 120 % emergency limit it trips
-   (the cascade orchestrator fails it in the next round).
+4. **Loading** – the load of a substation or line is the sum of served demand below it
+   in the supply tree (radial approximation, unity power factor, no losses). Above
+   100 % of rating it is ``overloaded``; substations and transmission lines above the
+   120 % emergency limit trip (the cascade orchestrator fails them in the next round).
 """
 
 from __future__ import annotations
 
+import heapq
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -37,6 +40,9 @@ from app.simulation.graph import INF, NetworkGraphs, as_bool, as_float
 
 EMERGENCY_LIMIT = 1.2
 DEFAULT_MANUAL_SWITCH_HOURS = 3.0
+ALTERNATE_PENALTY = 100.0  # supply-path cost of an alternate/standby line (used only when needed)
+ALTERNATE_ROLES = ("alternate", "standby", "backup", "secondary", "emergency")
+TRIPPABLE_EDGE_TYPES = frozenset({"transmission_line"})
 SUBSTATION_TYPES = frozenset({"transmission_substation", "distribution_substation"})
 
 
@@ -102,6 +108,8 @@ class PowerResult:
     recovered: float
     restored_load: float
     blocked_ties: dict[str, str] = field(default_factory=dict)
+    line_overloaded: dict[str, float] = field(default_factory=dict)
+    trip_edges: dict[str, float] = field(default_factory=dict)
 
 
 class PowerModel:
@@ -151,6 +159,15 @@ class PowerModel:
             if not ed.directed:
                 adj[v].append((u, e))
         self.adj = {n: sorted(lst) for n, lst in adj.items()}
+        self.cost: dict[str, float] = {}
+        for e in self.edges:
+            role = str(g.edges[e].properties.get("role", "")).lower()
+            cap = self.edge_cap.get(e)
+            self.cost[e] = (
+                1.0
+                + (ALTERNATE_PENALTY if any(r in role for r in ALTERNATE_ROLES) else 0.0)
+                + (1e-3 / cap if cap and cap > 0 else 1e-3)
+            )
 
         # tie units (union-find over open switches and open/attached edges)
         uf: dict[str, str] = {}
@@ -337,7 +354,9 @@ class PowerModel:
             corr = dict(inp.common_cause).get(cid)
             kind = g.edges[cid].connection_type.replace("_", " ")
             if corr:
-                return f"{kind} {g.label(cid)} failed (common-cause damage in corridor {g.label(corr)})"
+                return f"{kind} {g.label(cid)} failed (common-cause damage in {g.cc_phrase(corr)})"
+            if cid in inp.tripped:
+                return f"{kind} {g.label(cid)} tripped on overload protection"
             return f"{kind} {g.label(cid)} failed"
         if cid in inp.tripped:
             return f"{g.label(cid)} tripped on overload protection"
@@ -350,10 +369,16 @@ class PowerModel:
         cid = self._culprit(n, fn, inp.failed_edges)
         ds = self.baseline.ds_of.get(n)
         feeder = self.base_feeder.get(n)
-        via = f"feeder {feeder} from {g.label(ds)}" if feeder and ds else (g.label(ds) if ds else "its transmission source")
+        root = self.baseline.root_of.get(n)
+        if ds == n or ds is None:
+            via = f"transmission supply from {g.label(root)}" if root and root != n else "supply"
+        elif feeder:
+            via = f"supply via feeder {feeder} from {g.label(ds)}"
+        else:
+            via = f"supply from {g.label(ds)}"
         if cid is None:
-            return f"supply via {via} lost (no closed path to an operating transmission source)", ()
-        return f"supply via {via} lost because {self._culprit_text(cid, inp)}", (cid,)
+            return f"{via} lost (no closed path to an operating transmission source)", ()
+        return f"{via} lost because {self._culprit_text(cid, inp)}", (cid,)
 
     # ------------------------------------------------------------------ evaluate
     def evaluate(self, inp: PowerInputs) -> PowerResult:
@@ -366,24 +391,30 @@ class PowerModel:
         root_of: dict[str, str] = {}
         ds_of: dict[str, str | None] = {}
         order: list[str] = []
-        q: deque[str] = deque()
+        dist: dict[str, float] = {}
+        heap: list[tuple[float, str, str | None, str | None]] = []
         for s in self.sources:
-            if s in fn:
+            if s not in fn:
+                heapq.heappush(heap, (0.0, s, None, None))
+        while heap:
+            d, u, p, e = heapq.heappop(heap)
+            if u in parent:
                 continue
-            parent[s] = (None, None)
-            root_of[s] = s
-            ds_of[s] = s if t[s] == "distribution_substation" else None
-            q.append(s)
-        while q:
-            u = q.popleft()
+            parent[u] = (p, e)
+            if p is None:
+                root_of[u] = u
+                ds_of[u] = u if t[u] == "distribution_substation" else None
+            else:
+                root_of[u] = root_of[p]
+                ds_of[u] = u if t[u] == "distribution_substation" else ds_of[p]
             order.append(u)
-            for v, e in self.adj[u]:
-                if v in parent or v in fn or e in fe:
+            for v, e2 in self.adj[u]:
+                if v in parent or v in fn or e2 in fe:
                     continue
-                parent[v] = (u, e)
-                root_of[v] = root_of[u]
-                ds_of[v] = v if t[v] == "distribution_substation" else ds_of[u]
-                q.append(v)
+                nd = d + self.cost[e2]
+                if nd < dist.get(v, float("inf")) - 1e-12:
+                    dist[v] = nd
+                    heapq.heappush(heap, (nd, v, u, e2))
         energized0 = set(parent)
         deen0 = {n for n in self.nodes if n not in parent and n not in fn and n not in self.open_nodes}
         load0 = self._subtree_loads(order, parent)
@@ -404,13 +435,20 @@ class PowerModel:
             ts = root_of.get(sup)
             if ds is not None and self.cap.get(ds):
                 limits.append((self.cap[ds] - cur_load[ds], f"spare capacity of {g.label(ds)}"))  # type: ignore[operator]
+            if ds is not None and ds in parent and parent[ds][1] is not None:
+                line = parent[ds][1]
+                lcap = self.edge_cap.get(line)  # type: ignore[arg-type]
+                if lcap:
+                    limits.append((lcap - cur_load.get(ds, 0.0), f"spare capacity of transmission line {line}"))
             if ts is not None and ts != ds and self.cap.get(ts):
                 limits.append((self.cap[ts] - cur_load[ts], f"spare capacity of {g.label(ts)}"))  # type: ignore[operator]
             return min(limits, key=lambda x: x[0])
 
         if deen0 and inp.restoration:
             for _ in range(len(self.units) + 1):
-                remaining = deen0 - set(restored_order)
+                # substations are boundaries: their buses are not back-fed through feeder ties
+                done = set(restored_order)
+                remaining = {n for n in deen0 if n not in done and t[n] not in SUBSTATION_TYPES}
                 if not remaining:
                     break
                 progress = False
@@ -574,6 +612,15 @@ class PowerModel:
             if e not in flows:
                 flows[e] = FlowRec(0, 0.0, 0.0, "MW")
 
+        line_over: dict[str, float] = {}
+        trip_edges: dict[str, float] = {}
+        for e in self.edges:
+            u = flows[e].utilization
+            if u > 1.0 + 1e-6 and e not in fe:
+                line_over[e] = u
+                if g.edges[e].connection_type in TRIPPABLE_EDGE_TYPES and u > EMERGENCY_LIMIT + 1e-9:
+                    trip_edges[e] = u
+
         # edge states -------------------------------------------------------
         used_edges = {e for ui in used_units for e in self.units[ui].edges}
         edge_out: dict[str, EdgeOutcome] = {}
@@ -595,16 +642,60 @@ class PowerModel:
             elif u not in energized or v not in energized:
                 edge_out[e] = EdgeOutcome("interrupted", "De-energised section (no path to an operating source)")
             elif flows[e].utilization > 1.0 + 1e-6:
+                bl = self.baseline.flows.get(e) if hasattr(self, "baseline") else None
                 edge_out[e] = EdgeOutcome(
-                    "overloaded", f"Carries {fmt_num(flows[e].flow)} MW = {flows[e].utilization * 100:.0f}% of rating"
+                    "overloaded",
+                    f"Carries {fmt_num(flows[e].flow)} MW = {flows[e].utilization * 100:.0f}% of its "
+                    f"{fmt_num(self.edge_cap[e] or 0)} MW rating"
+                    + (f" (baseline {bl.utilization * 100:.0f}%)" if bl is not None else "")
+                    + (
+                        f" — above the {EMERGENCY_LIMIT * 100:.0f}% emergency limit, protective trip follows"
+                        if e in trip_edges
+                        else ""
+                    ),
                 )
 
         # node states -------------------------------------------------------
+        # nodes that were re-supplied over an alternative path that a trip then removed
+        trip_note: dict[str, str] = {}
+        if inp.tripped and deen:
+            pre_fn = fn - inp.tripped
+            pre_fe = fe - inp.tripped
+            pre_parent: dict[str, tuple[str | None, str | None]] = {}
+            pq: deque[str] = deque()
+            for s in self.sources:
+                if s not in pre_fn:
+                    pre_parent[s] = (None, None)
+                    pq.append(s)
+            while pq:
+                u = pq.popleft()
+                for v, e in self.adj[u]:
+                    if v not in pre_parent and v not in pre_fn and e not in pre_fe:
+                        pre_parent[v] = (u, e)
+                        pq.append(v)
+            for n in deen:
+                cur: str | None = n
+                while cur is not None and cur in pre_parent:
+                    up, via = pre_parent[cur]
+                    hit = cur if cur in inp.tripped else (via if via in inp.tripped else None)
+                    if hit is not None:
+                        if self._culprit(n, fn, fe) != hit:
+                            trip_note[n] = hit
+                        break
+                    cur = up
+
         node_out: dict[str, NodeOutcome] = {}
         for n in sorted(deen):
             loss, cb = self._loss_text(n, inp, fn)
+            if n in trip_note:
+                loss += (
+                    f"; the alternative supply through {g.label(trip_note[n])} was then lost when it tripped on overload"
+                )
+                cb = cb + (trip_note[n],)
             if not inp.restoration:
                 extra, extra_ids = "automatic restoration is disabled for this scenario", ()
+            elif t[n] in SUBSTATION_TYPES:
+                extra, extra_ids = "substation buses are not back-fed through distribution ties", ()
             elif n in partial_note:
                 extra, extra_ids = partial_note[n]
             else:
@@ -704,4 +795,6 @@ class PowerModel:
             recovered=recovered,
             restored_load=sum(a.restored_load for a in actions),
             blocked_ties=blocked_ties,
+            line_overloaded=line_over,
+            trip_edges=trip_edges,
         )

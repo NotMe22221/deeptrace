@@ -54,6 +54,7 @@ function StatusChip({
   tone: Tone;
   detail: string;
   showLabel: boolean;
+  short?: string;
 }) {
   const c = TONE_COLOR[tone];
   return (
@@ -80,49 +81,54 @@ function useStatus() {
   const snapshot = useStore((s) => s.snapshot);
   const ws = useStore((s) => s.worldStatus);
 
-  const engine: { value: string; tone: Tone; detail: string } =
+  const engine: { value: string; short: string; tone: Tone; detail: string } =
     dataMode === "live"
       ? {
           value: `Live · v${health?.version ?? "?"}`,
+          short: "Live",
           tone: "ok",
           detail: `Connected to the DEEPTRACE simulation engine (v${health?.version ?? "?"}). Any scenario can be simulated.`,
         }
       : dataMode === "snapshot"
         ? {
             value: "Offline snapshot",
+            short: "Snapshot",
             tone: "warn",
             detail: snapshot
               ? `Engine offline — using precomputed results exported by engine v${snapshot.engine_version}. Only preset and single-component scenarios are available.`
               : "Engine offline and no precomputed results — exploring the network only. Start the backend to simulate.",
           }
         : dataMode === "loading"
-          ? { value: "Connecting", tone: "busy", detail: "Connecting to the simulation engine…" }
-          : { value: "Error", tone: "error", detail: "No engine and no offline snapshot could be loaded." };
+          ? { value: "Connecting", short: "Connecting", tone: "busy", detail: "Connecting to the simulation engine…" }
+          : { value: "Error", short: "Error", tone: "error", detail: "No engine and no offline snapshot could be loaded." };
 
-  const city: { value: string; tone: Tone; detail: string } =
+  const city: { value: string; short: string; tone: Tone; detail: string } =
     ws.buildings === "ion-osm"
-      ? { value: "OSM Buildings", tone: "ok", detail: "3D buildings: Cesium OSM Buildings (© OpenStreetMap contributors)." }
+      ? { value: "OSM Buildings", short: "3D city", tone: "ok", detail: "3D buildings: Cesium OSM Buildings (© OpenStreetMap contributors)." }
       : ws.buildings === "unavailable"
         ? {
             value: ws.ionToken ? "Buildings unavailable" : "No buildings",
+            short: "No 3D",
             tone: "idle",
             detail: ws.ionToken
               ? `3D buildings could not be loaded${ws.message ? `: ${ws.message}` : "."}`
               : "3D buildings unavailable — no Cesium ion token configured (NEXT_PUBLIC_CESIUM_ION_TOKEN). The network still renders on the globe.",
           }
-        : { value: "Loading city", tone: "busy", detail: "Loading the 3D city…" };
+        : { value: "Loading city", short: "City…", tone: "busy", detail: "Loading the 3D city…" };
 
-  const ai: { value: string; tone: Tone; detail: string } =
+  const ai: { value: string; short: string; tone: Tone; detail: string } =
     dataMode !== "live"
-      ? { value: "Analyst offline", tone: "idle", detail: "The AI analyst needs the live engine so it can call simulation tools." }
+      ? { value: "Analyst offline", short: "AI off", tone: "idle", detail: "The AI analyst needs the live engine so it can call simulation tools." }
       : health?.llm_available
         ? {
             value: prettyModel(health.llm_model),
+            short: "Claude",
             tone: "ok",
             detail: `AI analyst powered by ${prettyModel(health.llm_model)} with DEEPTRACE tool access.`,
           }
         : {
             value: "Offline analyst",
+            short: "AI no-LLM",
             tone: "warn",
             detail: "No LLM key configured — the analyst answers deterministically from engine tools (no LLM).",
           };
@@ -148,7 +154,8 @@ export function MainToolbar() {
   const [menuOpen, setMenuOpen] = useState(false);
   const showLabels = width >= 1700;
   const showChipLabels = width >= 1820;
-  const showRegion = width >= 1180;
+  const showRegion = width >= 1360;
+  const shortChips = width < 1440;
 
   const region = network?.region;
 
@@ -169,7 +176,13 @@ export function MainToolbar() {
             <Search className="size-4" />
           </IconButton>
           <DeepModeToggle compact />
-          <IconButton label={menuOpen ? "Close menu" : "Open menu"} onClick={() => setMenuOpen((v) => !v)} pressed={menuOpen}>
+          <IconButton
+            label={menuOpen ? "Close menu" : "Open menu"}
+            onClick={() => setMenuOpen((v) => !v)}
+            pressed={menuOpen}
+            data-menu-toggle=""
+            aria-expanded={menuOpen}
+          >
             {menuOpen ? <X className="size-4" /> : <Menu className="size-4" />}
           </IconButton>
         </div>
@@ -214,9 +227,9 @@ export function MainToolbar() {
         )}
         <span className="h-6 w-px bg-white/[0.08]" />
         <div className="flex items-center gap-1.5">
-          <StatusChip label="ENGINE" {...status.engine} showLabel={showChipLabels} />
-          <StatusChip label="3D CITY" {...status.city} showLabel={showChipLabels} />
-          <StatusChip label="AI" {...status.ai} showLabel={showChipLabels} />
+          <StatusChip label="ENGINE" {...status.engine} value={shortChips ? status.engine.short : status.engine.value} showLabel={showChipLabels} />
+          <StatusChip label="3D CITY" {...status.city} value={shortChips ? status.city.short : status.city.value} showLabel={showChipLabels} />
+          <StatusChip label="AI" {...status.ai} value={shortChips ? status.ai.short : status.ai.value} showLabel={showChipLabels} />
         </div>
       </div>
 
@@ -318,12 +331,19 @@ function NarrowMenu({
   const panels = useStore((s) => s.panels);
   useEffect(() => {
     const onDown = (e: PointerEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+      const t = e.target as HTMLElement;
+      if (t.closest?.("[data-menu-toggle]")) return;
+      if (ref.current && !ref.current.contains(t)) onClose();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
     };
     const t = setTimeout(() => window.addEventListener("pointerdown", onDown), 0);
+    window.addEventListener("keydown", onKey);
     return () => {
       clearTimeout(t);
       window.removeEventListener("pointerdown", onDown);
+      window.removeEventListener("keydown", onKey);
     };
   }, [onClose]);
   const item = (label: string, Icon: typeof FlaskConical, onClick: () => void, active?: boolean, disabled?: boolean) => (

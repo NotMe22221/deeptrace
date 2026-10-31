@@ -33,10 +33,12 @@ from app.networks.geo import (
     LocalProjection,
     LonLat,
     dedupe_consecutive,
+    nearest_point_on_polyline,
     nearest_point_on_polyline_xy,
     offset_polyline,
     polyline_length_m,
     segment_intersection,
+    substring,
 )
 
 MOTORWAY_CLASSES = frozenset({"motorway", "trunk"})
@@ -153,6 +155,23 @@ class StreetEdge:
 
 
 @dataclass
+class Access:
+    """One way for an off-street point to join the street graph.
+
+    ``geometry`` runs from the point to street node ``node`` (a perpendicular service drop
+    to ``edge`` and then along it); ``cost`` is the weighted access length in metres.
+    """
+
+    node: str
+    cost: float
+    geometry: list[LonLat]
+    edge: str | None = None
+    along: float = 0.0  # position of the drop along the edge's canonical (u -> v) direction
+    dist: float = 0.0  # straight length of the drop
+    traversed: float = 0.0  # length of street edge travelled to reach ``node``
+
+
+@dataclass
 class _Split:
     feature: int
     pos: float  # vertex index + fraction along the following segment
@@ -249,6 +268,40 @@ class StreetGraph:
                 best = key
         return best[1] if best else None
 
+    def nearest_nodes(self, point: Sequence[float], k: int = 4, *, surface_only: bool = True) -> list[str]:
+        """The ``k`` nearest graph nodes to ``(lon, lat)``, closest first (ties by id)."""
+        pool = self.surface_graph.nodes if surface_only else self.graph.nodes
+        p = self.projection.to_xy(point)
+        scored = []
+        for nid in pool:
+            q = self.projection.to_xy(self.nodes[nid].point)
+            scored.append((round(math.hypot(p[0] - q[0], p[1] - q[1]), 3), nid))
+        return [nid for _, nid in sorted(scored)[:k]]
+
+    def access_options(
+        self, point: Sequence[float], *, offset_m: float = 0.0, k_edges: int = 3, drop_weight: float = 1.5
+    ) -> list[Access]:
+        """Ways for an off-street point to join the surface network via its nearest street edges."""
+        scored = []
+        for eid in sorted(self.edges):
+            e = self.edges[eid]
+            if e.is_highway or e.u not in self.surface_graph:
+                continue
+            geom = self.edge_geometry(eid, e.u, offset_m)
+            proj, dist, along = nearest_point_on_polyline(point, geom, self.projection)
+            scored.append((round(dist, 3), eid, geom, proj, along))
+        scored.sort(key=lambda s: (s[0], s[1]))
+        start = (float(point[0]), float(point[1]))
+        out: list[Access] = []
+        for dist, eid, geom, proj, along in scored[:k_edges]:
+            e = self.edges[eid]
+            total = polyline_length_m(geom)
+            to_u = [start, proj] + list(reversed(substring(geom, 0.0, along)))[1:]
+            to_v = [start, proj] + substring(geom, along, total)[1:]
+            out.append(Access(e.u, drop_weight * dist + along, dedupe_consecutive(to_u), eid, along, dist, along))
+            out.append(Access(e.v, drop_weight * dist + total - along, dedupe_consecutive(to_v), eid, along, dist, total - along))
+        return out
+
     def edge_between(self, u: str, v: str) -> StreetEdge:
         return self.edges[self.graph.edges[u, v]["eid"]]
 
@@ -322,7 +375,7 @@ class StreetGraph:
         n = self.nodes[nid]
         names = n.names
         if len(names) >= 2:
-            return f"{names[0]} & {names[1]}"
+            return " & ".join(names)
         if names:
             return f"{names[0]} (end of mapped segment)"
         return nid

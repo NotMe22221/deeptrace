@@ -13,11 +13,13 @@ const DERIV = `#if (__VERSION__ == 300 || defined(GL_OES_standard_derivatives))
 
 /**
  * Glowing network line. params: x glow (0 flat .. 1 soft halo), y white-hot core, z dash mix,
- * w dash march speed (px/s, signed). Dashes are screen-space so they stay crisp at any zoom.
+ * w dash march speed (px/s, signed); shape: x dash period (px), y duty cycle (0..1).
+ * Dashes are screen-space so they stay crisp at any zoom.
  */
 const LINE_SRC = `
 uniform vec4 color;
 uniform vec4 params;
+uniform vec4 shape;
 uniform float time;
 in float v_polylineAngle;
 
@@ -40,9 +42,9 @@ czm_material czm_getMaterial(czm_materialInput materialInput)
   float a = clamp(body + halo, 0.0, 1.0) * color.a;
   if (params.z > 0.001) {
     vec2 pos = dtRot(v_polylineAngle) * gl_FragCoord.xy;
-    float dashLen = 13.0 * czm_pixelRatio;
+    float dashLen = shape.x * czm_pixelRatio;
     float ph = fract((pos.x - time * params.w * czm_pixelRatio) / dashLen);
-    float on = smoothstep(0.0, 0.07, ph) * (1.0 - smoothstep(0.52, 0.59, ph));
+    float on = smoothstep(0.0, 0.06, ph) * (1.0 - smoothstep(shape.y, shape.y + 0.06, ph));
     a *= mix(1.0, on, params.z);
   }
   if (a < 0.004) discard;
@@ -123,8 +125,8 @@ czm_material czm_getMaterial(czm_materialInput materialInput)
   float line = 1.0 - smoothstep(0.0, 0.04, min(f.x, f.y));
   float major = 0.0;
 #endif
-  float edge = min(min(st.x, 1.0 - st.x), min(st.y, 1.0 - st.y));
-  float fade = smoothstep(0.0, params.w, edge);
+  float rr = length(st - 0.5) * 2.0;
+  float fade = 1.0 - smoothstep(1.0 - params.w * 2.0, 1.0, rr);
   float a = (params.y + max(line * params.z, major * params.z * 1.6)) * fade * color.a;
   if (a < 0.003) discard;
   material.diffuse = vec3(0.0);
@@ -174,11 +176,22 @@ export function createMaterial(
     color: C.Color.clone(color),
     params: new C.Cartesian4(...params),
   };
-  if (kind === "line") uniforms.time = 0;
+  if (kind === "line") {
+    uniforms.time = 0;
+    uniforms.shape = new C.Cartesian4(13, 0.52, 0, 0);
+  }
   return new C.Material({
     fabric: { type: `Dt_${kind}`, uniforms, source: SOURCES[kind] },
     translucent: true,
   });
+}
+
+/** Dash period (px) and duty cycle of a line material. */
+export function setDash(m: Cesium.Material, period: number, duty: number) {
+  const p = m.uniforms.shape as Cesium.Cartesian4 | undefined;
+  if (!p) return;
+  p.x = period;
+  p.y = duty;
 }
 
 /** Mutate a material's params uniform in place (no allocation). */

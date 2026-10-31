@@ -5,7 +5,7 @@
  */
 import type * as Cesium from "cesium";
 import type { CesiumModule } from "@/engine/geographic/cesiumLoader";
-import { smoothstep } from "@/engine/geographic/LocalFrame";
+import { lerp, smoothstep } from "@/engine/geographic/LocalFrame";
 import { createMaterial, setParams } from "./materials";
 import type { NetworkGeometry } from "./NetworkGeometry";
 import { setColor, type RGB } from "./palette";
@@ -122,12 +122,13 @@ export class StrataLayer {
     this.last = key;
     const C = this.C;
     for (const p of this.planes) {
-      const a = p.surface ? smoothstep(0.05, 0.6, deepT) : smoothstep(0.35, 1, deepT);
+      // the surface grid stays faintly visible in surface mode as a reference plane
+      const a = p.surface ? lerp(0.32, 1, smoothstep(0.05, 0.6, deepT)) : smoothstep(0.35, 1, deepT);
       p.prim.show = a > 0.01;
       const offset = -p.depth * depthScale * deepT;
       C.Matrix4.fromTranslation(C.Cartesian3.multiplyByScalar(this.up, offset, this.tmp), p.prim.modelMatrix);
-      setColor(p.mat.uniforms.color, p.rgb, a * (p.surface ? 0.9 : 0.75));
-      setParams(p.mat, (p.mat.uniforms.params as Cesium.Cartesian4).x, p.surface ? 0.0 : 0.045, p.surface ? 0.26 : 0.2, 0.12);
+      setColor(p.mat.uniforms.color, p.rgb, a * (p.surface ? 0.75 : 0.6));
+      setParams(p.mat, (p.mat.uniforms.params as Cesium.Cartesian4).x, p.surface ? 0.0 : 0.04, p.surface ? 0.16 : 0.11, 0.2);
       if (p.label) {
         p.label.show = a > 0.2;
         p.label.position = C.Cartesian3.add(this.corner, C.Cartesian3.multiplyByScalar(this.up, offset, this.tmp), new C.Cartesian3());

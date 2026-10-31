@@ -14,7 +14,7 @@ import { smoothstep } from "@/engine/geographic/LocalFrame";
 import type { DisplayModel, NodeVisual } from "./displayState";
 import type { PickId } from "./EdgeRenderer";
 import { glowSprite, ICON_PX, iconKey, iconTier, nodeIcon, reticleSprite, ringSprite, type IconTier } from "./icons";
-import { createMaterial, setParams } from "./materials";
+import { createMaterial, setDash, setParams } from "./materials";
 import type { NetworkGeometry, NodeGeom } from "./NetworkGeometry";
 import { rgbToHex, setColor } from "./palette";
 
@@ -394,6 +394,7 @@ export class NodeRenderer {
       if (dshow) {
         setColor(e.dropMat.uniforms.color, v.impacted ? v.rgb : [0.62, 0.72, 0.86], 0.42 * deep * v.alpha);
         setParams(e.dropMat, 0, 0, 1, 0);
+        setDash(e.dropMat, 5, 0.45);
       }
     }
   }

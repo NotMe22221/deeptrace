@@ -258,6 +258,8 @@ class Report:
             )
         for s, frac in sorted(p.overloaded.items()):
             notes.append(f"{s} loaded to {frac * 100:.0f}% of rating")
+        for e, frac in sorted(p.line_overloaded.items()):
+            notes.append(f"line {e} loaded to {frac * 100:.0f}% of rating")
         for s, (r, frac) in sorted(oc.tripped.items()):
             notes.append(f"{s} tripped at {frac * 100:.0f}% (> {EMERGENCY_LIMIT * 100:.0f}% emergency limit)")
         for uid, why in sorted(p.blocked_ties.items()):
@@ -483,8 +485,11 @@ class Report:
             elif rec.trips:
                 trip_names = join_names([g.name(s) for s, _ in rec.trips], 2)
                 pct_txt = ", ".join(f"{frac * 100:.0f}%" for _s, frac in rec.trips)
-                rest = self._group_fragments([f for f in frags if not (f[0] == "power" and "tripped" in f[2])])
+                pw = [f for f in frags if f[0] == "power" and "tripped" not in f[2]]
+                rest = self._group_fragments(pw or [f for f in frags if "tripped" not in f[2]])
                 label = f"Protective trip: {trip_names} ({pct_txt})" + (f" → {rest[0]}" if rest else "")
+                if rec.conditions:
+                    label += f" · {plural(len(rec.conditions), 'dependency effect')}"
             elif rec.conditions:
                 # lead with a dependency whose consequence shows up in this round (causal arrow)
                 changed = [n for n, (_o, new, info) in rec.nodes.items() if new != "operational" or info]
@@ -571,19 +576,34 @@ class Report:
         direct = oc.direct_nodes + oc.direct_edges
         parts: list[str] = []
         systems = sorted({g.node_sys[n] for n, o in ce.affected(oc).items() if node_severity(ce, n, o) != "info"})
-        parts.append(
-            f"{oc.scenario.name or 'Scenario'}: failure of {join_names([g.label(x) for x in direct], 3)} affects "
-            f"{plural(im.total_nodes_affected, 'node')} across {len(systems)} system{'s' if len(systems) != 1 else ''} "
-            f"({', '.join(systems) if systems else 'none'}) over {plural(max(0, n_steps - 1), 'cascade step')}; "
-            f"severity index {im.severity_index:.1f}/100."
-        )
+        initiators = join_names([g.label(x) for x in direct], 3)
+        if im.total_nodes_affected == 0:
+            parts.append(
+                f"{oc.scenario.name or 'Scenario'}: failure of {initiators} causes no loss of service — the network "
+                f"absorbs it through redundancy; severity index {im.severity_index:.1f}/100."
+            )
+        else:
+            parts.append(
+                f"{oc.scenario.name or 'Scenario'}: failure of {initiators} affects "
+                f"{plural(im.total_nodes_affected, 'node')} across {len(systems)} system{'s' if len(systems) != 1 else ''} "
+                f"({', '.join(systems)}) over {plural(max(0, n_steps - 1), 'cascade step')}; "
+                f"severity index {im.severity_index:.1f}/100."
+            )
         if oc.common_cause:
-            parts.append(f"The failure is common-cause: {plural(len(oc.common_cause), 'hosted edge')} share the damaged corridor.")
+            srcs = sorted(set(oc.common_cause.values()))
+            parts.append(
+                f"The failure is common-cause: {plural(len(oc.common_cause), 'hosted edge')} "
+                f"({', '.join(sorted({g.edge_sys[e] for e in oc.common_cause}))}) are routed through "
+                f"{join_names([g.cc_phrase(x) for x in srcs], 2)}."
+            )
         bp = ce.baseline.view.power  # type: ignore[union-attr]
-        if im.power_load_unserved_mw > EPS or p.actions or oc.tripped:
+        if im.power_load_unserved_mw > EPS or p.actions or oc.tripped or p.line_overloaded or p.overloaded:
             s = f"Power: {fmt_num(im.power_load_unserved_mw)} of {fmt_num(bp.served_load)} MW unserved"  # type: ignore[union-attr]
             if p.actions:
                 s += f", {fmt_num(p.restored_load)} MW restored through {plural(len(p.actions), 'tie switch', 'tie switches')}"
+            over = [x for x in sorted(p.overloaded) + sorted(p.line_overloaded) if x not in oc.tripped]
+            if over:
+                s += f", {join_names([g.name(x) for x in over], 2)} overloaded"
             if oc.tripped:
                 s += f", {join_names([g.name(x) for x in sorted(oc.tripped)], 2)} tripped on overload"
             parts.append(s + ".")

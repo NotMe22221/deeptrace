@@ -171,7 +171,7 @@ class CascadeEngine:
         trip_text: dict[str, str] = {}
 
         fail_out = {n: self._failed_outcome(n, sc, tripped, trip_text) for n in failed_n}
-        edges0 = {e: self._failed_edge(e, cc) for e in failed_e}
+        edges0 = {e: self._failed_edge(e, cc, tripped, trip_text) for e in failed_e}
         view = RoundView(dict(fail_out), dict(edges0))
         conds: dict[tuple[str, str], Condition] = {}
         new_conds = self._derive(view, failed_e, sc.horizon_hours)
@@ -218,7 +218,8 @@ class CascadeEngine:
 
             # next round inputs
             new_trips = sorted(
-                (s, frac) for s, frac in (view.power.trip.items() if view.power else []) if s not in failed_n
+                [(s, frac) for s, frac in (view.power.trip.items() if view.power else []) if s not in failed_n]
+                + [(e, frac) for e, frac in (view.power.trip_edges.items() if view.power else []) if e not in failed_e]
             )
             derived = self._derive(view, failed_e, sc.horizon_hours)
             merged = dict(conds)
@@ -237,9 +238,14 @@ class CascadeEngine:
                 break
             for s, frac in new_trips:
                 tripped[s] = (r, frac)
-                cause = view.power.node_out.get(s) if view.power else None
-                trip_text[s] = cause.cause if cause else ""
-                failed_n.add(s)
+                if s in g.nodes:
+                    cause = view.power.node_out.get(s) if view.power else None
+                    trip_text[s] = cause.cause if cause else ""
+                    failed_n.add(s)
+                else:
+                    ecause = view.power.edge_out.get(s) if view.power else None
+                    trip_text[s] = ecause.reason if ecause else ""
+                    failed_e.add(s)
             conds = merged
             applied = changed
             applied_trips = new_trips
@@ -283,8 +289,22 @@ class CascadeEngine:
             txt += f" Common-cause: {len(hosted)} edges routed through it fail ({', '.join(systems)})."
         return NodeOutcome("failed", txt, (), 0.0)
 
-    def _failed_edge(self, e: str, cc: dict[str, str]) -> EdgeOutcome:
+    def _failed_edge(
+        self,
+        e: str,
+        cc: dict[str, str],
+        tripped: dict[str, tuple[int, float]] | None = None,
+        trip_text: dict[str, str] | None = None,
+    ) -> EdgeOutcome:
         g = self.g
+        if tripped and e in tripped:
+            _r, frac = tripped[e]
+            cap = g.edges[e].capacity
+            return EdgeOutcome(
+                "failed",
+                f"Tripped: overload protection opened at {frac * 100:.0f}% of its {fmt_num(cap or 0)} MW rating "
+                f"(emergency limit 120%)",
+            )
         if e in cc:
             src = cc[e]
             if src in g.edges:
@@ -338,7 +358,7 @@ class CascadeEngine:
             PowerInputs(
                 pn,
                 pe,
-                frozenset(tripped) & pn,
+                frozenset(tripped) & (pn | pe),
                 pcc,
                 frozenset(scada),
                 sc.enable_restoration,
@@ -417,7 +437,7 @@ class CascadeEngine:
             if o is not None:
                 nodes[f] = o
 
-        edges: dict[str, EdgeOutcome] = {e: self._failed_edge(e, cc) for e in failed_e}
+        edges: dict[str, EdgeOutcome] = {e: self._failed_edge(e, cc, tripped, trip_text) for e in failed_e}
         for res in (power, water, telecom, transport):
             for e, o in res.edge_out.items():
                 if e not in fe:

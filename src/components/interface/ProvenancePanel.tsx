@@ -10,23 +10,11 @@ import { ProvenanceBar } from "./LayerPanel";
 import { cx, IconButton, ProvenanceChip, SectionLabel } from "./ui";
 
 const TREATMENT: Record<ProvenanceCategory, string> = {
-  verified: "Solid line, full opacity.",
-  publicly_mapped: "Solid line, slightly dimmed.",
-  estimated: "Dashed line / soft halo.",
-  simulated: "Hatched or dotted, lower opacity — always labelled SIMULATED.",
+  verified: "solid light chip.",
+  publicly_mapped: "solid blue chip.",
+  estimated: "amber chip; values marked “modelled”.",
+  simulated: "hatched chip with a dashed outline, plus an explicit “illustrative asset” note.",
 };
-
-function Swatch({ category }: { category: ProvenanceCategory }) {
-  const c = PROVENANCE_STYLES[category].color;
-  return (
-    <span className="relative flex h-5 w-9 shrink-0 items-center justify-center rounded-md border border-white/[0.06] bg-black/20">
-      {category === "verified" && <span className="h-[2px] w-6 rounded-full" style={{ background: c }} />}
-      {category === "publicly_mapped" && <span className="h-[2px] w-6 rounded-full opacity-80" style={{ background: c }} />}
-      {category === "estimated" && <span className="w-6 border-t-2 border-dashed" style={{ borderColor: c }} />}
-      {category === "simulated" && <span className="dt-hatch h-2 w-6 rounded-[2px] border border-dashed" style={{ borderColor: `${c}aa` }} />}
-    </span>
-  );
-}
 
 function Section({ title, children, right }: { title: string; children: React.ReactNode; right?: React.ReactNode }) {
   return (
@@ -68,7 +56,6 @@ export function ProvenancePanel() {
               const n = stats?.provenanceTotals[c] ?? 0;
               return (
                 <li key={c} className="flex gap-2.5">
-                  <Swatch category={c} />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
                       <ProvenanceChip category={c} />
@@ -79,7 +66,7 @@ export function ProvenancePanel() {
                       </span>
                     </div>
                     <p className="mt-0.5 text-[11.5px] leading-snug text-ink-300">{p.description}</p>
-                    <p className="text-[10.5px] text-ink-400">On the map: {TREATMENT[c]}</p>
+                    <p className="text-[10.5px] text-ink-400">Shown as: {TREATMENT[c]}</p>
                   </div>
                 </li>
               );

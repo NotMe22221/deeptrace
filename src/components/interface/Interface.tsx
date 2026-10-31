@@ -47,10 +47,20 @@ const RIGHT_META: Record<RightPanel, { label: string; Icon: LucideIcon }> = {
 
 const GAP = 12;
 const TOP = 72;
-/** Space kept clear at the bottom-left for the world legend / notices. */
-const LEFT_BOTTOM_RESERVE = 112;
+/**
+ * Space kept clear at the bottom-left (under the explorer) for the world's legend / notices
+ * (WorldOverlay: left 12 / bottom 12, 288 px wide, max 112 px tall — 250 px in Deep Mode or diff view).
+ */
+const LEFT_BOTTOM_RESERVE = 12 + 112 + 8;
+const LEFT_BOTTOM_RESERVE_TALL = 12 + 250 + 8;
 /** Space kept clear at the bottom-right for map credits. */
 const RIGHT_BOTTOM_RESERVE = 40;
+
+/**
+ * Interface glass is a touch more opaque than the shared .dt-panel token so text stays legible
+ * over the bright network (and where backdrop blur is unavailable). Scoped to the interface root.
+ */
+const GLASS_CSS = `.dt-ui .dt-panel{background:rgba(7,11,20,0.86)}.dt-ui .dt-panel-strong{background:rgba(7,11,20,0.94)}`;
 
 /** Store → interface reactions that are not tied to a single component. */
 function useInterfaceReactions(narrow: boolean, compact: boolean) {
@@ -140,6 +150,8 @@ export function Interface() {
   const demoActive = useStore((s) => s.demo.active);
   const dataReady = useStore((s) => s.dataMode === "live" || s.dataMode === "snapshot");
   const rightOrder = useUI((s) => s.rightOrder);
+  const deepMode = useStore((s) => s.deepMode);
+  const compareView = useStore((s) => s.compareView);
 
   useInterfaceReactions(narrow, compact);
   usePlaybackDriver();
@@ -153,14 +165,18 @@ export function Interface() {
   const layersOpen = panels.layers;
   const leftOffset = GAP + (layersOpen ? leftW : 44) + GAP;
   const rightOffset = front ? GAP + rightW + GAP : GAP + 40 + GAP;
-  const dockH = Math.max(260, Math.min(360, vp.height * 0.46));
+  const dockH = Math.max(240, Math.min(340, vp.height * 0.4));
+  const leftReserve = deepMode || compareView === "diff" ? LEFT_BOTTOM_RESERVE_TALL : LEFT_BOTTOM_RESERVE;
   const simOpen = panels.simulation;
+  // The expanded dock stays clear of the world legend column when that legend carries content.
+  const dockLeft = deepMode || compareView === "diff" ? Math.max(leftOffset, GAP + 288 + GAP) : leftOffset;
 
   if (narrow) {
     const sheet: "right" | "layers" | "sim" | null = front ? "right" : layersOpen ? "layers" : simOpen ? "sim" : null;
     return (
       <MotionConfig reducedMotion="user">
-        <div className="pointer-events-none fixed inset-0 z-10">
+        <style>{GLASS_CSS}</style>
+        <div className="dt-ui pointer-events-none fixed inset-0 z-10">
           <MainToolbar />
           <div className="absolute top-[60px] right-2 left-2 z-20 flex flex-col gap-2">
             <DemoBar />
@@ -199,23 +215,26 @@ export function Interface() {
           )}
           <DeepModeDescent />
         </div>
-        <CommandPalette />
-        <ShortcutsOverlay />
-        <BootOverlay />
+        <div className="dt-ui">
+          <CommandPalette />
+          <ShortcutsOverlay />
+          <BootOverlay />
+        </div>
       </MotionConfig>
     );
   }
 
   return (
     <MotionConfig reducedMotion="user">
-      <div className="pointer-events-none fixed inset-0 z-10">
+      <style>{GLASS_CSS}</style>
+      <div className="dt-ui pointer-events-none fixed inset-0 z-10">
         <MainToolbar />
 
         {/* Left column: infrastructure explorer (or its rail) */}
         {dataReady && (
           <div
             className="absolute flex flex-col"
-            style={{ left: GAP, top: TOP, bottom: LEFT_BOTTOM_RESERVE, width: layersOpen ? leftW : 44 }}
+            style={{ left: GAP, top: TOP, bottom: leftReserve, width: layersOpen ? leftW : 44 }}
           >
             <AnimatePresence mode="wait" initial={false}>
               <motion.div
@@ -281,7 +300,7 @@ export function Interface() {
         {dataReady && (
           <div
             className="absolute flex justify-center"
-            style={{ left: leftOffset, right: front ? rightOffset : GAP + 40 + GAP, bottom: GAP }}
+            style={{ left: simOpen ? dockLeft : leftOffset, right: front ? rightOffset : GAP + 40 + GAP, bottom: GAP }}
           >
             <AnimatePresence mode="wait">
               <SimulationPanel key={simOpen ? "open" : "closed"} />
@@ -306,9 +325,11 @@ export function Interface() {
 
         <DeepModeDescent />
       </div>
-      <CommandPalette />
-      <ShortcutsOverlay />
-      <BootOverlay />
+      <div className="dt-ui">
+        <CommandPalette />
+        <ShortcutsOverlay />
+        <BootOverlay />
+      </div>
     </MotionConfig>
   );
 }

@@ -41,7 +41,7 @@ from typing import Any
 from app.config import CACHE_DIR, PUBLIC_DEMO_DIR, REGIONS_DIR
 from app.models.schemas import DemoScript, InfrastructureNetwork, RegionInfo, ScenarioPreset
 from app.networks import geo
-from app.networks.streetgraph import HIGHWAY_CLASSES, StreetGraph, build_street_graph
+from app.networks.streetgraph import HIGHWAY_CLASSES, Access, StreetGraph, build_street_graph
 
 GENERATOR_VERSION = "1.0.0"
 DEFAULT_GENERATED_AT = "2026-10-31T00:00:00Z"
@@ -160,6 +160,10 @@ class NetworkBuilder:
         self.warnings: list[str] = []
         self.osm_points_used: set[str] = set()
         self.osm_matches = 0
+        self.site_nodes: set[str] = set()  # off-street nodes free to join the street graph at any nearby node
+        self.place_names: dict[str, str] = {}  # street node -> well-known place name (e.g. "Five Points")
+        self._sp_cache: dict[str, dict[str, float]] = {}
+        self._access_cache: dict[tuple[str, float], list[Access]] = {}
         self._street_keys = {nid: {street_key(n) for n in node.names} for nid, node in self.sg.nodes.items()}
 
     # ------------------------------------------------------------------ helpers
@@ -242,8 +246,19 @@ class NetworkBuilder:
             "description": description,
             "properties": properties or {},
         }
+        if anchor is None:
+            self.site_nodes.add(node_id)
         self.anchor[node_id] = anchor or self.sg.nearest_node((lon, lat)) or ""
         return node_id
+
+    def street_label(self, street_node: str) -> str:
+        """Intersection label, preferring a well-known place name when one is configured."""
+        label = self.sg.node_label(street_node)
+        place = self.place_names.get(street_node)
+        return f"{place} ({label})" if place else label
+
+    def short_label(self, street_node: str) -> str:
+        return self.place_names.get(street_node) or self.sg.node_label(street_node)
 
     def add_edge(
         self,
@@ -294,11 +309,66 @@ class NetworkBuilder:
             self.street_paths[edge_id] = street_path
         return edge_id
 
+    def _path_lengths(self, src: str) -> dict[str, float]:
+        if src not in self._sp_cache:
+            import networkx as nx
+
+            g = self.sg.surface_graph
+            self._sp_cache[src] = nx.single_source_dijkstra_path_length(g, src, weight="length") if src in g else {src: 0.0}
+        return self._sp_cache[src]
+
+    def _access(self, node_id: str, offset: float) -> list[Access]:
+        key = (node_id, offset)
+        if key not in self._access_cache:
+            if node_id in self.site_nodes:
+                self._access_cache[key] = self.sg.access_options(self.pos(node_id), offset_m=offset)
+            else:
+                self._access_cache[key] = [Access(self.anchor[node_id], 0.0, [self.pos(node_id)])]
+        return self._access_cache[key]
+
     def route(self, a: str, b: str, system: str) -> tuple[list[tuple[float, float]], list[str]]:
-        geom, _, epath = self.sg.route(
-            self.pos(a), self.pos(b), offset_m=ROUTE_OFFSET_M[system], a_node=self.anchor[a], b_node=self.anchor[b]
-        )
-        return geom, epath
+        """Route a utility edge along surface streets.
+
+        Street-anchored nodes join at their intersection; off-street sites join through a short
+        service drop onto one of their nearest street edges. The cheapest combination wins.
+        Returns ``(geometry, street_edge_ids)``; the street edge ids feed corridor hosting.
+        """
+        off = ROUTE_OFFSET_M[system]
+        best: tuple[tuple[Any, ...], Access, Access, bool] | None = None
+        for oa in self._access(a, off):
+            lengths = self._path_lengths(oa.node)
+            for ob in self._access(b, off):
+                if ob.node in lengths:
+                    key = (round(oa.cost + lengths[ob.node] + ob.cost, 3), 0, oa.node, ob.node)
+                    if best is None or key < best[0]:
+                        best = (key, oa, ob, False)
+                if oa.edge is not None and oa.edge == ob.edge:  # both drops land on the same street edge
+                    direct = 1.5 * (oa.dist + ob.dist) + abs(oa.along - ob.along)
+                    key = (round(direct, 3), 1, oa.edge, "")
+                    if best is None or key < best[0]:
+                        best = (key, oa, ob, True)
+        if best is None:
+            geom, _, epath = self.sg.route(self.pos(a), self.pos(b), offset_m=off, a_node=self.anchor[a], b_node=self.anchor[b])
+            return geom, epath
+        _, oa, ob, direct = best
+        if direct:
+            assert oa.edge is not None
+            edge_geom = self.sg.edge_geometry(oa.edge, self.sg.edges[oa.edge].u, off)
+            piece = geo.substring(edge_geom, min(oa.along, ob.along), max(oa.along, ob.along))
+            if oa.along > ob.along:
+                piece = list(reversed(piece))
+            geom = [self.pos(a)] + piece + [self.pos(b)]
+            span = abs(oa.along - ob.along)
+            epath = [oa.edge] if span >= 0.5 * self.sg.edges[oa.edge].length_m else []
+        else:
+            npath, epath = self.sg.shortest_path(oa.node, ob.node)
+            middle = self.sg.path_geometry(npath, epath, off) if epath else []
+            geom = oa.geometry + middle + list(reversed(ob.geometry))
+            epath = list(epath)
+            for acc in (oa, ob):  # count access stretches that run along most of a street block
+                if acc.edge and acc.traversed >= 0.5 * self.sg.edges[acc.edge].length_m and acc.edge not in epath:
+                    epath.append(acc.edge)
+        return geo.dedupe_consecutive(geom, tolerance_m=0.3), epath
 
     def add_routed_edge(self, edge_id: str, a: str, b: str, system: str, ctype: str, **kw: Any) -> str:
         geom, epath = self.route(a, b, system)
@@ -405,6 +475,9 @@ class NetworkBuilder:
         unsig_share = float(tdesign.get("unsignalized_share", 0.15))
         sig_backup = tdesign.get("signal_backup_hours", {})
 
+        for place in tdesign.get("named_places", []):
+            self.place_names[self.resolve_anchor(place)] = place["name"]
+
         # Gateways replace selected street nodes.
         gateway_for: dict[str, dict[str, Any]] = {}
         for gw in tdesign.get("gateways", []):
@@ -466,7 +539,7 @@ class NetworkBuilder:
                 if signalized:
                     best_class = min(classes - HIGHWAY_CLASSES, key=lambda c: {"primary": 0, "secondary": 1}.get(c, 2))
                     backup = float(sig_backup.get(best_class, sig_backup.get("default", 0)))
-                label = sg.node_label(sid)
+                label = self.street_label(sid)
                 props: dict[str, Any] = {
                     "signalized": signalized,
                     "streets": sn.names,
@@ -488,15 +561,19 @@ class NetworkBuilder:
                 )
             self.street_node_to_trn[sid] = nid
 
+        def cross(sid: str, street: str) -> str:
+            if sid in self.place_names:
+                return self.place_names[sid]
+            others = [n for n in sg.nodes[sid].names if n != street]
+            return others[0] if others else "end"
+
         for eid in sorted(sg.edges):
             se = sg.edges[eid]
             u, v = self.street_node_to_trn[se.u], self.street_node_to_trn[se.v]
             lanes = int(se.lanes or 2)
             speed = float(se.speed_kph or 40)
             cap = lanes * float(lane_cap.get(se.cls, lane_cap.get(se.cls.replace("_link", ""), 600)))
-            from_x = [n for n in sg.nodes[se.u].names if n != se.name]
-            to_x = [n for n in sg.nodes[se.v].names if n != se.name]
-            name = f"{se.name}: {from_x[0] if from_x else 'end'} → {to_x[0] if to_x else 'end'}"
+            name = f"{se.name}: {cross(se.u, se.name)} \u2192 {cross(se.v, se.name)}"
             prov = dict(se.provenance) if se.provenance else street_prov(0.45, "Road segment")
             self.add_edge(
                 self.next_id("TRN-RD-", 4),
@@ -683,7 +760,7 @@ class NetworkBuilder:
                 vid = self.next_id("PWR-NV-", 3)
                 d = demand[(fid, k)]
                 pop = int(round(d * ppm * (0.8 + 0.4 * stable_unit(f"pop:{vid}")), -1))
-                cross = self.sg.node_label(anchor)
+                cross = self.short_label(anchor)
                 self.add_node(
                     vid,
                     f"Vault {vid[-3:]} {cross} (simulated)",
@@ -812,7 +889,7 @@ class NetworkBuilder:
             anchor = self.resolve_anchor(j, avoid=self.used["water"])
             self.used["water"].add(anchor)
             self.add_node(
-                j["id"], f"Junction {self.sg.node_label(anchor)} (simulated)", "water", "junction",
+                j["id"], f"Junction {self.short_label(anchor)} (simulated)", "water", "junction",
                 self.placed_point(anchor, "water"), sim_prov(), anchor=anchor, elevation=-2.0,
                 description=f"Pipe junction in the {j.get('pressure_zone', 'low')}-pressure zone (simulated).",
                 properties={"pressure_zone": j.get("pressure_zone", "low")},
@@ -918,7 +995,7 @@ class NetworkBuilder:
             self.add_node(
                 h["id"], h["name"], "telecom", "fiber_hub", self.placed_point(anchor, "telecom"), sim_prov(),
                 anchor=anchor, elevation=-1.5,
-                description=f"Passive fibre splice / aggregation vault at {self.sg.node_label(anchor)} (simulated).",
+                description=f"Passive fibre splice / aggregation vault at {self.short_label(anchor)} (simulated).",
                 properties={"passive": True},
             )  # fmt: skip
         for c in td.get("access_nodes", []):
@@ -960,13 +1037,15 @@ class NetworkBuilder:
         ud = self.design.get("underground", {})
         vault_at: dict[str, str] = {}
 
-        def vault(spec: dict[str, Any]) -> str:
-            anchor = self.resolve_anchor(spec)
+        def vault(spec: dict[str, Any], avoid: set[str] | None = None) -> str:
+            anchor = self.resolve_anchor(spec, avoid=avoid)
+            if avoid and anchor in avoid:  # sparse street graph: never build a corridor from a vault to itself
+                anchor = self.sg.nearest_node(self.sg.nodes[anchor].point, exclude=avoid) or anchor
             if anchor in vault_at:
                 return vault_at[anchor]
             vid = self.next_id("UGD-VLT-", 2)
             self.add_node(
-                vid, f"Utility vault {vid[-2:]} {self.sg.node_label(anchor)} (simulated)", "underground", "utility_vault",
+                vid, f"Utility vault {vid[-2:]} {self.short_label(anchor)} (simulated)", "underground", "utility_vault",
                 self.placed_point(anchor, "underground"), sim_prov(), anchor=anchor, elevation=-2.5,
                 description="Access vault / manhole joining shared duct-bank sections (simulated).",
                 properties={"access": "manhole"},
@@ -976,7 +1055,8 @@ class NetworkBuilder:
 
         corridors: list[str] = []
         for c in ud.get("corridors", []):
-            a, b = vault(c["from"]), vault(c["to"])
+            a = vault(c["from"])
+            b = vault(c["to"], avoid={self.anchor[a]})
             self.add_routed_edge(
                 c["id"], a, b, "underground", c.get("type", "duct_bank"),
                 depth=float(c["depth_m"]), name=c["name"] + " (simulated)",

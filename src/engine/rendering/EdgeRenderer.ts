@@ -10,7 +10,7 @@ import type { CesiumModule } from "@/engine/geographic/cesiumLoader";
 import { lerp } from "@/engine/geographic/LocalFrame";
 import type { SystemType } from "@/types/infrastructure";
 import type { DisplayModel, EdgeVisual } from "./displayState";
-import { createMaterial, setParams } from "./materials";
+import { createMaterial, setDash, setParams } from "./materials";
 import type { EdgeGeom, NetworkGeometry } from "./NetworkGeometry";
 import { setColor, WHITE, mixRgb } from "./palette";
 
@@ -23,9 +23,9 @@ const BASE_WIDTH: Record<SystemType, number> = {
   power: 6.5,
   water: 7.5,
   telecom: 5.5,
-  transport: 6,
+  transport: 4.6,
   underground: 6,
-  facility: 5.5,
+  facility: 5,
 };
 
 interface EdgeEntry {
@@ -175,9 +175,11 @@ export class EdgeRenderer {
       e.main.show = show;
       if (!show) return;
       const traceDep = v.trace === "dep" || v.trace === "up" || v.trace === "down";
-      setColor(e.mainMat.uniforms.color, rgb, Math.min(1, v.alpha * pulseA * (traceDep ? 1 : 0.85)));
-      setParams(e.mainMat, traceDep ? 0.6 : 0.25, core * 0.6, v.dashed || traceDep ? 1 : 0, traceDep ? 60 : 24);
-      const w = (traceDep ? 3.6 : 2.6) * v.widthMul * pulseW;
+      // logical dependency: dotted marching arc (provider -> dependent), never a solid line
+      setColor(e.mainMat.uniforms.color, rgb, Math.min(1, v.alpha * pulseA * (traceDep ? 1 : 0.8)));
+      setParams(e.mainMat, traceDep ? 0.7 : 0.35, core * 0.6, 1, traceDep ? 46 : 18);
+      setDash(e.mainMat, traceDep ? 12 : 9, traceDep ? 0.42 : 0.32);
+      const w = (traceDep ? 4.2 : 3.0) * v.widthMul * pulseW;
       if (e.main.width !== w) e.main.width = w;
       return;
     }
@@ -187,8 +189,10 @@ export class EdgeRenderer {
       const show = v.visible && v.alpha > 0.02;
       e.main.show = show;
       if (!show) return;
-      setColor(e.mainMat.uniforms.color, rgb, Math.min(1, v.alpha * pulseA * (g.system === "transport" ? 0.8 : 1)));
-      setParams(e.mainMat, 1, core, v.dashed ? 1 : 0, 0);
+      const road = g.system === "transport" && !/rail/.test(g.edge.connection_type);
+      setColor(e.mainMat.uniforms.color, rgb, Math.min(1, v.alpha * pulseA * (road && !v.impacted && !emph ? 0.62 : 1)));
+      setParams(e.mainMat, road ? 0.75 : 1, core, v.dashed ? 1 : 0, 0);
+      setDash(e.mainMat, 13, 0.52);
       const w = base * v.widthMul * pulseW;
       if (e.main.width !== w) e.main.width = w;
       return;
@@ -200,10 +204,11 @@ export class EdgeRenderer {
       const show = v.visible && v.alpha > 0.02;
       e.main.show = show;
       if (!show) return;
-      const a = v.alpha * pulseA * lerp(1, 0.42, ghostiness);
+      const a = v.alpha * pulseA * lerp(1, 0.34, ghostiness);
       setColor(e.mainMat.uniforms.color, rgb, Math.min(1, a));
       setParams(e.mainMat, 1 - ghostiness, core, Math.max(v.dashed ? 1 : 0, ghostiness > 0.5 ? 1 : ghostiness * 2), 0);
-      const w = lerp(base * v.widthMul, 2.4, ghostiness) * pulseW;
+      setDash(e.mainMat, lerp(13, 7, ghostiness), lerp(0.52, 0.62, ghostiness));
+      const w = lerp(base * v.widthMul, 2.0, ghostiness) * pulseW;
       if (e.main.width !== w) e.main.width = w;
       return;
     }
@@ -224,7 +229,8 @@ export class EdgeRenderer {
       if (e.ghost.show) {
         setColor(e.ghostMat.uniforms.color, rgb, Math.min(1, ga));
         setParams(e.ghostMat, 0, core, 1, 0);
-        if (e.ghost.width !== 2.6) e.ghost.width = 2.6;
+        setDash(e.ghostMat, 7, 0.62);
+        if (e.ghost.width !== 2.4) e.ghost.width = 2.4;
       }
     }
   }
