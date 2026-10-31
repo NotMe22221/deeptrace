@@ -320,7 +320,8 @@ export interface NodeDetails {
   dependent_ids: string[];
   criticality_rank?: number | null;
   criticality_score?: number | null;
-  is_single_point_of_failure: boolean;
+  /** Engine verdict; null when it is unknown (offline and not exported in the snapshot). */
+  is_single_point_of_failure: boolean | null;
   baseline_state: NodeState;
 }
 
@@ -449,8 +450,13 @@ export interface DemoSnapshot {
    */
   single_failures_encoding?: "full" | "delta_from_baseline";
   demo: DemoScript;
-  /** Recorded offline-analyst event streams keyed by question (replayed only when the backend is down). */
+  /**
+   * Recorded offline-analyst event streams keyed by question (replayed only when the backend is
+   * down, and only while the demo's scenario A is the active result: that is what they were recorded for).
+   */
   analyst_replays?: Record<string, AnalystEvent[]> | null;
+  /** The engine's single-point-of-failure set (same rule as NodeDetails.is_single_point_of_failure). */
+  spof_node_ids?: string[] | null;
 }
 
 export interface DemoStep {

@@ -252,7 +252,7 @@ npx next dev -p 3000
 |---|---|
 | `NEXT_PUBLIC_CESIUM_ION_TOKEN` | Dark CARTO basemap, full network, simulation and analyst; no streamed 3D buildings or terrain (a notice explains how to enable them) |
 | `ANTHROPIC_API_KEY` | The deterministic offline analyst (labelled) |
-| The backend | Offline snapshot mode from the committed `public/demo/snapshot.json`: the network, all presets, the demo comparison, traces, single failures of major assets and the recorded demo answer, all precomputed by the engine (labelled OFFLINE SNAPSHOT). Regenerate it with `make snapshot` after changing data or engine. |
+| The backend | Offline snapshot mode from the committed `public/demo/snapshot.json`: the network, all presets, the demo comparison, engine traces of the major assets and facilities, single failures of major assets, the engine's single-point-of-failure set and the recorded answer to the demo question (replayed only while the demo's scenario A is on screen), all precomputed by the engine (labelled OFFLINE SNAPSHOT). Anything not precomputed says so instead of being approximated. Regenerate it with `make snapshot` after changing data or engine. If the backend becomes unreachable mid-session, the app switches to the snapshot (the toolbar badge changes) and returns to live mode when `/api/health` answers again. |
 
 **Tests**: `make test` runs the pytest suite (engine, cascades, metrics, dataset checks,
 ingestion with mocked HTTP, API, analyst loop with a fake Claude client) and the
@@ -262,6 +262,7 @@ plays all ten demo steps headlessly, screenshots each one and fails on page erro
 ```bash
 node scripts/e2e-demo.cjs --out e2e-shots            # live backend
 node scripts/e2e-demo.cjs --out e2e-shots --offline  # backend blocked → snapshot fallback
+node scripts/e2e-races.cjs                           # async races: slow/stale responses, mid-session engine loss
 ```
 
 API docs: http://localhost:8000/docs.
@@ -291,7 +292,12 @@ API docs: http://localhost:8000/docs.
 The demo uses the fixed dataset in `backend/datasets/regions/atlanta-downtown/` and
 deterministic simulations, so it plays out identically every time. It makes no external
 API calls apart from optional Cesium streaming and the optional LLM. If the backend fails
-mid-presentation, the app falls back to the precomputed snapshot.
+mid-presentation, the app switches to the precomputed snapshot on the next engine call.
+Every async step is cancellable: **Exit demo**, **Reset demo** and **Restore world** stop the
+step, simulation, trace or analyst answer in flight, so a slow response can never re-apply
+state the presenter just cleared. A streaming analyst answer can be stopped at any time, and the
+backend sends SSE heartbeats so a stalled connection is detected (90 s without data) rather
+than hanging.
 
 ## 9. Limitations
 

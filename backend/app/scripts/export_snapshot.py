@@ -123,6 +123,7 @@ def build_snapshot(single_failures: bool = True) -> DemoSnapshot:
         single_failures_encoding="delta_from_baseline",
         demo=demo,
         analyst_replays=replays or None,
+        spof_node_ids=engine.single_points_of_failure(),
     )
     print(
         f"snapshot: {len(preset_results)} presets, {len(comparisons)} comparisons, {len(traces)} traces, "

@@ -615,3 +615,6 @@ class DemoSnapshot(BaseModel):
         default=None,
         description="Recorded offline-analyst event streams keyed by question (used only when the backend is down)",
     )
+    spof_node_ids: list[str] | None = Field(
+        default=None, description="engine single-point-of-failure set (NodeDetails.is_single_point_of_failure rule)"
+    )

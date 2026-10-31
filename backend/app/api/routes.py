@@ -157,16 +157,51 @@ def provenance() -> dict[str, Any]:
     }
 
 
-async def _sse(events: AsyncIterator[dict[str, Any]]) -> AsyncIterator[bytes]:
+SSE_HEARTBEAT_S = 15.0
+_STREAM_END = object()
+
+
+def _sse_data(ev: dict[str, Any]) -> bytes:
+    return f"data: {json.dumps(ev, ensure_ascii=False, default=str)}\n\n".encode()
+
+
+async def _sse(events: AsyncIterator[dict[str, Any]], heartbeat_s: float = SSE_HEARTBEAT_S) -> AsyncIterator[bytes]:
+    """Serialise analyst events as SSE, with a `: ping` comment whenever nothing was sent for
+    `heartbeat_s` (e.g. while the model is thinking) so clients and proxies can tell a slow answer
+    from a stalled connection. The event generator runs in a single pump task, so async context
+    managers inside it (the Anthropic stream) are entered and exited in the same task."""
+    queue: asyncio.Queue[Any] = asyncio.Queue()
+
+    async def pump() -> None:
+        try:
+            async for ev in events:
+                queue.put_nowait(ev)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — surfaced to the client below
+            queue.put_nowait(exc)
+        finally:
+            queue.put_nowait(_STREAM_END)
+
+    task = asyncio.create_task(pump())
     try:
-        async for ev in events:
-            yield f"data: {json.dumps(ev, ensure_ascii=False, default=str)}\n\n".encode()
-    except asyncio.CancelledError:  # client disconnected
-        raise
-    except Exception as exc:  # noqa: BLE001 — surface errors to the client instead of a broken stream
-        err = {"type": "error", "message": f"Analyst error: {type(exc).__name__}: {exc}"}
-        yield f"data: {json.dumps(err)}\n\n".encode()
-        yield f"data: {json.dumps({'type': 'done', 'tool_calls': 0, 'mode': 'llm'})}\n\n".encode()
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=heartbeat_s)
+            except asyncio.TimeoutError:
+                yield b": ping\n\n"
+                continue
+            if item is _STREAM_END:
+                break
+            if isinstance(item, Exception):
+                yield _sse_data({"type": "error", "message": f"Analyst error: {type(item).__name__}: {item}"})
+                yield _sse_data({"type": "done", "tool_calls": 0, "mode": "llm"})
+                break
+            yield _sse_data(item)
+    finally:  # client disconnected or stream finished: stop the producer
+        if not task.done():
+            task.cancel()
+        task.add_done_callback(lambda t: t.cancelled() or t.exception())
 
 
 class _LockedEngine:

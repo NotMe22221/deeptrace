@@ -200,3 +200,38 @@ def test_non_finite_and_oversized_inputs_are_422(client) -> None:
     raw = '{"failed_nodes":["PWR-DS-FIVEPOINTS"],"horizon_hours":NaN}'
     assert client.post("/api/simulate", content=raw, headers={"Content-Type": "application/json"}).status_code == 422
     assert client.post("/api/simulate", json={"failed_nodes": ["X"] * 500}).status_code == 422
+
+
+def test_sse_sends_heartbeats_while_the_analyst_is_silent() -> None:
+    import asyncio
+
+    from app.api.routes import _sse
+
+    async def slow():
+        yield {"type": "status", "mode": "offline"}
+        await asyncio.sleep(0.25)
+        yield {"type": "done", "tool_calls": 0, "mode": "offline"}
+
+    async def boom():
+        yield {"type": "status", "mode": "llm"}
+        raise RuntimeError("model exploded")
+
+    async def collect(gen):
+        return [chunk async for chunk in gen]
+
+    chunks = asyncio.run(collect(_sse(slow(), heartbeat_s=0.05)))
+    assert chunks[0].startswith(b"data:") and chunks[-1].startswith(b"data:")
+    assert b": ping\n\n" in chunks, chunks
+    chunks = asyncio.run(collect(_sse(boom(), heartbeat_s=5)))
+    text = b"".join(chunks).decode()
+    assert "model exploded" in text and '"type": "done"' in text
+
+
+def test_spof_set_matches_node_details() -> None:
+    from app.simulation import get_engine
+
+    engine = get_engine()
+    spof = set(engine.single_points_of_failure())
+    assert spof, "the demo network should have single points of failure"
+    for n in engine.network.nodes:
+        assert engine.node_details(n.id).is_single_point_of_failure == (n.id in spof), n.id

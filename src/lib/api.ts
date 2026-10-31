@@ -87,45 +87,75 @@ export const liveApi = {
 
 /**
  * Streams analyst events from the backend (Server-Sent Events over a POST body).
- * Resolves when the stream ends.
+ * Resolves when the stream ends. Rejects with an ApiError (no status) when nothing arrives for
+ * `idleTimeoutMs` — the backend sends a `: ping` comment every ~15 s while the model is working,
+ * so silence means the connection stalled — and when `signal` aborts.
  */
 export async function streamAnalyst(
   req: AnalystRequest,
   onEvent: (ev: AnalystEvent) => void,
   signal?: AbortSignal,
+  idleTimeoutMs = 90_000,
 ): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/analyst/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-    body: JSON.stringify(req),
-    signal,
-  });
-  if (!res.ok || !res.body) {
-    throw new ApiError(`Analyst request failed (${res.status})`, res.status);
-  }
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let idx: number;
-    while ((idx = buffer.indexOf("\n\n")) !== -1) {
-      const chunk = buffer.slice(0, idx);
-      buffer = buffer.slice(idx + 2);
-      const data = chunk
-        .split("\n")
-        .filter((l) => l.startsWith("data:"))
-        .map((l) => l.slice(5).trimStart())
-        .join("\n");
-      if (!data) continue;
-      try {
-        onEvent(JSON.parse(data) as AnalystEvent);
-      } catch {
-        /* ignore malformed event */
+  const ctrl = new AbortController();
+  let timedOut = false;
+  const onAbort = () => ctrl.abort();
+  if (signal?.aborted) ctrl.abort();
+  else signal?.addEventListener("abort", onAbort, { once: true });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const arm = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      timedOut = true;
+      ctrl.abort();
+    }, idleTimeoutMs);
+  };
+  arm();
+  try {
+    const res = await fetch(`${API_BASE}/api/analyst/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify(req),
+      signal: ctrl.signal,
+    });
+    if (!res.ok || !res.body) {
+      throw new ApiError(`Analyst request failed (${res.status})`, res.status);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      arm(); // any bytes, including heartbeat comments, prove the connection is alive
+      buffer += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buffer.indexOf("\n\n")) !== -1) {
+        const chunk = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        const data = chunk
+          .split("\n")
+          .filter((l) => l.startsWith("data:"))
+          .map((l) => l.slice(5).trimStart())
+          .join("\n");
+        if (!data) continue; // heartbeat / comment
+        try {
+          onEvent(JSON.parse(data) as AnalystEvent);
+        } catch {
+          /* ignore malformed event */
+        }
       }
     }
+  } catch (e) {
+    if (e instanceof ApiError) throw e;
+    if (timedOut) {
+      throw new ApiError(`The analyst stopped responding (no data for ${Math.round(idleTimeoutMs / 1000)} s). Try again.`);
+    }
+    if (ctrl.signal.aborted) throw new ApiError("Stopped.");
+    throw new ApiError((e as Error)?.message || "Network error");
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
   }
 }
 
@@ -156,6 +186,14 @@ export async function loadOfflineBundle(): Promise<OfflineBundle> {
 const sameSet = (a: string[] = [], b: string[] = []) =>
   a.length === b.length && [...a].sort().join("|") === [...b].sort().join("|");
 
+/** Two scenario inputs that the engine would simulate identically. */
+export const sameScenario = (a: ScenarioInput, b: ScenarioInput) =>
+  sameSet(a.failed_nodes, b.failed_nodes) &&
+  sameSet(a.failed_edges, b.failed_edges) &&
+  a.horizon_hours === b.horizon_hours &&
+  a.enable_restoration === b.enable_restoration &&
+  (a.max_cascade_rounds ?? 8) === (b.max_cascade_rounds ?? 8);
+
 /** Re-expand a delta-encoded snapshot result (see DemoSnapshot.single_failures_encoding). */
 export function expandDelta(r: SimulationResult, baseline: SimulationResult): SimulationResult {
   const unreachable = new Set(r.reachable_nodes);
@@ -175,10 +213,7 @@ export function snapshotSimulate(snapshot: DemoSnapshot, scenario: ScenarioInput
     const r = snapshot.preset_results[preset.id];
     if (
       r &&
-      sameSet(preset.scenario.failed_nodes, scenario.failed_nodes) &&
-      sameSet(preset.scenario.failed_edges, scenario.failed_edges) &&
-      preset.scenario.horizon_hours === scenario.horizon_hours &&
-      preset.scenario.enable_restoration === scenario.enable_restoration
+      sameScenario(preset.scenario, scenario)
     ) {
       return r;
     }
@@ -188,7 +223,8 @@ export function snapshotSimulate(snapshot: DemoSnapshot, scenario: ScenarioInput
     scenario.failed_nodes.length === 1 &&
     scenario.failed_edges.length === 0 &&
     scenario.horizon_hours === 4 &&
-    scenario.enable_restoration
+    scenario.enable_restoration &&
+    (scenario.max_cascade_rounds ?? 8) === 8
   ) {
     const r = snapshot.single_failures[scenario.failed_nodes[0]];
     if (!r) return null;
@@ -204,10 +240,8 @@ export function snapshotCompare(
 ): ScenarioComparison | null {
   for (const cmp of Object.values(snapshot.comparisons)) {
     if (
-      sameSet(cmp.scenario_a.scenario.failed_nodes, a.failed_nodes) &&
-      sameSet(cmp.scenario_a.scenario.failed_edges, a.failed_edges) &&
-      sameSet(cmp.scenario_b.scenario.failed_nodes, b.failed_nodes) &&
-      sameSet(cmp.scenario_b.scenario.failed_edges, b.failed_edges)
+      sameScenario(cmp.scenario_a.scenario, a) &&
+      sameScenario(cmp.scenario_b.scenario, b)
     ) {
       return cmp;
     }

@@ -157,6 +157,14 @@ class SimulationEngine:
                 self._metrics = self._metrics_calc.compute()
             return self._metrics
 
+    def _is_spof(self, node_id: str, affected: int) -> bool:
+        return node_id in self._metrics_calc.spof_articulation or affected >= SPOF_AFFECTED_THRESHOLD
+
+    def single_points_of_failure(self) -> list[str]:
+        """Every node node_details() would flag as a single point of failure (sorted ids)."""
+        affected = {e.node_id: e.affected_count for e in self.metrics().criticality_ranking}
+        return sorted(n for n in self.graphs.nodes if self._is_spof(n, affected.get(n, 0)))
+
     def node_details(self, node_id: str) -> NodeDetails:
         self._check_node(node_id)
         g = self.graphs
@@ -169,7 +177,7 @@ class SimulationEngine:
                 rank, score, affected = i, float(entry.affected_count), entry.affected_count
                 break
         neighbours = sorted({g.other_end(e, node_id) for e in g.incident[node_id]} - {node_id})
-        spof = node_id in self._metrics_calc.spof_articulation or affected >= SPOF_AFFECTED_THRESHOLD
+        spof = self._is_spof(node_id, affected)
         return NodeDetails(
             node=g.nodes[node_id],
             connected_node_ids=neighbours,

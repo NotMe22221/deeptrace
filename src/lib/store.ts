@@ -13,6 +13,7 @@ import {
   emptyScenario,
   liveApi,
   loadOfflineBundle,
+  sameScenario,
   snapshotCompare,
   snapshotSimulate,
   streamAnalyst,
@@ -194,6 +195,8 @@ export interface DeeptraceState {
   restoreWorld: () => void;
 
   sendAnalystMessage: (text: string, opts?: { forceOffline?: boolean }) => Promise<void>;
+  /** Abort the analyst answer that is streaming (keeps what has arrived so far). */
+  stopAnalyst: () => void;
   clearChat: () => void;
   applyUIAction: (a: UIAction) => void;
 
@@ -228,6 +231,9 @@ const DEFAULT_PANELS: Record<PanelKey, boolean> = {
   search: false,
 };
 
+/** Overlay and depth defaults; Restore world and the guided demo return to these. */
+const DEFAULT_VIEW = { showDependencies: true, showParticles: true, showLabels: true, depthScale: 8 } as const;
+
 export function buildIndex(network: InfrastructureNetwork): NetworkIndex {
   const nodes = new Map<string, InfrastructureNode>();
   const edges = new Map<string, InfrastructureEdge>();
@@ -255,8 +261,13 @@ const maxStepOf = (r: SimulationResult | null) =>
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Build the minimal TraceResult locally from the network when the backend is offline. */
-function localTrace(index: NetworkIndex, nodeId: string): TraceResult {
+/**
+ * Build a direct-connections-only TraceResult from the network when no engine trace exists
+ * (backend offline and the node was not precomputed in the snapshot). Physical edges are
+ * undirected in the data, so neighbours are NOT labelled upstream/downstream here; they are
+ * returned through `physical_edge_ids` and shown as "directly connected".
+ */
+function localTrace(index: NetworkIndex, nodeId: string): TraceResult & { neighbours: string[] } {
   const physical: string[] = [];
   const dependency: string[] = [];
   const dependencies: TraceResult["dependencies"] = [];
@@ -279,26 +290,90 @@ function localTrace(index: NetworkIndex, nodeId: string): TraceResult {
   }
   return {
     node_id: nodeId,
-    upstream: neighbours,
+    upstream: [],
     downstream: [],
     dependencies,
     dependents,
     physical_edge_ids: physical,
     dependency_edge_ids: dependency,
     source_paths: [],
-    summary: "Direct connections only (offline snapshot — full upstream/downstream tracing requires the live engine).",
+    summary:
+      "Direct connections only (offline snapshot; this component's full upstream/downstream trace was not precomputed — start the engine to trace it).",
+    neighbours: neighbours.map((h) => h.node_id),
   };
 }
+
+/** An engine request that never reached the engine (network failure / timeout, no HTTP status). */
+const engineUnreachable = (e: unknown) => e instanceof ApiError && e.status === undefined;
 
 // ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
 
-export const useStore = create<DeeptraceState>((set, get) => {
+export const useStore = create<DeeptraceState>((set, get, api) => {
+  // -------------------------------------------------------------------------
+  // Async bookkeeping. Every async action captures a token before it awaits and drops its
+  // response when the token moved on, so a slow response can never resurrect state that a
+  // newer action (or Restore world / Reset demo) already replaced.
+  // -------------------------------------------------------------------------
+  /** Bumped by restoreWorld / clearSimulation: in-flight simulate/compare results are dropped. */
+  let simEpoch = 0;
+  /** Latest simulation request; only it may set the displayed `result` and `simStatus`. */
+  let simSeq = 0;
+  /** Latest request per slot, so an older run cannot overwrite a newer run's slot. */
+  const slotSeq: Record<"A" | "B", number> = { A: 0, B: 0 };
+  let compareSeq = 0;
+  /** Bumped by every showTrace / hideTrace / deselect / restore. */
+  let traceSeq = 0;
+  /** Bumped by every demoGoto and by start/reset/exit/restore: a superseded step stops at its next await. */
+  let demoRun = 0;
+  /** The analyst request currently streaming. */
+  let analystCtrl: AbortController | null = null;
+  /** Polls /api/health after a mid-session failover so the app returns to live mode when the engine is back. */
+  let recoveryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const scheduleRecovery = () => {
+    if (recoveryTimer) return;
+    recoveryTimer = setTimeout(async () => {
+      recoveryTimer = null;
+      if (get().dataMode !== "snapshot") return;
+      try {
+        const health = await liveApi.health();
+        set({ dataMode: "live", health });
+      } catch {
+        scheduleRecovery();
+      }
+    }, 15000);
+  };
+
+  /**
+   * The engine could not be reached mid-session. If a snapshot is loaded and /api/health is down
+   * too, switch to snapshot mode (toolbar, panels and later calls all follow) and return true so
+   * the caller answers from the precomputed engine outputs instead of failing.
+   */
+  async function failOverToSnapshot(e: unknown): Promise<boolean> {
+    if (!engineUnreachable(e) || !get().snapshot) return false;
+    if (get().dataMode !== "live") return true;
+    try {
+      await liveApi.health();
+      return false; // the engine is up; this request itself failed (e.g. timed out)
+    } catch {
+      set({ dataMode: "snapshot", health: null });
+      scheduleRecovery();
+      return true;
+    }
+  }
+
   /** Simulate against the live engine or the offline snapshot. */
   async function simulate(scenario: ScenarioInput): Promise<SimulationResult> {
-    const { dataMode, snapshot } = get();
-    if (dataMode === "live") return liveApi.simulate(scenario);
+    if (get().dataMode === "live") {
+      try {
+        return await liveApi.simulate(scenario);
+      } catch (e) {
+        if (!(await failOverToSnapshot(e))) throw e;
+      }
+    }
+    const snapshot = get().snapshot;
     if (snapshot) {
       const r = snapshotSimulate(snapshot, scenario);
       if (r) return r;
@@ -309,14 +384,114 @@ export const useStore = create<DeeptraceState>((set, get) => {
   }
 
   async function compare(a: ScenarioInput, b: ScenarioInput): Promise<ScenarioComparison> {
-    const { dataMode, snapshot } = get();
-    if (dataMode === "live") return liveApi.compare(a, b);
+    if (get().dataMode === "live") {
+      try {
+        return await liveApi.compare(a, b);
+      } catch (e) {
+        if (!(await failOverToSnapshot(e))) throw e;
+      }
+    }
+    const snapshot = get().snapshot;
     if (snapshot) {
       const c = snapshotCompare(snapshot, a, b);
       if (c) return c;
     }
     throw new ApiError("This comparison was not precomputed in the offline snapshot. Start the backend engine.");
   }
+
+  /** Engine trace offline: the precomputed one from the snapshot, else direct connections only. */
+  function offlineTrace(nodeId: string): TraceResult | null {
+    const { snapshot, index } = get();
+    return snapshot?.traces?.[nodeId] ?? (index ? localTrace(index, nodeId) : null);
+  }
+
+  /** Node details without the engine, built only from what the snapshot actually contains. */
+  function offlineDetails(id: string): NodeDetails | null {
+    const { index, snapshot, metrics, baseline } = get();
+    const node = index?.nodes.get(id);
+    if (!index || !node) return null;
+    const local = localTrace(index, id);
+    const pre = snapshot?.traces?.[id] ?? null;
+    const rank = metrics?.criticality_ranking.findIndex((c) => c.node_id === id) ?? -1;
+    const entry = rank >= 0 ? metrics!.criticality_ranking[rank] : null;
+    const spofIds = snapshot?.spof_node_ids;
+    return {
+      node,
+      connected_node_ids: [...new Set([...local.neighbours, ...local.dependencies.map((h) => h.node_id), ...local.dependents.map((h) => h.node_id)])],
+      connected_edge_ids: [...local.physical_edge_ids, ...local.dependency_edge_ids],
+      upstream_ids: pre ? pre.upstream.map((h) => h.node_id) : [],
+      downstream_ids: pre ? pre.downstream.map((h) => h.node_id) : [],
+      dependency_ids: (pre ?? local).dependencies.map((h) => h.node_id),
+      dependent_ids: (pre ?? local).dependents.map((h) => h.node_id),
+      criticality_rank: rank >= 0 ? rank + 1 : null,
+      criticality_score: entry?.affected_count ?? null,
+      // Only claimed when the snapshot exports the engine's SPOF set; otherwise unknown.
+      is_single_point_of_failure: spofIds ? spofIds.includes(id) : null,
+      baseline_state: baseline?.node_states[id] ?? "operational",
+    };
+  }
+
+  /**
+   * The recorded offline-analyst answer for this question, but only when the app is showing the
+   * scenario it was recorded for (export_snapshot records it against the demo's scenario A).
+   */
+  function matchingReplay(question: string): AnalystEvent[] | null {
+    const s = get();
+    const events = s.snapshot?.analyst_replays?.[question];
+    if (!events?.length) return null;
+    const recordedFor = s.presets.find((p) => p.id === s.snapshot?.demo?.scenario_a_preset)?.scenario;
+    const active = s.result?.scenario;
+    if (!recordedFor || !active || !sameScenario(active, recordedFor)) return null;
+    return events;
+  }
+
+  /** Abort the in-flight analyst request (if any) and settle its message. */
+  function cancelAnalyst(reason: string) {
+    const ctrl = analystCtrl;
+    if (!ctrl) return;
+    analystCtrl = null;
+    ctrl.abort(reason);
+    set((s) => ({
+      analystPending: false,
+      messages: s.messages.map((m) =>
+        m.pending
+          ? {
+              ...m,
+              pending: false,
+              tools: m.tools.map((t) => (t.status === "running" ? { ...t, status: "error" as const, summary: "Stopped" } : t)),
+              error: m.error ?? reason,
+            }
+          : m,
+      ),
+    }));
+  }
+
+  /** A highlight the user made for the previously shown result no longer applies to a new one. */
+  const dropUserHighlight = (h: Highlight | null) => (h && h.source === "user" ? null : h);
+
+  /**
+   * State for a new comparison. Slot objects the UI already holds are kept when they are the
+   * compared scenarios, and `result` follows its slot, so the displayed result stays identifiable
+   * as A or B (the A/B chips compare by identity).
+   */
+  function adoptComparison(s: DeeptraceState, c: ScenarioComparison): Partial<DeeptraceState> {
+    const A = s.slots.A && sameScenario(s.slots.A.scenario, c.scenario_a.scenario) ? s.slots.A : c.scenario_a;
+    const B = s.slots.B && sameScenario(s.slots.B.scenario, c.scenario_b.scenario) ? s.slots.B : c.scenario_b;
+    const result = s.result && s.result === s.slots.A ? A : s.result && s.result === s.slots.B ? B : s.result;
+    return { comparison: c, compareView: "diff", slots: { A, B }, result, panels: { ...s.panels, comparison: true } };
+  }
+
+  /** Resolves once `pred()` holds (re-checked on every store update). */
+  const waitUntil = (pred: () => boolean) =>
+    new Promise<void>((resolve) => {
+      if (pred()) return resolve();
+      const unsub = api.subscribe(() => {
+        if (pred()) {
+          unsub();
+          resolve();
+        }
+      });
+    });
 
   const patchMessage = (id: string, fn: (m: ChatMessage) => ChatMessage) =>
     set((s) => ({ messages: s.messages.map((m) => (m.id === id ? fn(m) : m)) }));
@@ -343,11 +518,8 @@ export const useStore = create<DeeptraceState>((set, get) => {
     },
 
     layers: { ...DEFAULT_LAYERS },
-    showDependencies: true,
-    showParticles: true,
-    showLabels: true,
+    ...DEFAULT_VIEW,
     deepMode: false,
-    depthScale: 8,
     panels: { ...DEFAULT_PANELS },
 
     selectedNodeId: null,
@@ -460,6 +632,7 @@ export const useStore = create<DeeptraceState>((set, get) => {
     // ------------------------------------------------------------------ selection
     selectNode: async (id, opts) => {
       if (!id) {
+        traceSeq++;
         set({ selectedNodeId: null, details: null, trace: null, traceVisible: false });
         return;
       }
@@ -471,38 +644,16 @@ export const useStore = create<DeeptraceState>((set, get) => {
         panels: { ...s.panels, inspector: true },
       }));
       if (opts?.fly) world().flyToNode(id);
-      const { dataMode, index } = get();
-      if (dataMode === "live") {
+      let details: NodeDetails | null = null;
+      if (get().dataMode === "live") {
         try {
-          const details = await liveApi.nodeDetails(id);
-          if (get().selectedNodeId === id) set({ details, detailsLoading: false });
-        } catch {
-          if (get().selectedNodeId === id) set({ detailsLoading: false });
+          details = await liveApi.nodeDetails(id);
+        } catch (e) {
+          if (await failOverToSnapshot(e)) details = offlineDetails(id);
         }
-      } else if (index) {
-        const node = index.nodes.get(id);
-        if (node) {
-          const tr = localTrace(index, id);
-          const rank = get().metrics?.criticality_ranking.findIndex((c) => c.node_id === id) ?? -1;
-          const entry = rank >= 0 ? get().metrics!.criticality_ranking[rank] : null;
-          set({
-            details: {
-              node,
-              connected_node_ids: [...tr.upstream, ...tr.dependencies, ...tr.dependents].map((h) => h.node_id),
-              connected_edge_ids: [...tr.physical_edge_ids, ...tr.dependency_edge_ids],
-              upstream_ids: [],
-              downstream_ids: [],
-              dependency_ids: tr.dependencies.map((h) => h.node_id),
-              dependent_ids: tr.dependents.map((h) => h.node_id),
-              criticality_rank: rank >= 0 ? rank + 1 : null,
-              criticality_score: entry?.affected_count ?? null,
-              is_single_point_of_failure: false,
-              baseline_state: get().baseline?.node_states[id] ?? "operational",
-            },
-            detailsLoading: false,
-          });
-        }
-      }
+      } else details = offlineDetails(id);
+      if (get().selectedNodeId !== id) return; // a newer selection superseded this one
+      set({ details, detailsLoading: false });
       if (opts?.trace) await get().showTrace(id);
       else if (get().traceVisible && get().trace?.node_id !== id) await get().showTrace(id);
     },
@@ -517,15 +668,28 @@ export const useStore = create<DeeptraceState>((set, get) => {
       if (get().hoveredId !== id) set({ hoveredId: id });
     },
     showTrace: async (nodeId) => {
-      const { dataMode, index } = get();
+      const seq = ++traceSeq;
       try {
-        const trace = dataMode === "live" ? await liveApi.trace(nodeId) : index ? localTrace(index, nodeId) : null;
+        let trace: TraceResult | null;
+        if (get().dataMode === "live") {
+          try {
+            trace = await liveApi.trace(nodeId);
+          } catch (e) {
+            if (!(await failOverToSnapshot(e))) throw e;
+            trace = offlineTrace(nodeId);
+          }
+        } else trace = offlineTrace(nodeId);
+        // A newer trace request, a hide, or a selection change supersedes this response.
+        if (seq !== traceSeq || get().selectedNodeId !== nodeId) return;
         if (trace) set({ trace, traceVisible: true });
       } catch (e) {
-        set({ simError: `Trace failed: ${(e as Error).message}` });
+        if (seq === traceSeq) set({ simError: `Trace failed: ${(e as Error).message}` });
       }
     },
-    hideTrace: () => set({ traceVisible: false }),
+    hideTrace: () => {
+      traceSeq++;
+      set({ traceVisible: false });
+    },
     setHighlight: (h) => set({ highlight: h }),
 
     // ------------------------------------------------------------------ simulation
@@ -561,19 +725,33 @@ export const useStore = create<DeeptraceState>((set, get) => {
         set({ simError: "Select at least one component or connection to fail.", simStatus: "error" });
         return null;
       }
+      const epoch = simEpoch;
+      const seq = ++simSeq;
+      if (slot === "A" || slot === "B") slotSeq[slot] = seq;
       set({ simStatus: "running", simError: null });
       try {
         const result = await simulate(input);
+        if (epoch !== simEpoch) return null; // the world was restored / cleared while this ran
+        const latest = seq === simSeq; // only the newest run may change what is displayed
+        const ownsSlot = (slot === "A" || slot === "B") && slotSeq[slot] === seq;
+        if (!latest && !ownsSlot) return null;
         set((s) => ({
-          result,
-          simStatus: "idle",
-          compareView: null,
-          slots: slot === "A" ? { ...s.slots, A: result } : slot === "B" ? { ...s.slots, B: result } : s.slots,
-          playback: { step: 0, maxStep: maxStepOf(result), playing: true, runId: s.playback.runId + 1 },
-          panels: { ...s.panels, simulation: true },
+          slots: ownsSlot ? { ...s.slots, [slot]: result } : s.slots,
+          ...(latest
+            ? {
+                result,
+                simStatus: "idle" as const,
+                compareView: null,
+                // highlights belonged to the previously shown result
+                highlight: null,
+                playback: { step: 0, maxStep: maxStepOf(result), playing: true, runId: s.playback.runId + 1 },
+                panels: { ...s.panels, simulation: true },
+              }
+            : {}),
         }));
         return result;
       } catch (e) {
+        if (epoch !== simEpoch || seq !== simSeq) return null;
         set({ simStatus: "error", simError: (e as Error).message });
         return null;
       }
@@ -589,6 +767,7 @@ export const useStore = create<DeeptraceState>((set, get) => {
       set((s) => ({
         result: r,
         compareView: s.comparison ? slot : null,
+        highlight: r === s.result ? s.highlight : dropUserHighlight(s.highlight),
         playback: { step: maxStepOf(r), maxStep: maxStepOf(r), playing: false, runId: s.playback.runId + 1 },
       }));
     },
@@ -599,18 +778,16 @@ export const useStore = create<DeeptraceState>((set, get) => {
         set({ simError: "Run two scenarios (A and B) before comparing.", compareStatus: "error" });
         return null;
       }
+      const epoch = simEpoch;
+      const seq = ++compareSeq;
       set({ compareStatus: "running", simError: null });
       try {
         const comparison = await compare(A, B);
-        set((s) => ({
-          comparison,
-          compareStatus: "idle",
-          compareView: "diff",
-          slots: { A: comparison.scenario_a, B: comparison.scenario_b },
-          panels: { ...s.panels, comparison: true },
-        }));
+        if (epoch !== simEpoch || seq !== compareSeq) return null;
+        set((s) => ({ ...adoptComparison(s, comparison), compareStatus: "idle" }));
         return comparison;
       } catch (e) {
+        if (epoch !== simEpoch || seq !== compareSeq) return null;
         set({ compareStatus: "error", simError: (e as Error).message });
         return null;
       }
@@ -621,21 +798,29 @@ export const useStore = create<DeeptraceState>((set, get) => {
         set((s) => ({
           compareView: v,
           result: r ?? s.result,
+          highlight: r && r !== s.result ? dropUserHighlight(s.highlight) : s.highlight,
           playback: r
             ? { step: maxStepOf(r), maxStep: maxStepOf(r), playing: false, runId: s.playback.runId + 1 }
             : s.playback,
         }));
       } else set({ compareView: v });
     },
-    clearSimulation: () =>
+    clearSimulation: () => {
+      simEpoch++;
       set((s) => ({
         result: null,
         simStatus: "idle",
         simError: null,
         compareView: null,
         playback: { step: 0, maxStep: 0, playing: false, runId: s.playback.runId + 1 },
-      })),
+      }));
+    },
     restoreWorld: () => {
+      // Drop everything still in flight: simulations, comparisons, traces, demo steps, analyst answers.
+      simEpoch++;
+      traceSeq++;
+      demoRun++;
+      cancelAnalyst("Stopped: the world was restored.");
       set((s) => ({
         result: null,
         slots: { A: null, B: null },
@@ -653,8 +838,11 @@ export const useStore = create<DeeptraceState>((set, get) => {
         traceVisible: false,
         highlight: null,
         layers: { ...DEFAULT_LAYERS },
+        ...DEFAULT_VIEW,
         deepMode: false,
         panels: { ...DEFAULT_PANELS, analyst: s.panels.analyst },
+        // a restored world no longer matches any demo step (startDemo/resetDemo re-activate it)
+        demo: { active: false, step: 0, busy: false },
       }));
       world().setOrbit(false);
       world().flyHome();
@@ -671,6 +859,10 @@ export const useStore = create<DeeptraceState>((set, get) => {
         .map((m) => ({ role: m.role, content: m.content }));
       const userMsg: ChatMessage = { id: uid(), role: "user", content: trimmed, tools: [] };
       const asst: ChatMessage = { id: uid(), role: "assistant", content: "", tools: [], pending: true };
+      const ctrl = new AbortController();
+      analystCtrl = ctrl;
+      /** Stopped, cleared, restored, or replaced by a newer question: ignore anything further. */
+      const stale = () => analystCtrl !== ctrl;
       set((s) => ({
         messages: [...s.messages, userMsg, asst],
         analystPending: true,
@@ -678,6 +870,7 @@ export const useStore = create<DeeptraceState>((set, get) => {
       }));
 
       const onEvent = (ev: AnalystEvent) => {
+        if (stale()) return;
         switch (ev.type) {
           case "status":
             patchMessage(asst.id, (m) => ({ ...m, mode: ev.mode, model: ev.model, note: ev.note ?? null }));
@@ -710,30 +903,31 @@ export const useStore = create<DeeptraceState>((set, get) => {
             break;
         }
       };
+      const finish = (error?: string) => {
+        if (stale()) return;
+        analystCtrl = null;
+        patchMessage(asst.id, (m) => ({ ...m, pending: false, ...(error ? { error } : {}) }));
+        set({ analystPending: false });
+      };
+      const replay = async (events: AnalystEvent[]) => {
+        for (const ev of events) {
+          if (stale()) return;
+          onEvent(ev);
+          if (ev.type === "tool_result") await sleep(220);
+        }
+        finish();
+      };
+      const needsEngine =
+        "The AI analyst needs the DEEPTRACE engine (backend) so it can call simulation tools. In offline snapshot mode only the recorded answer to the demo question about the demo's scenario A is available.";
 
       if (s0.dataMode !== "live") {
-        // Offline snapshot: replay a recorded offline-analyst answer when one exists for this
-        // exact question (demo safety net); otherwise explain that the analyst needs the engine.
-        const replay = s0.snapshot?.analyst_replays?.[trimmed];
-        if (replay?.length) {
-          for (const ev of replay) {
-            onEvent(ev);
-            if (ev.type === "tool_result") await sleep(220);
-          }
-          patchMessage(asst.id, (m) => ({ ...m, pending: false }));
-          set({ analystPending: false });
-          return;
-        }
-        patchMessage(asst.id, (m) => ({
-          ...m,
-          pending: false,
-          error:
-            "The AI analyst needs the DEEPTRACE engine (backend) so it can call simulation tools. It is not available in offline snapshot mode.",
-        }));
-        set({ analystPending: false });
+        // Offline snapshot: replay the recorded offline-analyst answer when it was recorded for this
+        // exact question AND the scenario on screen; otherwise explain that the analyst needs the engine.
+        const events = matchingReplay(trimmed);
+        if (events) await replay(events);
+        else finish(needsEngine);
         return;
       }
-
 
       try {
         await streamAnalyst(
@@ -750,15 +944,28 @@ export const useStore = create<DeeptraceState>((set, get) => {
             force_offline: opts?.forceOffline ?? false,
           },
           onEvent,
+          ctrl.signal,
         );
+        finish();
       } catch (e) {
-        patchMessage(asst.id, (m) => ({ ...m, error: (e as Error).message }));
-      } finally {
-        patchMessage(asst.id, (m) => ({ ...m, pending: false }));
-        set({ analystPending: false });
+        if (stale()) return;
+        if (await failOverToSnapshot(e)) {
+          const events = matchingReplay(trimmed);
+          if (events) {
+            patchMessage(asst.id, (m) => ({ ...m, content: "", tools: [] }));
+            await replay(events);
+          } else finish(`The engine stopped responding. ${needsEngine}`);
+          return;
+        }
+        finish((e as Error).message);
       }
     },
-    clearChat: () => set({ messages: [] }),
+    stopAnalyst: () => cancelAnalyst("Stopped."),
+    clearChat: () => {
+      cancelAnalyst("Cleared.");
+      // highlights the analyst applied are explained only by the conversation being cleared
+      set((s) => ({ messages: [], highlight: s.highlight?.source === "ai" ? null : s.highlight }));
+    },
     applyUIAction: (a) => {
       switch (a.kind) {
         case "select_node":
@@ -783,7 +990,10 @@ export const useStore = create<DeeptraceState>((set, get) => {
           set({ highlight: null });
           break;
         case "show_trace":
-          if (a.trace) set({ trace: a.trace, traceVisible: true });
+          if (a.trace) {
+            traceSeq++;
+            set({ trace: a.trace, traceVisible: true });
+          }
           break;
         case "show_simulation":
           if (a.result) {
@@ -792,6 +1002,8 @@ export const useStore = create<DeeptraceState>((set, get) => {
             set((s) => ({
               result: r,
               compareView: null,
+              // keep analyst highlights (this same turn may have just set one); user ones are stale
+              highlight: dropUserHighlight(s.highlight),
               slots: slot === "A" ? { ...s.slots, A: r } : slot === "B" ? { ...s.slots, B: r } : s.slots,
               playback: { step: 0, maxStep: maxStepOf(r), playing: true, runId: s.playback.runId + 1 },
             }));
@@ -800,12 +1012,7 @@ export const useStore = create<DeeptraceState>((set, get) => {
         case "show_comparison":
           if (a.comparison) {
             const c = a.comparison;
-            set((s) => ({
-              comparison: c,
-              compareView: "diff",
-              slots: { A: c.scenario_a, B: c.scenario_b },
-              panels: { ...s.panels, comparison: true },
-            }));
+            set((s) => adoptComparison(s, c));
           }
           break;
       }
@@ -817,15 +1024,17 @@ export const useStore = create<DeeptraceState>((set, get) => {
       set((s) => ({ demo: { active: true, step: 0, busy: false }, messages: [], panels: { ...s.panels, layers: false } }));
       void get().demoGoto(0);
     },
-    exitDemo: () => set({ demo: { active: false, step: 0, busy: false } }),
-    resetDemo: () => {
-      get().restoreWorld();
-      set({ demo: { active: true, step: 0, busy: false }, messages: [] });
-      void get().demoGoto(0);
+    exitDemo: () => {
+      demoRun++; // the step that is running stops at its next await
+      set({ demo: { active: false, step: 0, busy: false } });
     },
+    resetDemo: () => get().startDemo(),
     demoGoto: async (stepIndex) => {
       const script = get().demoScript;
       if (!script) return;
+      const run = ++demoRun;
+      /** False once another step started or the demo was exited / reset / restored. */
+      const current = () => run === demoRun;
       const i = Math.max(0, Math.min(stepIndex, script.steps.length - 1));
       const step = script.steps[i];
       set({ demo: { active: true, step: i, busy: true } });
@@ -849,6 +1058,7 @@ export const useStore = create<DeeptraceState>((set, get) => {
             const order: LayerKey[] = ["underground", "water", "power", "telecom", "transport", "facility"];
             for (const k of order) {
               await sleep(550);
+              if (!current()) return;
               get().setLayer(k, true);
             }
             break;
@@ -859,6 +1069,7 @@ export const useStore = create<DeeptraceState>((set, get) => {
             break;
           case "trace":
             if (get().selectedNodeId !== focus) await get().selectNode(focus, { fly: true });
+            if (!current()) return;
             await get().showTrace(focus);
             break;
           case "simulate":
@@ -870,8 +1081,9 @@ export const useStore = create<DeeptraceState>((set, get) => {
                 set({ result: existing, compareView: null });
                 get().replayCascade();
               } else {
-                set({ traceVisible: false });
+                get().hideTrace();
                 await get().runSimulation(presetA.scenario, "A");
+                if (!current()) return;
               }
               const r = get().result;
               if (r && step.action === "cascade") {
@@ -880,26 +1092,36 @@ export const useStore = create<DeeptraceState>((set, get) => {
             }
             break;
           }
-          case "ask_ai":
+          case "ask_ai": {
             set((s) => ({ panels: { ...s.panels, analyst: true } }));
-            if (step.question) await get().sendAnalystMessage(step.question);
+            if (!step.question) break;
+            // sendAnalystMessage ignores calls while another answer is streaming: wait for it
+            // instead of silently skipping the scripted question.
+            await waitUntil(() => !get().analystPending || !current());
+            if (!current()) return;
+            await get().sendAnalystMessage(step.question);
             break;
+          }
           case "simulate_b":
             if (presetB) {
               set({ draft: { ...presetB.scenario } });
               await get().runSimulation(presetB.scenario, "B");
+              if (!current()) return;
               const r = get().result;
               if (r) world().flyToNodes(r.affected_nodes.map((a) => a.node_id));
             }
             break;
           case "compare":
             if (!get().slots.A && presetA) await get().runSimulation(presetA.scenario, "A");
+            if (!current()) return;
             if (!get().slots.B && presetB) await get().runSimulation(presetB.scenario, "B");
+            if (!current()) return;
             await get().runComparison();
             break;
         }
       } finally {
-        set((s) => ({ demo: { ...s.demo, busy: false } }));
+        // a superseded step must not clear `busy` for the step that replaced it
+        if (current()) set((s) => ({ demo: { ...s.demo, busy: false } }));
       }
     },
     demoNext: async () => {
