@@ -399,7 +399,9 @@ export const useStore = create<DeeptraceState>((set, get) => {
           .catch(() => {});
         // Snapshot is still useful as a safety net for demo mode; load quietly.
         loadOfflineBundle()
-          .then(({ snapshot }) => set({ snapshot }))
+          .then(({ snapshot }) => {
+            if (snapshot) set({ snapshot });
+          })
           .catch(() => {});
         return;
       } catch {
@@ -411,10 +413,10 @@ export const useStore = create<DeeptraceState>((set, get) => {
           health: null,
           network,
           index: buildIndex(network),
-          baseline: snapshot.baseline,
-          metrics: snapshot.metrics,
-          presets: snapshot.presets,
-          demoScript: snapshot.demo,
+          baseline: snapshot?.baseline ?? null,
+          metrics: snapshot?.metrics ?? null,
+          presets: snapshot?.presets ?? [],
+          demoScript: snapshot?.demo ?? null,
           snapshot,
           dataMode: "snapshot",
         });
@@ -900,3 +902,8 @@ export const useStore = create<DeeptraceState>((set, get) => {
 /** Convenience selector for the node currently selected. */
 export const useSelectedNode = () =>
   useStore((s) => (s.selectedNodeId && s.index ? s.index.nodes.get(s.selectedNodeId) ?? null : null));
+
+// Expose the store for debugging and automated browser tests (harmless in production).
+if (typeof window !== "undefined") {
+  (window as unknown as { __deeptraceStore?: typeof useStore }).__deeptraceStore = useStore;
+}

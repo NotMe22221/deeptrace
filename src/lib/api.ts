@@ -135,20 +135,21 @@ export async function streamAnalyst(
 
 export interface OfflineBundle {
   network: InfrastructureNetwork;
-  snapshot: DemoSnapshot;
+  /** Null when only the network snapshot exists (engine snapshot not exported yet). */
+  snapshot: DemoSnapshot | null;
 }
 
 export async function loadOfflineBundle(): Promise<OfflineBundle> {
-  const [network, snapshot] = await Promise.all([
-    fetch("/demo/network.json").then((r) => {
-      if (!r.ok) throw new ApiError("Offline network snapshot missing (public/demo/network.json)");
-      return r.json() as Promise<InfrastructureNetwork>;
-    }),
-    fetch("/demo/snapshot.json").then((r) => {
-      if (!r.ok) throw new ApiError("Offline engine snapshot missing (public/demo/snapshot.json)");
-      return r.json() as Promise<DemoSnapshot>;
-    }),
-  ]);
+  const networkRes = await fetch("/demo/network.json");
+  if (!networkRes.ok) throw new ApiError("Offline network snapshot missing (public/demo/network.json)");
+  const network = (await networkRes.json()) as InfrastructureNetwork;
+  let snapshot: DemoSnapshot | null = null;
+  try {
+    const r = await fetch("/demo/snapshot.json");
+    if (r.ok) snapshot = (await r.json()) as DemoSnapshot;
+  } catch {
+    snapshot = null;
+  }
   return { network, snapshot };
 }
 
