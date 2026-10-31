@@ -285,6 +285,14 @@ async function routes(page) {
   await page.keyboard.press('ArrowRight');
   st = await S(() => { const a = document.activeElement; return { focus: a?.tagName, ring: !!a && a !== document.body && a.matches(':focus-visible') }; });
   check('R5 clicking the highlight label leaves no focus ring', st.focus === 'BODY' && !st.ring, st);
+  // screen readers may send a click with detail 1 and no pointer press: still treated as keyboard use
+  await S(() => { const s = window.__deeptraceStore.getState(); s.setCompareView('diff'); });
+  const showBtn3 = page.locator('button', { hasText: 'hidden in A/B diff' }).first();
+  await showBtn3.waitFor({ timeout: 30000 });
+  st = await S(() => { const b = [...document.querySelectorAll('button')].find((x) => x.textContent.includes('hidden in A/B diff'));
+    b.focus(); b.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }));
+    return new Promise((r) => setTimeout(() => r({ view: window.__deeptraceStore.getState().compareView, focus: document.activeElement?.getAttribute('role') ?? document.activeElement?.tagName }), 200)); });
+  check('R5 a screen-reader style click on "show" keeps focus in the chip', st.view !== 'diff' && st.focus === 'status', st);
 
   // R4: an analyst comparison answering an earlier question does not count as a newer slot run
   await reset();

@@ -22,6 +22,8 @@ export function HighlightChip() {
   // The A/B diff view does not draw highlights (e.g. one set by the analyst while comparing).
   const hiddenByDiff = useStore((s) => s.compareView === "diff" && !!s.comparison);
   const rootRef = useRef<HTMLDivElement>(null);
+  /** The "show" button was pressed with a pointer (mouse / touch / pen), not a key or a screen reader. */
+  const pointerPress = useRef(false);
   const color = highlight ? (TONE[highlight.tone] ?? TONE.info) : TONE.info;
   const count = highlight ? highlight.node_ids.length + highlight.edge_ids.length : 0;
   return (
@@ -33,7 +35,11 @@ export function HighlightChip() {
           role="status"
           // made focusable only while it is the keyboard focus target after "show" (see below)
           onBlur={(e) => {
-            if (e.target === e.currentTarget) e.currentTarget.removeAttribute("tabindex");
+            // A window / tab switch also fires blur, but the chip stays document.activeElement and
+            // gets focus back on return: only a real focus move ends its focusability.
+            if (e.target === e.currentTarget && document.activeElement !== e.currentTarget) {
+              e.currentTarget.removeAttribute("tabindex");
+            }
           }}
           initial={{ opacity: 0, y: -4 }}
           animate={{ opacity: 1, y: 0 }}
@@ -50,12 +56,20 @@ export function HighlightChip() {
           {hiddenByDiff && (
             <button
               type="button"
+              onPointerDown={() => {
+                pointerPress.current = true;
+              }}
+              onKeyDown={() => {
+                pointerPress.current = false; // a pointer press abandoned earlier does not count
+              }}
               onClick={(e) => {
-                // This button unmounts on the next render. A keyboard user (click with detail 0)
-                // keeps focus in the chip, on the chip itself rather than the destructive Clear
-                // button, so Space still plays and a repeated Enter does nothing. A mouse click lets
-                // focus fall to the page as before, so no focus ring appears on later shortcut keys.
-                const keyboard = document.activeElement === e.currentTarget && e.detail === 0;
+                // This button unmounts on the next render. A keyboard or screen-reader user keeps
+                // focus in the chip, on the chip itself rather than the destructive Clear button, so
+                // Space still plays and a repeated Enter does nothing. A pointer press lets focus
+                // fall to the page as before, so no focus ring appears on later shortcut keys.
+                // (Pointer tracking, not e.detail: some screen readers send clicks with detail 1.)
+                const keyboard = document.activeElement === e.currentTarget && !pointerPress.current;
+                pointerPress.current = false;
                 leaveDiff();
                 const root = rootRef.current;
                 if (keyboard && root) {
