@@ -178,6 +178,40 @@ def _caveat(p: dict[str, Any] | None = None) -> str:
     return base
 
 
+def _binding_chain(s: _Session, scenario: ScenarioInput, tie_label: str, targets: list[str]) -> list[str]:
+    """Iteratively add the next binding element the engine reports for a restoration path.
+
+    Upgrading one bottleneck usually exposes the next one upstream (e.g. the supplying
+    feeder's first section), so ask the engine repeatedly until the path is no longer
+    capacity-limited or 5 elements are selected.
+    """
+    from app.ai.tools import _apply_modifications
+    from app.simulation.engine import SimulationEngine
+
+    _, edges = _indices(s.net)
+    chain = list(targets)
+    for _ in range(4):
+        mods = [{"kind": "capacity_upgrade", "target_id": t, "factor": 2.0} for t in chain if t in edges and edges[t].capacity]
+        if not mods:
+            break
+        try:
+            net, *_rest = _apply_modifications(s.ctx, mods[:5])
+            rr = SimulationEngine(net).simulate(scenario)
+        except Exception:  # noqa: BLE001 — fall back to what we have
+            break
+        alt = next((p for p in rr.alternative_paths if tie_label in p.node_ids or tie_label in p.edge_ids), None)
+        if alt is None or alt.capacity_ok or "limited by" not in alt.description:
+            break
+        new = [
+            t for t in re.findall(r"[A-Z][A-Z0-9]+(?:-[A-Z0-9]+)+", alt.description.split("limited by", 1)[1])
+            if t in edges and t not in chain
+        ]
+        if not new or len(chain) + len(new) > 5:
+            break
+        chain += new
+    return chain
+
+
 def _mitigation_candidates(s: _Session, r: SimulationResult) -> list[tuple[str, list[dict[str, Any]]]]:
     """Rule-based mitigation candidates derived from structured simulation output.
 
@@ -194,6 +228,56 @@ def _mitigation_candidates(s: _Session, r: SimulationResult) -> list[tuple[str, 
         )
 
     hours = max(8.0, r.scenario.horizon_hours * 2)
+
+    # (b) capacity-limited restoration: upgrade the tie unit AND the binding element the
+    #     engine names in the alternative path ("limited by ... feeder cable PWR-FDR-0006")
+    for p in r.alternative_paths:
+        if p.system.value != "power" or p.capacity_ok:
+            continue
+        tie_edges = [e for e in p.edge_ids if e in edges and edges[e].connection_type == "tie_line"]
+        tie_switches = [
+            n for n in p.node_ids
+            if n in nodes and nodes[n].type == "switch" and nodes[n].properties.get("normally_open")
+        ]
+        limit_text = p.description.split("limited by", 1)[1] if "limited by" in p.description else ""
+        binding = [t for t in re.findall(r"[A-Z][A-Z0-9]+(?:-[A-Z0-9]+)+", limit_text) if t in edges or t in nodes]
+        targets = list(dict.fromkeys(tie_edges + binding))
+        key = "|".join(sorted(targets))
+        if not targets or key in seen:
+            continue
+        seen.add(key)
+        mods = [{"kind": "capacity_upgrade", "target_id": t, "factor": 2.0} for t in targets
+                if (t in edges and edges[t].capacity) or (t in nodes and nodes[t].capacity)]
+        if not mods:
+            continue
+        label = tie_switches[0] if tie_switches else targets[0]
+        targets = _binding_chain(s, r.scenario, label, targets)
+        mods = [{"kind": "capacity_upgrade", "target_id": t, "factor": 2.0} for t in targets
+                if (t in edges and edges[t].capacity) or (t in nodes and nodes[t].capacity)]
+        what = ", ".join(f"`{t}`" for t in targets[:5])
+        cands.append(
+            (
+                f"Reinforce the restoration path through tie `{label}` (double the rating of {what}); automatic restoration was capacity-limited there.",
+                mods[:5],
+            )
+        )
+        if sum(1 for c in cands if c[1][0]["kind"] == "capacity_upgrade") >= 3:
+            break
+
+    # (b2) elements that tripped on overload (a genuine cascade): uprate them
+    tripped = [ie.edge_id for ie in r.interrupted_edges if ie.state == "failed" and ie.step > 0 and "trip" in ie.reason.lower()]
+    tripped += [a.node_id for a in r.affected_nodes if a.state == "failed" and a.step > 0 and "trip" in a.cause.lower()]
+    for t in tripped[:2]:
+        if t in seen:
+            continue
+        seen.add(t)
+        nm = edges[t].name if t in edges and edges[t].name else s.name(t)
+        cands.append(
+            (
+                f"Uprate `{t}` ({nm}) so it can carry the transferred load: it tripped on overload and turned a supply loss into a blackout.",
+                [{"kind": "capacity_upgrade", "target_id": t, "factor": 1.5}],
+            )
+        )
 
     # (a) consumers that lost their function because they lost power and lack backup
     priority = {"hospital": 0, "pump_station": 0, "internet_exchange": 1, "data_center": 1, "central_office": 2,
@@ -218,35 +302,6 @@ def _mitigation_candidates(s: _Session, r: SimulationResult) -> list[tuple[str, 
             )
         )
 
-    # (b) capacity-limited restoration through tie switches: upgrade the whole tie unit
-    for p in r.alternative_paths:
-        if p.system.value != "power" or p.capacity_ok:
-            continue
-        tie_edges = [e for e in p.edge_ids if e in edges and edges[e].connection_type == "tie_line"]
-        tie_switches = [
-            n for n in p.node_ids
-            if n in nodes and nodes[n].type == "switch" and nodes[n].properties.get("normally_open")
-        ]
-        key = "|".join(sorted(tie_edges + tie_switches))
-        if not tie_edges or key in seen:
-            continue
-        seen.add(key)
-        mods = [{"kind": "capacity_upgrade", "target_id": e, "factor": 2.0} for e in tie_edges]
-        mods += [
-            {"kind": "capacity_upgrade", "target_id": n, "factor": 2.0}
-            for n in tie_switches
-            if nodes[n].capacity is not None
-        ]
-        label = tie_switches[0] if tie_switches else tie_edges[0]
-        cands.append(
-            (
-                f"Double the rating of tie `{label}` ({', '.join(f'`{e}`' for e in tie_edges)}), because automatic restoration through it was capacity-limited.",
-                mods[:5],
-            )
-        )
-        if sum(1 for c in cands if c[1][0]["kind"] == "capacity_upgrade") >= 2:
-            break
-
     # (c) common-cause corridor failure hitting telecom
     corridor_edges = [e for e in r.scenario.failed_edges if e in edges and edges[e].infrastructure_type.value == "underground"]
     for cid in corridor_edges:
@@ -259,6 +314,31 @@ def _mitigation_candidates(s: _Session, r: SimulationResult) -> list[tuple[str, 
                     f"Route the fibre in duct bank `{cid}` ({', '.join(f'`{f}`' for f in fibre[:3])}) along a physically diverse path, since one excavation strike currently cuts power and internet together.",
                     [{"kind": "separate_corridor", "target_id": f} for f in fibre[:5]],
                 )
+            )
+    # (d) telecom endpoints disconnected from every core: dual-home them to the nearest other hub
+    disconnected = [a.node_id for a in r.affected_nodes if a.system.value == "telecom" and a.state == "disconnected"]
+    if disconnected:
+        import math
+
+        neighbours: dict[str, set[str]] = {}
+        for e in s.net.edges:
+            if e.relation.value == "physical":
+                neighbours.setdefault(e.source_node, set()).add(e.target_node)
+                neighbours.setdefault(e.target_node, set()).add(e.source_node)
+        failed = set(r.scenario.failed_nodes)
+        hubs = [n for n in s.net.nodes if n.type == "fiber_hub" and n.id not in failed]
+        mods = []
+        for nid in disconnected[:3]:
+            a = nodes[nid]
+            options = [h for h in hubs if h.id not in neighbours.get(nid, set())]
+            if not options:
+                continue
+            best = min(options, key=lambda h: math.hypot(h.latitude - a.latitude, (h.longitude - a.longitude) * 0.83))
+            mods.append({"kind": "add_connection", "target_id": nid, "to_node_id": best.id})
+        if mods:
+            names = ", ".join(f"{s.name(m['target_id'])} → {s.name(m['to_node_id'])}" for m in mods)
+            cands.append(
+                (f"Dual-home the single-homed sites with a second fibre lateral ({names}), so losing one hub or core no longer disconnects them.", mods)
             )
     return cands
 
@@ -386,7 +466,7 @@ def answer_explain_mitigate(s: _Session, target: str | None) -> str:
     # Quantify every candidate with the engine, then rank by modelled severity reduction.
     ranked: list[tuple[float, str]] = []
     no_effect: list[str] = []
-    for text, mods in _mitigation_candidates(s, result)[:5]:
+    for text, mods in _mitigation_candidates(s, result)[:7]:
         ok2, out2 = s.call("evaluate_mitigation", {"scenario": scen_args, "modifications": mods})
         if not ok2:
             continue
@@ -402,14 +482,20 @@ def answer_explain_mitigate(s: _Session, target: str | None) -> str:
         if gain > 0.05 or saved:
             ranked.append((gain, f"{text} **Modelled effect:** {effect}."))
         else:
-            no_effect.append(text.split(",")[0].split(" (")[0])
+            title = text.split(",")[0].split(" (")[0].strip()
+            if title:
+                no_effect.append(title)
     ranked.sort(key=lambda x: -x[0])
     mit = [t for _, t in ranked[:3]]
     if no_effect:
         mit.append(
             "Tested with no modelled improvement (another limit binds): " + "; ".join(no_effect[:2]) + "."
         )
-    mit += _qualitative_mitigations(result)
+    quantified_text = " ".join(mit)
+    mit += [
+        tip for tip in _qualitative_mitigations(result)
+        if not (tip.startswith("Dual-home") and "Dual-home" in quantified_text)
+    ]
 
     lead = (
         f"The cascade starts at {initiating}. It spreads because the affected section has no alternative supply with "
