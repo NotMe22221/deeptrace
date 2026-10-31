@@ -76,17 +76,17 @@
     },
     {
       "id": "simulate_b",
-      "title": "One shovel, two networks",
-      "narration": "Scenario B is a single excavation strike on the Marietta St duct bank. Because a power feeder and the west fibre ring share that trench, one cut hits both systems at once.",
+      "title": "One shovel, four systems",
+      "narration": "Scenario B is a single excavation strike on the Edgewood Ave duct bank beside Grady. One feeder, its station traction feed and both of the hospital's 'diverse' fibre paths share that trench, so one cut hits power, telecom, transit and Grady at once.",
       "action": "simulate_b",
       "node_id": null,
-      "preset_id": "B-MARIETTA-DUCTBANK",
+      "preset_id": "B-EDGEWOOD-DUCTBANK",
       "question": null
     },
     {
       "id": "compare",
       "title": "Compare A and B",
-      "narration": "Side by side: the substation loss drops more load, while the duct-bank strike is smaller but crosses system boundaries. Shared corridors are the hidden single points of failure.",
+      "narration": "Side by side: the substation loss drops far more load and puts City Hall on generators; the trench strike drops less load but cuts the hospital's communications and shuts the east-line MARTA stations. Shared corridors are the hidden single points of failure.",
       "action": "compare",
       "node_id": null,
       "preset_id": null,
@@ -94,6 +94,6 @@
     }
   ],
   "scenario_a_preset": "A-DS-FIVEPOINTS",
-  "scenario_b_preset": "B-MARIETTA-DUCTBANK",
+  "scenario_b_preset": "B-EDGEWOOD-DUCTBANK",
   "focus_node_id": "PWR-DS-FIVEPOINTS"
 }

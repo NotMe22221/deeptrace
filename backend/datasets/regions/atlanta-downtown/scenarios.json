@@ -19,23 +19,23 @@
     "focus_node_id": "PWR-DS-FIVEPOINTS"
   },
   {
-    "id": "B-MARIETTA-DUCTBANK",
-    "name": "Excavation strike on Marietta St duct bank",
+    "id": "B-EDGEWOOD-DUCTBANK",
+    "name": "Excavation strike on Edgewood Ave duct bank (Grady / Georgia State)",
     "scenario_type": "corridor_strike",
-    "description": "A contractor strikes the shared Marietta St duct bank between Broad St and Spring St, cutting every cable it hosts at once: a Five Points power feeder and the west fibre ring (common-cause failure).",
+    "description": "A contractor strikes the shared Edgewood Ave duct bank between Courtland St and Jesse Hill Jr Dr. Every cable in the trench is cut at once: feeder GR-1 (one of Grady's two power feeds, plus the traction feed for Georgia State station) and the fibre backhaul of BOTH access nodes that give Grady its 'diverse' communications paths (common-cause failure).",
     "scenario": {
-      "scenario_id": "B-MARIETTA-DUCTBANK",
-      "name": "Excavation strike on Marietta St duct bank",
+      "scenario_id": "B-EDGEWOOD-DUCTBANK",
+      "name": "Excavation strike on Edgewood Ave duct bank (Grady / Georgia State)",
       "scenario_type": "corridor_strike",
       "failed_nodes": [],
       "failed_edges": [
-        "UGD-DB-01"
+        "UGD-DB-06"
       ],
       "horizon_hours": 4.0,
       "enable_restoration": true,
       "max_cascade_rounds": 8
     },
-    "focus_node_id": "UGD-VLT-01"
+    "focus_node_id": "UGD-VLT-08"
   },
   {
     "id": "C-WATER-MAIN-DECATUR",
@@ -77,14 +77,17 @@
   },
   {
     "id": "E-ROADS-FIVEPOINTS",
-    "name": "Five Points road closures",
+    "name": "Five Points cordon (road closures)",
     "scenario_type": "road_disruption",
-    "description": "Emergency closure of Peachtree St, Marietta St and Edgewood Ave where they meet at Five Points; traffic detours around the core.",
+    "description": "An emergency cordon closes the Five Points intersection, the Marietta St / Broad St corner outside Five Points station and the adjoining blocks of Peachtree St, Marietta St and Edgewood Ave. Traffic detours around the core and Five Points station loses its street access.",
     "scenario": {
       "scenario_id": "E-ROADS-FIVEPOINTS",
-      "name": "Five Points road closures",
+      "name": "Five Points cordon (road closures)",
       "scenario_type": "road_disruption",
-      "failed_nodes": [],
+      "failed_nodes": [
+        "TRN-INT-0068",
+        "TRN-INT-0070"
+      ],
       "failed_edges": [
         "TRN-RD-0056",
         "TRN-RD-0102",

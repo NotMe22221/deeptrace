@@ -73,7 +73,7 @@ def test_loader_reads_dataset() -> None:
     net = load_network(REGION)
     assert len(net.nodes) == len(json.loads((REGION_DIR / "network.json").read_text())["nodes"])
     assert load_region(REGION).ground_elevation_m == pytest.approx(290, abs=30)
-    assert {p.id for p in load_presets(REGION)} >= {"A-DS-FIVEPOINTS", "B-MARIETTA-DUCTBANK"}
+    assert {p.id for p in load_presets(REGION)} >= {"A-DS-FIVEPOINTS", "B-EDGEWOOD-DUCTBANK"}
     script = load_demo_script(REGION)
     assert script is not None and script.focus_node_id == "PWR-DS-FIVEPOINTS"
 
@@ -212,7 +212,7 @@ def test_five_points_can_only_be_partially_restored(nodes, edges) -> None:
         assert deps_into(edges, sw["id"], "control_link"), "remote switching needs a SCADA comms link"
 
 
-def test_marietta_corridor_is_common_cause(edges) -> None:
+def test_marietta_corridor_hosts_power_and_fibre(edges) -> None:
     db = edges["UGD-DB-01"]
     assert db["connection_type"] == "duct_bank" and 1.5 <= db["depth_m"] <= 3.0
     hosted = [edges[h] for h in db["properties"]["hosted_edge_ids"]]
@@ -221,6 +221,33 @@ def test_marietta_corridor_is_common_cause(edges) -> None:
     assert all(h["corridor_id"] == "UGD-DB-01" for h in hosted)
     corridors = [e for e in edges.values() if e["infrastructure_type"] == "underground"]
     assert 6 <= len(corridors) <= 9
+
+
+def test_edgewood_corridor_is_a_hidden_single_point_of_failure(nodes, edges) -> None:
+    """Scenario B: one trench carries a Grady feed, a station traction feed and BOTH of Grady's comms paths."""
+    db = edges["UGD-DB-06"]
+    hosted = {h: edges[h] for h in db["properties"]["hosted_edge_ids"]}
+    feeder_sections = [h for h in hosted.values() if h["connection_type"] == "feeder_cable"]
+    assert len(feeder_sections) >= 2, "a vault stranded between two cuts cannot be restored"
+    stranded = {h["target_node"] for h in feeder_sections} & {h["source_node"] for h in feeder_sections}
+    assert stranded, "some vault must sit between two hosted feeder sections"
+    tie_vaults = {
+        e["source_node"] if e["source_node"] in nodes and nodes[e["source_node"]]["type"] == "network_vault" else e["target_node"]
+        for e in edges.values()
+        if e["connection_type"] == "tie_line"
+    }
+    assert not stranded & tie_vaults, "the stranded vault must have no tie"
+    grady_power = {e["source_node"] for e in deps_into(edges, "FAC-GRADY", "power_supply")}
+    assert grady_power & stranded, "one of Grady's two feeds runs through the trench"
+    grady_comms = {e["source_node"] for e in deps_into(edges, "FAC-GRADY", "telecom_link")}
+    assert len(grady_comms) == 2
+    fibre_targets = {h["target_node"] for h in hosted.values() if h["connection_type"] == "fiber_link"}
+    assert grady_comms <= fibre_targets, "both 'diverse' comms paths share the trench"
+    for acc in grady_comms:
+        homes = [e for e in edges.values() if e["connection_type"] == "fiber_link" and acc in (e["source_node"], e["target_node"])]
+        assert len(homes) == 1, f"{acc} is single-homed"
+    station_feed = {e["source_node"] for e in deps_into(edges, "TRN-STN-GEORGIASTATE", "power_supply")}
+    assert nodes[next(iter(station_feed))]["properties"]["feeder"] == "GR-1"
 
 
 def test_water_design(nodes, edges) -> None:
@@ -339,7 +366,7 @@ def test_presets(presets, nodes, edges) -> None:
     by_id = {p["id"]: p for p in presets}
     expected = {
         "A-DS-FIVEPOINTS": "power_failure",
-        "B-MARIETTA-DUCTBANK": "corridor_strike",
+        "B-EDGEWOOD-DUCTBANK": "corridor_strike",
         "C-WATER-MAIN-DECATUR": "water_rupture",
         "D-TELECOM-56MARIETTA": "telecom_outage",
         "E-ROADS-FIVEPOINTS": "road_disruption",
@@ -351,7 +378,7 @@ def test_presets(presets, nodes, edges) -> None:
         assert sc["horizon_hours"] == 4 and sc["enable_restoration"] is True
         assert sc["scenario_type"] == p["scenario_type"]
     assert by_id["A-DS-FIVEPOINTS"]["scenario"]["failed_nodes"] == ["PWR-DS-FIVEPOINTS"]
-    assert by_id["B-MARIETTA-DUCTBANK"]["scenario"]["failed_edges"] == ["UGD-DB-01"]
+    assert by_id["B-EDGEWOOD-DUCTBANK"]["scenario"]["failed_edges"] == ["UGD-DB-06"]
     assert by_id["D-TELECOM-56MARIETTA"]["scenario"]["failed_nodes"] == ["TEL-IX-56MARIETTA"]
     assert by_id["F-TS-SOUTH"]["scenario"]["failed_nodes"] == ["PWR-TS-SOUTH"]
     water = by_id["C-WATER-MAIN-DECATUR"]["scenario"]["failed_edges"]
@@ -361,6 +388,10 @@ def test_presets(presets, nodes, edges) -> None:
     hub = by_id["E-ROADS-FIVEPOINTS"]["focus_node_id"]
     assert nodes[hub]["name"].startswith("Five Points")
     assert all(hub in (edges[r]["source_node"], edges[r]["target_node"]) for r in roads)
+    closed = by_id["E-ROADS-FIVEPOINTS"]["scenario"]["failed_nodes"]
+    assert hub in closed and all(nodes[n]["type"] == "intersection" for n in closed)
+    station_access = {e["source_node"] for e in deps_into(edges, "TRN-STN-FIVEPOINTS", "road_access")}
+    assert station_access <= set(closed), "the cordon must cut Five Points station's street access"
 
 
 def test_demo_script(demo, presets) -> None:
@@ -370,11 +401,11 @@ def test_demo_script(demo, presets) -> None:
         "simulate", "cascade", "ask_ai", "simulate_b", "compare",
     ]  # fmt: skip
     assert demo["focus_node_id"] == "PWR-DS-FIVEPOINTS"
-    assert demo["scenario_a_preset"] == "A-DS-FIVEPOINTS" and demo["scenario_b_preset"] == "B-MARIETTA-DUCTBANK"
+    assert demo["scenario_a_preset"] == "A-DS-FIVEPOINTS" and demo["scenario_b_preset"] == "B-EDGEWOOD-DUCTBANK"
     steps = {s["action"]: s for s in demo["steps"]}
     assert steps["select_node"]["node_id"] == "PWR-DS-FIVEPOINTS"
     assert steps["simulate"]["preset_id"] == "A-DS-FIVEPOINTS"
-    assert steps["simulate_b"]["preset_id"] == "B-MARIETTA-DUCTBANK"
+    assert steps["simulate_b"]["preset_id"] == "B-EDGEWOOD-DUCTBANK"
     assert steps["ask_ai"]["question"] == "Why did this happen, and what could we do differently?"
     for s in demo["steps"]:
         assert s["title"] and 40 <= len(s["narration"]) <= 400

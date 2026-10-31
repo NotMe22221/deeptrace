@@ -124,8 +124,8 @@
       {"id": "02", "a": "FP-2:4", "b": "CAP-1:1", "capacity_mw": 5, "manual_switch_hours": 2},
       {"id": "03", "a": "FP-3:4", "b": "PT-1:4", "capacity_mw": 8, "manual_switch_hours": 3},
       {"id": "04", "a": "CEN-3:2", "b": "CIV-1:3", "capacity_mw": 7, "manual_switch_hours": 4},
-      {"id": "05", "a": "PT-2:4", "b": "GR-1:2", "capacity_mw": 6, "manual_switch_hours": 2},
-      {"id": "06", "a": "GR-1:4", "b": "CAP-1:4", "capacity_mw": 5, "manual_switch_hours": 3},
+      {"id": "05", "a": "PT-2:4", "b": "GR-1:1", "capacity_mw": 6, "manual_switch_hours": 2},
+      {"id": "06", "a": "GR-1:3", "b": "CAP-1:4", "capacity_mw": 4, "manual_switch_hours": 3},
       {"id": "07", "a": "GR-2:4", "b": "CAP-2:4", "capacity_mw": 4, "manual_switch_hours": 4}
     ],
     "population_per_mw": 1000
@@ -284,8 +284,8 @@
       {"id": "TEL-ACC-01", "name": "Access node Fairlie-Poplar (simulated)", "at": "Forsyth St & Luckie St", "near": [33.7588, -84.3905], "homes": ["TEL-HUB-FAIRLIE"], "demand_gbps": 6, "backup_hours": 4},
       {"id": "TEL-ACC-02", "name": "Access node Peachtree Center (simulated)", "at": "Courtland St & Ellis St", "near": [33.7583, -84.3855], "homes": ["TEL-CO-PEACHTREE"], "demand_gbps": 10, "backup_hours": 4},
       {"id": "TEL-ACC-03", "name": "Access node Capitol Hill (simulated)", "at": "Central Ave & Mitchell St", "near": [33.7502, -84.3896], "homes": ["TEL-CO-CAPITOL", "TEL-HUB-GARNETT"], "demand_gbps": 8, "backup_hours": 8},
-      {"id": "TEL-ACC-04", "name": "Access node Georgia State (simulated)", "at": "Courtland St & Auburn Ave", "near": [33.7557, -84.3857], "homes": ["TEL-HUB-GSU"], "demand_gbps": 9, "backup_hours": 4},
-      {"id": "TEL-ACC-05", "name": "Access node Castleberry (simulated)", "at": "Ted Turner Dr & Trinity Ave", "near": [33.7471, -84.396], "homes": ["TEL-HUB-GARNETT"], "demand_gbps": 2, "backup_hours": 2}
+      {"id": "TEL-ACC-04", "name": "Access node Georgia State (simulated)", "at": "Edgewood Ave & Piedmont Ave", "near": [33.7543, -84.3845], "homes": ["TEL-HUB-GSU"], "demand_gbps": 9, "backup_hours": 4},
+      {"id": "TEL-ACC-05", "name": "Access node Grady campus (simulated)", "at": "Edgewood Ave & Jesse Hill Jr Dr", "near": [33.7543, -84.3824], "homes": ["TEL-HUB-GSU"], "demand_gbps": 6, "backup_hours": 4}
     ]
   },
   "underground": {
@@ -294,9 +294,10 @@
       {"id": "UGD-DB-02", "type": "duct_bank", "name": "Marietta St duct bank (Spring St - Centennial Olympic Park Dr)", "from": {"at": "Marietta St & Spring St", "near": [33.7569, -84.3936]}, "to": {"at": "Centennial Olympic Park Dr & Marietta St", "near": [33.7583, -84.3966]}, "depth_m": 2.0, "ducts": 9},
       {"id": "UGD-DB-03", "type": "duct_bank", "name": "Peachtree St duct bank (Five Points - Ellis St)", "from": {"at": "Peachtree St & Edgewood Ave", "near": [33.7546, -84.3902]}, "to": {"at": "Peachtree St & Ellis St", "near": [33.7585, -84.3879]}, "depth_m": 2.5, "ducts": 16},
       {"id": "UGD-UT-04", "type": "utility_tunnel", "name": "Andrew Young Intl Blvd utility tunnel (Spring St - Courtland St)", "from": {"at": "Andrew Young International Blvd & Spring St", "near": [33.7607, -84.3916]}, "to": {"at": "Andrew Young International Blvd & Courtland St", "near": [33.7599, -84.3853]}, "depth_m": 3.0, "ducts": 24},
-      {"id": "UGD-DB-05", "type": "duct_bank", "name": "Edgewood Ave duct bank (Five Points - Jesse Hill Jr Dr)", "from": {"at": "Peachtree St & Edgewood Ave", "near": [33.7546, -84.3902]}, "to": {"at": "Edgewood Ave & Jesse Hill Jr Dr", "near": [33.7543, -84.3824]}, "depth_m": 1.8, "ducts": 12},
-      {"id": "UGD-DB-06", "type": "duct_bank", "name": "Martin Luther King Jr Dr duct bank (Peachtree St - Washington St)", "from": {"at": "Peachtree St & Martin Luther King Jr Dr", "near": [33.7488, -84.392]}, "to": {"at": "Martin Luther King Jr Dr & Washington St", "near": [33.7483, -84.3886]}, "depth_m": 1.5, "ducts": 8},
-      {"id": "UGD-DB-07", "type": "duct_bank", "name": "Courtland St duct bank (Edgewood Ave - Andrew Young Intl Blvd)", "from": {"at": "Courtland St & Edgewood Ave", "near": [33.7544, -84.3858]}, "to": {"at": "Andrew Young International Blvd & Courtland St", "near": [33.7599, -84.3853]}, "depth_m": 2.2, "ducts": 12}
+      {"id": "UGD-DB-05", "type": "duct_bank", "name": "Edgewood Ave duct bank (Five Points - Courtland St)", "from": {"at": "Peachtree St & Edgewood Ave", "near": [33.7546, -84.3902]}, "to": {"at": "Courtland St & Edgewood Ave", "near": [33.7544, -84.3858]}, "depth_m": 1.8, "ducts": 12},
+      {"id": "UGD-DB-06", "type": "duct_bank", "name": "Edgewood Ave duct bank (Courtland St - Jesse Hill Jr Dr, Grady / Georgia State)", "from": {"at": "Courtland St & Edgewood Ave", "near": [33.7544, -84.3858]}, "to": {"at": "Edgewood Ave & Jesse Hill Jr Dr", "near": [33.7543, -84.3824]}, "depth_m": 2.0, "ducts": 16},
+      {"id": "UGD-DB-07", "type": "duct_bank", "name": "Martin Luther King Jr Dr duct bank (Peachtree St - Washington St)", "from": {"at": "Peachtree St & Martin Luther King Jr Dr", "near": [33.7488, -84.392]}, "to": {"at": "Martin Luther King Jr Dr & Washington St", "near": [33.7483, -84.3886]}, "depth_m": 1.5, "ducts": 8},
+      {"id": "UGD-DB-08", "type": "duct_bank", "name": "Courtland St duct bank (Edgewood Ave - Andrew Young Intl Blvd)", "from": {"at": "Courtland St & Edgewood Ave", "near": [33.7544, -84.3858]}, "to": {"at": "Andrew Young International Blvd & Courtland St", "near": [33.7599, -84.3853]}, "depth_m": 2.2, "ducts": 12}
     ],
     "host_connection_types": ["feeder_cable", "tie_line", "fiber_link"],
     "min_shared_length_m": 60
@@ -333,12 +334,13 @@
   },
   "dependencies": {
     "power_overrides": {
-      "FAC-GRADY": ["GR-1:1", "CAP-2:4"],
-      "WTR-PS-FAIRLIE": ["FP-1:3"],
+      "FAC-GRADY": ["GR-1:2", "CAP-2:4"],
+      "WTR-PS-FAIRLIE": ["FP-1:2"],
       "TEL-IX-56MARIETTA": ["FP-1:1"],
       "TRN-STN-FIVEPOINTS": ["FP-1:1"],
       "FAC-GWCC": ["CEN-2:1"],
-      "FAC-STADIUM": ["CEN-1:1"]
+      "FAC-STADIUM": ["CEN-1:1"],
+      "TRN-STN-GEORGIASTATE": ["GR-1:4"]
     },
     "telecom_consumers": ["hospital", "government", "emergency_services", "transit_station"],
     "telecom_redundant_consumers": ["hospital"],
@@ -349,17 +351,18 @@
     {"id": "A-DS-FIVEPOINTS", "name": "DS Five Points substation failure", "scenario_type": "power_failure",
      "description": "DS-2 Five Points (simulated) trips. Its three radial feeders lose supply; normally-open ties to Centennial, Capitol and Peachtree Center can only pick up part of the load, and the outage cascades into water pumping, telecom, signals and MARTA.",
      "fail_nodes": ["PWR-DS-FIVEPOINTS"], "focus_node_id": "PWR-DS-FIVEPOINTS"},
-    {"id": "B-MARIETTA-DUCTBANK", "name": "Excavation strike on Marietta St duct bank", "scenario_type": "corridor_strike",
-     "description": "A contractor strikes the shared Marietta St duct bank between Broad St and Spring St, cutting every cable it hosts at once: a Five Points power feeder and the west fibre ring (common-cause failure).",
-     "fail_edges": ["UGD-DB-01"], "focus_node_id": "corridor:UGD-DB-01"},
+    {"id": "B-EDGEWOOD-DUCTBANK", "name": "Excavation strike on Edgewood Ave duct bank (Grady / Georgia State)", "scenario_type": "corridor_strike",
+     "description": "A contractor strikes the shared Edgewood Ave duct bank between Courtland St and Jesse Hill Jr Dr. Every cable in the trench is cut at once: feeder GR-1 (one of Grady's two power feeds, plus the traction feed for Georgia State station) and the fibre backhaul of BOTH access nodes that give Grady its 'diverse' communications paths (common-cause failure).",
+     "fail_edges": ["UGD-DB-06"], "focus_node_id": "corridor:UGD-DB-06"},
     {"id": "C-WATER-MAIN-DECATUR", "name": "Transmission main break on Decatur St", "scenario_type": "water_rupture",
      "description": "A transmission water main ruptures on Decatur St east of Five Points; crews must close isolation valves, cutting supply to part of the low-pressure grid.",
      "fail_edges_near": [{"connection_type": "water_main", "near": [33.7538, -84.3884]}], "focus_node_id": "WTR-JN-07"},
     {"id": "D-TELECOM-56MARIETTA", "name": "56 Marietta St carrier hotel outage", "scenario_type": "telecom_outage",
      "description": "The core interconnection facility at 56 Marietta St (real building; modelled connections simulated) goes dark. Dual-homed rings fail over to the east core; single-homed sites may not.",
      "fail_nodes": ["TEL-IX-56MARIETTA"], "focus_node_id": "TEL-IX-56MARIETTA"},
-    {"id": "E-ROADS-FIVEPOINTS", "name": "Five Points road closures", "scenario_type": "road_disruption",
-     "description": "Emergency closure of Peachtree St, Marietta St and Edgewood Ave where they meet at Five Points; traffic detours around the core.",
+    {"id": "E-ROADS-FIVEPOINTS", "name": "Five Points cordon (road closures)", "scenario_type": "road_disruption",
+     "description": "An emergency cordon closes the Five Points intersection, the Marietta St / Broad St corner outside Five Points station and the adjoining blocks of Peachtree St, Marietta St and Edgewood Ave. Traffic detours around the core and Five Points station loses its street access.",
+     "fail_intersections": [{"at": "Peachtree St & Edgewood Ave", "near": [33.7546, -84.3902]}, {"at": "Marietta St & Broad St", "near": [33.7552, -84.3913]}],
      "fail_road_legs": {"at": "Peachtree St & Edgewood Ave", "near": [33.7546, -84.3902], "streets": ["Peachtree St", "Marietta St", "Edgewood Ave"]}, "focus_node_id": "road:Peachtree St & Edgewood Ave"},
     {"id": "F-TS-SOUTH", "name": "Loss of TS-South bulk supply", "scenario_type": "power_failure",
      "description": "The TS-South 115 kV bulk supply point (simulated) is lost. Its substations shift onto alternate transmission lines that were never sized to carry their full load.",
@@ -370,7 +373,7 @@
     "title": "DEEPTRACE: one substation, six systems",
     "focus_node_id": "PWR-DS-FIVEPOINTS",
     "scenario_a_preset": "A-DS-FIVEPOINTS",
-    "scenario_b_preset": "B-MARIETTA-DUCTBANK",
+    "scenario_b_preset": "B-EDGEWOOD-DUCTBANK",
     "steps": [
       {"id": "overview", "action": "overview", "title": "Downtown Atlanta as one living system",
        "narration": "This is downtown Atlanta — Five Points, Peachtree Center, the Capitol and Grady — rebuilt as a digital twin. Streets and landmarks are approximate; every utility asset beneath them is an illustrative simulation."},
@@ -388,10 +391,10 @@
        "narration": "Round by round the failure spreads: feeders de-energise, signals go dark and traffic slows, the high-pressure water zone falls back on its tank, cell sites run down their batteries. Ties restore only part of the load — they were never sized for all of it."},
       {"id": "ask_ai", "action": "ask_ai", "question": "Why did this happen, and what could we do differently?", "title": "Ask the analyst",
        "narration": "The AI analyst answers from the simulation results, not guesswork: it cites the elements that failed, why restoration was partial, and which upgrades would have helped most."},
-      {"id": "simulate_b", "action": "simulate_b", "preset_id": "B-MARIETTA-DUCTBANK", "title": "One shovel, two networks",
-       "narration": "Scenario B is a single excavation strike on the Marietta St duct bank. Because a power feeder and the west fibre ring share that trench, one cut hits both systems at once."},
+      {"id": "simulate_b", "action": "simulate_b", "preset_id": "B-EDGEWOOD-DUCTBANK", "title": "One shovel, four systems",
+       "narration": "Scenario B is a single excavation strike on the Edgewood Ave duct bank beside Grady. One feeder, its station traction feed and both of the hospital's 'diverse' fibre paths share that trench, so one cut hits power, telecom, transit and Grady at once."},
       {"id": "compare", "action": "compare", "title": "Compare A and B",
-       "narration": "Side by side: the substation loss drops more load, while the duct-bank strike is smaller but crosses system boundaries. Shared corridors are the hidden single points of failure."}
+       "narration": "Side by side: the substation loss drops far more load and puts City Hall on generators; the trench strike drops less load but cuts the hospital's communications and shuts the east-line MARTA stations. Shared corridors are the hidden single points of failure."}
     ]
   }
 }

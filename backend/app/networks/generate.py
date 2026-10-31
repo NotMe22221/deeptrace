@@ -920,7 +920,7 @@ class NetworkBuilder:
             boundary = bool(pipe.get("boundary_valve"))
             self.add_node(
                 valve_id,
-                (f"Boundary valve {valve_id[-2:]} (normally closed, simulated)" if boundary else f"Isolation valve {valve_id[-2:]} (simulated)"),
+                (f"Boundary valve {valve_id[-2:]}, normally closed (simulated)" if boundary else f"Isolation valve {valve_id[-2:]} (simulated)"),
                 "water", "valve", mid, sim_prov(), elevation=-1.8,
                 description=(
                     "Normally-closed valve separating the high- and low-pressure zones; can be opened to back-feed (simulated)."
@@ -1357,6 +1357,8 @@ class NetworkBuilder:
                     key=lambda e: (round(geo.nearest_point_on_polyline(p, e["geometry"], self.proj)[1], 3), e["id"]),
                 )
                 failed_edges.append(best["id"])
+            for spec in s.get("fail_intersections", []):
+                failed_nodes.append(self.street_node_to_trn[self.resolve_anchor(spec)])
             legs = s.get("fail_road_legs")
             if legs:
                 sid = self.resolve_anchor(legs)
@@ -1382,7 +1384,7 @@ class NetworkBuilder:
                     "scenario_id": s["id"],
                     "name": s["name"],
                     "scenario_type": s["scenario_type"],
-                    "failed_nodes": sorted(failed_nodes),
+                    "failed_nodes": sorted(dict.fromkeys(failed_nodes)),
                     "failed_edges": sorted(failed_edges),
                     "horizon_hours": float(s.get("horizon_hours", 4.0)),
                     "enable_restoration": bool(s.get("enable_restoration", True)),
@@ -1504,7 +1506,7 @@ def generate_region(
     if mirror_dir is not None:
         mirror_dir.mkdir(parents=True, exist_ok=True)
         (mirror_dir / "network.json").write_text(text)
-    return network, presets, demo, builder.warnings
+    return network, presets, demo, list(dict.fromkeys(builder.warnings))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
