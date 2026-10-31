@@ -398,11 +398,10 @@ function NodeInspector({ node, index }: { node: InfrastructureNode; index: Netwo
   const inDraft = draft.failed_nodes.includes(node.id);
   const tracingThis = traceVisible && !!trace;
 
-  const isArticulation = useMemo(
-    () => metrics?.systems.some((s) => s.articulation_points.includes(node.id)) ?? false,
-    [metrics, node.id],
-  );
-  const spof = details?.is_single_point_of_failure || isArticulation;
+  // Single point of failure is only claimed from engine output: live node details, or (offline)
+  // the engine's SPOF set exported in the snapshot. null = unknown, so nothing is claimed.
+  const dataMode = useStore((s) => s.dataMode);
+  const spof: boolean | null = details?.is_single_point_of_failure ?? null;
   const critEntry = useMemo(() => {
     const i = metrics?.criticality_ranking.findIndex((c) => c.node_id === node.id) ?? -1;
     return i >= 0
@@ -494,8 +493,11 @@ function NodeInspector({ node, index }: { node: InfrastructureNode; index: Netwo
           <>
             <ProvenanceChip category={node.provenance.category} />
             {node.critical && <Chip color="#f43f5e">Critical</Chip>}
-            {spof && (
-              <Chip color="#fb923c" title="Removing this component disconnects part of its network">
+            {spof === true && (
+              <Chip
+                color="#fb923c"
+                title="Engine N-1 analysis: its failure cuts demand off from every source in its network, or affects 5+ components"
+              >
                 Single point of failure
               </Chip>
             )}
@@ -556,7 +558,10 @@ function NodeInspector({ node, index }: { node: InfrastructureNode; index: Netwo
               ) : (
                 <StateChip state={simState} />
               )}
-              {affected && !affectedStyle(affected).rerouted && (
+              {affected && !affectedStyle(affected).impacted && !affectedStyle(affected).rerouted && (
+                <Chip color="#4ade80">No service loss</Chip>
+              )}
+              {affected && affectedStyle(affected).impacted && (
                 <>
                   <Chip color={SEVERITY_STYLES[affected.severity].color}>
                     {SEVERITY_STYLES[affected.severity].label}
@@ -657,13 +662,18 @@ function NodeInspector({ node, index }: { node: InfrastructureNode; index: Netwo
                   {fmtNum(critEntry.entry.affected_count, 0)}
                 </KeyValue>
               )}
-              <KeyValue label="Single point of failure">
-                {spof ? (
+              <KeyValue
+                label="Single point of failure"
+                hint={spof === null && dataMode !== "live" ? "needs live engine" : undefined}
+              >
+                {spof === true ? (
                   <span className="inline-flex items-center gap-1 text-warn">
                     <AlertTriangle className="size-3" /> Yes
                   </span>
-                ) : (
+                ) : spof === false ? (
                   "No"
+                ) : (
+                  "—"
                 )}
               </KeyValue>
             </dl>

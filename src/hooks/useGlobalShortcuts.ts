@@ -3,7 +3,13 @@ import { useEffect } from "react";
 import { useStore } from "@/lib/store";
 import { isTypingTarget } from "@/lib/format";
 import { world } from "@/engine/worldBridge";
-import { closePanel, openPanel, toggleDeepMode, togglePanel } from "@/components/interface/actions";
+import {
+  closePanel,
+  leaveDiffForPlayback,
+  openPanel,
+  toggleDeepMode,
+  togglePanel,
+} from "@/components/interface/actions";
 import { useUI, type RightPanel } from "@/components/interface/uiStore";
 
 const RIGHT: RightPanel[] = ["inspector", "analyst", "comparison", "provenance"];
@@ -62,20 +68,25 @@ export function useGlobalShortcuts() {
           openPanel("search");
           return;
         case "ArrowRight":
-        case "ArrowLeft":
-          if (S.demo.active && !S.demo.busy) {
-            e.preventDefault();
-            void (k === "ArrowRight" ? S.demoNext() : S.demoPrev());
-          }
+        case "ArrowLeft": {
+          // Focused controls that use the arrow keys (range sliders, radios, tabs) keep them.
+          const t = e.target as HTMLElement | null;
+          const onControl = t && t !== document.body && t.closest("input, [role=slider], [role=tab], [role=radio]");
+          if (onControl || !S.demo.active || S.demo.busy) return;
+          e.preventDefault();
+          void (k === "ArrowRight" ? S.demoNext() : S.demoPrev());
           return;
+        }
         case " ": {
           const t = e.target as HTMLElement | null;
           const onControl = t && t !== document.body && t.closest("button, a, [role=tab], [role=slider], input");
           if (!S.result || onControl) return;
           e.preventDefault();
           const atEnd = S.playback.step >= S.playback.maxStep;
-          if (S.playback.playing) S.setPlaying(false);
-          else if (atEnd) S.replayCascade();
+          if (S.playback.playing) return S.setPlaying(false);
+          // Playback only renders outside the A/B diff view.
+          leaveDiffForPlayback();
+          if (atEnd) S.replayCascade();
           else S.setPlaying(true);
           return;
         }

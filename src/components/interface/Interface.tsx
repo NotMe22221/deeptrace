@@ -26,6 +26,7 @@ import { CommandPalette } from "./CommandPalette";
 import { ComponentInspector } from "./ComponentInspector";
 import { DeepModeDescent } from "./DeepModeToggle";
 import { DemoBar } from "./DemoBar";
+import { HighlightChip } from "./HighlightChip";
 import { LayerPanel } from "./LayerPanel";
 import { MainToolbar } from "./MainToolbar";
 import { ProvenancePanel } from "./ProvenancePanel";
@@ -180,6 +181,9 @@ export function Interface() {
           <MainToolbar />
           <div className="absolute top-[60px] right-2 left-2 z-20 flex flex-col gap-2">
             <DemoBar />
+            <div className="flex justify-center">
+              <HighlightChip />
+            </div>
             <Toasts />
           </div>
           <AnimatePresence>
@@ -290,6 +294,9 @@ export function Interface() {
         >
           <div className="w-full max-w-[680px]">
             <DemoBar />
+          </div>
+          <div className="flex w-full max-w-[680px] justify-center">
+            <HighlightChip />
           </div>
           <div className={cx("flex w-full max-w-[680px] justify-end", demoActive && "mt-0")}>
             <Toasts />

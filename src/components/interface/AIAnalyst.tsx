@@ -1,5 +1,5 @@
 "use client";
-import { ArrowUp, Bot, Check, CircleAlert, Sparkles, Trash2, X } from "lucide-react";
+import { ArrowUp, Bot, Check, CircleAlert, Sparkles, Square, Trash2, X } from "lucide-react";
 import { motion } from "framer-motion";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useStore, type ChatMessage, type NetworkIndex, type ToolActivity } from "@/lib/store";
@@ -8,7 +8,7 @@ import { renderMarkdown } from "@/lib/markdown";
 import { SYSTEM_STYLES } from "@/lib/systems";
 import { closePanel, focusEdge, focusNode } from "./actions";
 import { prettyModel } from "./MainToolbar";
-import { cx, IconButton, Spinner, SystemDot } from "./ui";
+import { cx, IconButton, Spinner, SystemDot, Tooltip } from "./ui";
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -281,7 +281,7 @@ export function AIAnalyst() {
           </h2>
           <div className="truncate text-[10.5px] leading-tight text-ink-300">{headerMode}</div>
         </div>
-        <IconButton label="Clear conversation" size="sm" disabled={!messages.length || pending} onClick={clearChat}>
+        <IconButton label="Clear conversation" size="sm" disabled={!messages.length} onClick={clearChat}>
           <Trash2 className="size-3.5" />
         </IconButton>
         <IconButton label="Close analyst" shortcut="A" size="sm" onClick={() => closePanel("analyst")}>
@@ -372,14 +372,27 @@ export function AIAnalyst() {
             style={{ outline: "none" }}
             className="dt-scroll max-h-[120px] min-h-[22px] flex-1 resize-none bg-transparent py-[3px] text-[13px] leading-snug text-ink-50 placeholder:text-ink-400"
           />
-          <button
-            type="submit"
-            disabled={!text.trim() || pending}
-            aria-label="Send question"
-            className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-ink-50 text-ink-950 transition-opacity disabled:opacity-25"
-          >
-            {pending ? <Spinner className="text-ink-950" /> : <ArrowUp className="size-4" />}
-          </button>
+          {pending ? (
+            <Tooltip label="Stop the answer (keeps what has arrived)">
+              <button
+                type="button"
+                onClick={() => useStore.getState().stopAnalyst()}
+                aria-label="Stop answer"
+                className="flex size-7 shrink-0 items-center justify-center rounded-lg border border-white/20 bg-white/[0.08] text-ink-50 transition-colors hover:bg-white/[0.14]"
+              >
+                <Square className="size-3 fill-current" />
+              </button>
+            </Tooltip>
+          ) : (
+            <button
+              type="submit"
+              disabled={!text.trim()}
+              aria-label="Send question"
+              className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-ink-50 text-ink-950 transition-opacity disabled:opacity-25"
+            >
+              <ArrowUp className="size-4" />
+            </button>
+          )}
         </form>
         <p className="mt-1.5 px-0.5 text-[10px] leading-snug text-ink-400">
           Answers are grounded in DEEPTRACE tool outputs. Simulated data is labelled as such.

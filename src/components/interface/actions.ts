@@ -13,8 +13,23 @@ import { useUI, type RightPanel } from "./uiStore";
 const S = () => useStore.getState();
 
 const RIGHT: PanelKey[] = ["inspector", "analyst", "comparison", "provenance"];
+/** Bottom sheets on phones that a visible right-panel sheet would otherwise hide. */
+const SHEETS: PanelKey[] = ["layers", "simulation"];
+/** Same breakpoint as useViewport().narrow (Interface phone layout). */
+const PHONE_MAX_WIDTH = 768;
+
+/** Phone layout only: is a right-panel sheet currently in front of the layers/simulation sheets? */
+function rightSheetCovers(): boolean {
+  if (typeof window === "undefined" || window.innerWidth >= PHONE_MAX_WIDTH) return false;
+  const s = S();
+  const hasSelection = !!(s.selectedNodeId || s.selectedEdgeId);
+  return RIGHT.some((k) => s.panels[k] && (k !== "inspector" || hasSelection));
+}
 
 export function openPanel(key: PanelKey) {
+  // One sheet at a time on phones: the explorer / simulation sheet replaces a right-panel sheet.
+  // (setPanel rather than closePanel keeps the current selection.)
+  if (SHEETS.includes(key) && rightSheetCovers()) for (const k of RIGHT) if (S().panels[k]) S().setPanel(k, false);
   S().setPanel(key, true);
   if (RIGHT.includes(key)) useUI.getState().focusRight(key as RightPanel);
 }
@@ -29,7 +44,8 @@ export function closePanel(key: PanelKey) {
 
 export function togglePanel(key: PanelKey) {
   const open = S().panels[key];
-  if (!open) return openPanel(key);
+  // A layers/simulation sheet hidden behind a right sheet on phones is revealed, not closed.
+  if (!open || (SHEETS.includes(key) && rightSheetCovers())) return openPanel(key);
   // A right drawer that is open but behind another one is brought to the front first.
   if (RIGHT.includes(key)) {
     const order = useUI.getState().rightOrder;
@@ -88,6 +104,25 @@ export async function simulateEdgeFailure(id: string) {
   });
   useUI.getState().setSimTab("results");
   await S().runSimulation(scenario, quickSlot());
+}
+
+/**
+ * Cascade playback only renders outside the A/B diff view. When the user drives playback while
+ * the map shows the diff, switch the map to the slot that holds `result` (matched by scenario id,
+ * because runComparison replaces the slot objects) without touching result or playback.
+ */
+export function leaveDiffForPlayback() {
+  const s = S();
+  if (s.compareView !== "diff" || !s.result) return;
+  const r = s.result;
+  const id = r.scenario_id;
+  const slot =
+    s.slots.A === r || s.slots.A?.scenario_id === id
+      ? "A"
+      : s.slots.B === r || s.slots.B?.scenario_id === id
+        ? "B"
+        : null;
+  useStore.setState({ compareView: slot });
 }
 
 /**

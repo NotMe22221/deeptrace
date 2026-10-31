@@ -6,7 +6,7 @@ import { fmtCompact, fmtMeters, fmtNum, fmtPct, fmtSeconds } from "@/lib/format"
 import { LAYER_ORDER, NODE_STATE_STYLES, SYSTEM_STYLES, typeLabel } from "@/lib/systems";
 import { world } from "@/engine/worldBridge";
 import type { AlternativePath, SimulationResult, SystemType } from "@/types/infrastructure";
-import { focusNode } from "./actions";
+import { focusNode, leaveDiffForPlayback } from "./actions";
 import { affectedStyle } from "./stateStyle";
 import { Chip, cx, IconButton, SectionLabel, Slider, SystemDot, Tooltip } from "./ui";
 
@@ -141,8 +141,15 @@ function Metric({
 export function ResultOverview({ result }: { result: SimulationResult }) {
   const m = result.impact_metrics;
   const setHighlight = useStore((s) => s.setHighlight);
+  const highlight = useStore((s) => s.highlight);
   const index = useStore((s) => s.index);
   const critCount = m.critical_facilities_affected.length;
+  const CRIT_LABEL = "Critical facilities affected";
+  const critActive =
+    highlight?.label === CRIT_LABEL &&
+    highlight.source === "user" &&
+    highlight.node_ids.length === critCount &&
+    m.critical_facilities_affected.every((id) => highlight.node_ids.includes(id));
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-3">
@@ -191,23 +198,31 @@ export function ResultOverview({ result }: { result: SimulationResult }) {
         />
         <Metric label="Stations closed" value={fmtNum(m.transit_stations_closed, 0)} />
         <Tooltip
-          label={critCount ? "Highlight affected critical facilities" : "No critical facilities affected"}
+          label={
+            !critCount
+              ? "No critical facilities affected"
+              : critActive
+                ? "Clear the critical-facility highlight"
+                : "Highlight affected critical facilities on the map"
+          }
           className="block"
         >
           <button
             type="button"
             disabled={!critCount}
+            aria-pressed={critCount ? critActive : undefined}
             onClick={() => {
+              if (critActive) return setHighlight(null);
               setHighlight({
                 node_ids: m.critical_facilities_affected,
                 edge_ids: [],
-                label: "Critical facilities affected",
+                label: CRIT_LABEL,
                 tone: "critical",
                 source: "user",
               });
               world().flyToNodes(m.critical_facilities_affected);
             }}
-            className="w-full text-left disabled:cursor-default"
+            className={cx("w-full rounded-md text-left disabled:cursor-default", critActive && "ring-1 ring-alert/60")}
           >
             <Metric label="Critical facilities" value={fmtNum(critCount, 0)} tone={critCount ? "#f43f5e" : undefined} />
           </button>
@@ -302,7 +317,14 @@ export function PlaybackControls({ compact }: { compact?: boolean }) {
   return (
     <div className="flex items-center gap-1">
       {!compact && (
-        <IconButton label="Replay cascade" size="sm" onClick={replayCascade}>
+        <IconButton
+          label="Replay cascade"
+          size="sm"
+          onClick={() => {
+            leaveDiffForPlayback();
+            replayCascade();
+          }}
+        >
           <RotateCcw className="size-3.5" />
         </IconButton>
       )}
@@ -312,6 +334,7 @@ export function PlaybackControls({ compact }: { compact?: boolean }) {
           size="sm"
           disabled={playback.step <= 0}
           onClick={() => {
+            leaveDiffForPlayback();
             setPlaying(false);
             setPlaybackStep(playback.step - 1);
           }}
@@ -323,7 +346,12 @@ export function PlaybackControls({ compact }: { compact?: boolean }) {
         label={playback.playing ? "Pause cascade" : atEnd ? "Replay cascade" : "Play cascade"}
         size="sm"
         pressed={playback.playing}
-        onClick={() => (playback.playing ? setPlaying(false) : atEnd ? replayCascade() : setPlaying(true))}
+        onClick={() => {
+          if (playback.playing) return setPlaying(false);
+          leaveDiffForPlayback();
+          if (atEnd) replayCascade();
+          else setPlaying(true);
+        }}
       >
         {playback.playing ? (
           <Pause className="size-3.5" />
@@ -339,6 +367,7 @@ export function PlaybackControls({ compact }: { compact?: boolean }) {
           size="sm"
           disabled={atEnd}
           onClick={() => {
+            leaveDiffForPlayback();
             setPlaying(false);
             setPlaybackStep(playback.step + 1);
           }}
@@ -352,10 +381,16 @@ export function PlaybackControls({ compact }: { compact?: boolean }) {
 
 export function CascadeTimeline({ result }: { result: SimulationResult }) {
   const playback = useStore((s) => s.playback);
+  const compareView = useStore((s) => s.compareView);
   const setPlaying = useStore((s) => s.setPlaying);
   const setPlaybackStep = useStore((s) => s.setPlaybackStep);
   const index = useStore((s) => s.index);
   const steps = useMemo(() => [...result.cascade_steps].sort((a, b) => a.step - b.step), [result]);
+  // Per-step counts exclude engine "info" rows (rerouted / restored with no service loss).
+  const noLoss = useMemo(
+    () => new Set(result.affected_nodes.filter((a) => !affectedStyle(a).impacted).map((a) => a.node_id)),
+    [result],
+  );
 
   return (
     <div>
@@ -369,6 +404,11 @@ export function CascadeTimeline({ result }: { result: SimulationResult }) {
       >
         Cascade timeline
       </SectionLabel>
+      {compareView === "diff" && (
+        <p className="mb-1.5 rounded-md border border-sky-300/20 bg-sky-300/[0.05] px-2 py-1.5 text-[11px] leading-snug text-ink-200">
+          The map is showing the A/B diff. Playing or scrubbing switches the map back to this scenario.
+        </p>
+      )}
       <div className="flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-1.5 py-1">
         <PlaybackControls />
         <div className="min-w-0 flex-1 px-1">
@@ -377,6 +417,7 @@ export function CascadeTimeline({ result }: { result: SimulationResult }) {
             min={0}
             max={Math.max(1, playback.maxStep)}
             onChange={(v) => {
+              leaveDiffForPlayback();
               setPlaying(false);
               setPlaybackStep(v);
             }}
@@ -408,6 +449,7 @@ export function CascadeTimeline({ result }: { result: SimulationResult }) {
                 type="button"
                 aria-current={current ? "step" : undefined}
                 onClick={() => {
+                  leaveDiffForPlayback();
                   setPlaying(false);
                   setPlaybackStep(s.step);
                 }}
@@ -440,12 +482,23 @@ export function CascadeTimeline({ result }: { result: SimulationResult }) {
                         <SystemDot key={sys} system={sys} size={6} />
                       ))}
                     </span>
-                    <span
-                      className="dt-num ml-auto shrink-0 text-[10px] text-ink-400"
-                      title={`${s.node_ids.length} components and ${s.edge_ids.length} connections change state`}
-                    >
-                      {s.node_ids.length ? `+${s.node_ids.length}` : ""}
-                    </span>
+                    {(() => {
+                      const hit = s.node_ids.filter((id) => !noLoss.has(id)).length;
+                      const ok = s.node_ids.length - hit;
+                      return (
+                        <span
+                          className="dt-num ml-auto shrink-0 text-[10px] text-ink-400"
+                          title={`${hit} components lose service${ok ? `, ${ok} rerouted or restored with no loss` : ""}; ${s.edge_ids.length} connections change state`}
+                        >
+                          {hit ? `+${hit}` : ""}
+                          {ok ? (
+                            <span className="text-[#86efac]/70">
+                              {hit ? " " : ""}✓{ok}
+                            </span>
+                          ) : null}
+                        </span>
+                      );
+                    })()}
                   </span>
                   <span
                     title={s.description}
@@ -544,9 +597,9 @@ function AffectedGroups({ result }: { result: SimulationResult }) {
       arr.push(a);
       m.set(a.system, arr);
     }
-    // Impacted components first (by cascade step), rerouted-with-full-service last.
+    // Impacted components first (by cascade step); no-service-loss rows (engine "info") last.
     for (const arr of m.values())
-      arr.sort((x, y) => Number(affectedStyle(x).rerouted) - Number(affectedStyle(y).rerouted) || x.step - y.step);
+      arr.sort((x, y) => Number(!affectedStyle(x).impacted) - Number(!affectedStyle(y).impacted) || x.step - y.step);
     return LAYER_ORDER.filter((k) => m.has(k)).map((k) => ({ system: k, items: m.get(k)! }));
   }, [result]);
   if (!index) return null;
@@ -557,14 +610,17 @@ function AffectedGroups({ result }: { result: SimulationResult }) {
         const all = expanded[system];
         const shown = all ? items : items.slice(0, 5);
         const rerouted = items.filter((a) => affectedStyle(a).rerouted).length;
+        const noLoss = items.filter((a) => !affectedStyle(a).impacted).length;
+        const restored = noLoss - rerouted;
         return (
           <div key={system}>
             <div className="flex items-center gap-1.5 px-1">
               <SystemDot system={system} size={6} />
               <span className="text-[11px] font-medium text-ink-200">{st.label}</span>
               <span className="dt-num text-[10px] text-ink-400">
-                {items.length - rerouted}
+                {items.length - noLoss}
                 {rerouted > 0 && <span className="text-[#86efac]/80"> · {rerouted} rerouted</span>}
+                {restored > 0 && <span className="text-[#86efac]/80"> · {restored} restored</span>}
               </span>
             </div>
             <ul className="mt-0.5">
@@ -586,12 +642,12 @@ function AffectedGroups({ result }: { result: SimulationResult }) {
                         <span
                           className={cx(
                             "inline-flex shrink-0 items-center gap-1 rounded-[4px] px-1 py-[1px] text-[9.5px]",
-                            s.rerouted && "border border-dashed border-ok/30",
+                            !s.impacted && "border border-dashed border-ok/30",
                           )}
-                          style={{ color: s.color, background: s.rerouted ? undefined : `${s.color}1a` }}
+                          style={{ color: s.color, background: s.impacted ? `${s.color}1a` : undefined }}
                         >
                           <span className="size-1 rounded-full" style={{ background: s.color }} />
-                          {s.rerouted ? "Rerouted" : s.label}
+                          {s.impacted ? s.label : s.short}
                         </span>
                       </button>
                     </Tooltip>
@@ -664,10 +720,7 @@ export function ResultDetails({ result }: { result: SimulationResult }) {
   const dataMode = useStore((s) => s.dataMode);
   return (
     <div className="space-y-3">
-      <Collapsible
-        title="Affected components"
-        count={result.affected_nodes.filter((a) => !affectedStyle(a).rerouted).length}
-      >
+      <Collapsible title="Affected components" count={result.impact_metrics.total_nodes_affected}>
         <AffectedGroups result={result} />
       </Collapsible>
       {result.alternative_paths.length > 0 && (

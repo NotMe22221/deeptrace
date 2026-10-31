@@ -5,10 +5,23 @@ import { useStore, type NetworkIndex } from "@/lib/store";
 import { fmtNum } from "@/lib/format";
 import { renderMarkdown } from "@/lib/markdown";
 import { SCENARIO_TYPE_LABELS, connectionLabel } from "@/lib/systems";
-import type { ComparisonMetric, SimulationResult } from "@/types/infrastructure";
+import type { ComparisonMetric, ScenarioInput, SimulationResult } from "@/types/infrastructure";
 import { closePanel, focusAny, focusNode, openPanel } from "./actions";
 import { severityColor } from "./SimulationResults";
 import { Button, cx, IconButton, SectionLabel, SystemDot } from "./ui";
+
+const sortedKey = (ids: string[]) => [...ids].sort().join("|");
+
+/** Same failure targets and settings (what the engine result depends on). */
+function sameScenario(a: ScenarioInput, b: ScenarioInput) {
+  return (
+    sortedKey(a.failed_nodes) === sortedKey(b.failed_nodes) &&
+    sortedKey(a.failed_edges) === sortedKey(b.failed_edges) &&
+    a.horizon_hours === b.horizon_hours &&
+    a.enable_restoration === b.enable_restoration &&
+    a.max_cascade_rounds === b.max_cascade_rounds
+  );
+}
 
 export const DIFF_COLORS = { a: "#f59e0b", b: "#38bdf8", both: "#f43f5e" } as const;
 
@@ -198,10 +211,16 @@ export function ScenarioComparison() {
   const compareStatus = useStore((s) => s.compareStatus);
   const index = useStore((s) => s.index);
 
+  // A slot is stale when it now holds a different scenario than the one compared: different
+  // failure targets, horizon or restoration (scenario ids alone can be reused by presets).
   const stale =
-    comparison &&
-    ((slots.A && slots.A.scenario_id !== comparison.scenario_a.scenario_id) ||
-      (slots.B && slots.B.scenario_id !== comparison.scenario_b.scenario_id));
+    !!comparison &&
+    ((!!slots.A &&
+      slots.A !== comparison.scenario_a &&
+      !sameScenario(slots.A.scenario, comparison.scenario_a.scenario)) ||
+      (!!slots.B &&
+        slots.B !== comparison.scenario_b &&
+        !sameScenario(slots.B.scenario, comparison.scenario_b.scenario)));
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">

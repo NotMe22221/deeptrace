@@ -13,7 +13,8 @@ import {
   X,
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { isTypingTarget } from "@/lib/format";
 import { useStore, type PanelKey } from "@/lib/store";
 import { useViewport } from "@/hooks/useViewport";
 import { openPanel, restoreWorld, startDemo, togglePanel } from "./actions";
@@ -171,6 +172,8 @@ export function MainToolbar() {
   const setShortcutsOpen = useUI((s) => s.setShortcutsOpen);
   const status = useStatus();
   const [menuOpen, setMenuOpen] = useState(false);
+  const closeMenu = useCallback(() => setMenuOpen(false), []);
+  const exitDemo = useStore((s) => s.exitDemo);
   const showLabels = width >= 1700;
   const showChipLabels = width >= 1820;
   const showRegion = width >= 1360;
@@ -180,7 +183,7 @@ export function MainToolbar() {
 
   if (narrow) {
     return (
-      <header className="pointer-events-auto absolute top-2 right-2 left-2 z-30 flex items-center gap-2">
+      <header className="pointer-events-auto absolute top-2 right-2 left-2 z-40 flex items-center gap-2">
         <div className="dt-panel flex h-11 min-w-0 flex-1 items-center gap-2 px-3">
           <BrandMark size={18} />
           <span className="font-display text-[13px] font-semibold tracking-[0.3em] text-ink-50">DEEPTRACE</span>
@@ -206,7 +209,7 @@ export function MainToolbar() {
           </IconButton>
         </div>
         <AnimatePresence>
-          {menuOpen && <NarrowMenu onClose={() => setMenuOpen(false)} status={status} demoDisabled={!demoScript} />}
+          {menuOpen && <NarrowMenu onClose={closeMenu} status={status} demoDisabled={!demoScript} />}
         </AnimatePresence>
       </header>
     );
@@ -321,7 +324,7 @@ export function MainToolbar() {
           label={
             demoScript
               ? demoActive
-                ? "Guided demo is running"
+                ? "Exit the guided demo (Reset demo in the demo bar restarts it)"
                 : "Start the guided 10-step walkthrough"
               : "Demo script not available"
           }
@@ -330,7 +333,7 @@ export function MainToolbar() {
             type="button"
             disabled={!demoScript}
             aria-pressed={demoActive}
-            onClick={startDemo}
+            onClick={demoActive ? exitDemo : startDemo}
             className={cx(
               "flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-[12px] font-medium transition-colors disabled:opacity-40",
               demoActive
@@ -364,21 +367,29 @@ function NarrowMenu({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const panels = useStore((s) => s.panels);
+  const demoActive = useStore((s) => s.demo.active);
+  const exitDemo = useStore((s) => s.exitDemo);
   useEffect(() => {
     const onDown = (e: PointerEvent) => {
       const t = e.target as HTMLElement;
       if (t.closest?.("[data-menu-toggle]")) return;
       if (ref.current && !ref.current.contains(t)) onClose();
     };
+    // The menu is the top-most surface: take Esc in the capture phase and stop it, so the
+    // global Esc handler does not also close the sheet underneath. Text fields (e.g. the
+    // command palette opened over the menu) keep their own Esc.
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key !== "Escape" || isTypingTarget(e.target)) return;
+      e.stopImmediatePropagation();
+      e.preventDefault();
+      onClose();
     };
     const t = setTimeout(() => window.addEventListener("pointerdown", onDown), 0);
-    window.addEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
     return () => {
       clearTimeout(t);
       window.removeEventListener("pointerdown", onDown);
-      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keydown", onKey, true);
     };
   }, [onClose]);
   const item = (
@@ -417,7 +428,9 @@ function NarrowMenu({
     >
       {item("Layers", Layers, () => togglePanel("layers"), panels.layers)}
       {ACTIONS.map((a) => item(a.label, a.Icon, () => togglePanel(a.key), panels[a.key]))}
-      {item("Start demo", Clapperboard, startDemo, false, demoDisabled)}
+      {demoActive
+        ? item("Exit demo", Clapperboard, exitDemo, true)
+        : item("Start demo", Clapperboard, startDemo, false, demoDisabled)}
       {item("Restore world", RotateCcw, restoreWorld)}
       <div className="mt-1.5 space-y-1 border-t border-white/[0.07] px-3 pt-2 pb-1">
         {[

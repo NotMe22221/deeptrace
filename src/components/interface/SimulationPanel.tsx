@@ -129,7 +129,12 @@ function PresetCard({ p }: { p: ScenarioPreset }) {
   const setDraft = useStore((s) => s.setDraft);
   const simStatus = useStore((s) => s.simStatus);
   const index = useStore((s) => s.index);
-  const loaded = sameTargets(draft, p.scenario);
+  // "Loaded" means the whole scenario matches (targets + horizon + restoration), so a preset
+  // whose settings were changed in the draft can be reloaded with its defaults.
+  const loaded =
+    sameTargets(draft, p.scenario) &&
+    draft.horizon_hours === p.scenario.horizon_hours &&
+    draft.enable_restoration === p.scenario.enable_restoration;
   const targets = [...p.scenario.failed_nodes, ...p.scenario.failed_edges];
   const busy = simStatus === "running";
   return (
@@ -356,7 +361,7 @@ function DraftBuilder() {
           min={0}
           max={72}
           step={1}
-          onChange={(v) => setDraft({ horizon_hours: v })}
+          onChange={(v) => setDraft({ horizon_hours: v, scenario_id: null, name: null })}
           label="Assessment horizon in hours"
           marks={[4, 24, 48]}
           format={(v) => `${v} hours`}
@@ -369,7 +374,7 @@ function DraftBuilder() {
         <span className="text-[11.5px] text-ink-200">Automatic restoration</span>
         <Switch
           checked={draft.enable_restoration}
-          onChange={(v) => setDraft({ enable_restoration: v })}
+          onChange={(v) => setDraft({ enable_restoration: v, scenario_id: null, name: null })}
           label="Automatic restoration (switching and rerouting)"
           size="sm"
           color="#4ade80"
@@ -377,7 +382,9 @@ function DraftBuilder() {
       </div>
       {dataMode === "snapshot" && (
         <p className="mt-1.5 text-[10px] leading-snug text-ink-400">
-          Offline snapshot: presets and single failures of major assets (substations, vaults, water sources, pumps, tanks, telecom cores and hubs, stations, gateways, utility vaults; 4 h, restoration on) are precomputed. Other components and connection failures need the live engine.
+          Offline snapshot: presets and single failures of major assets (substations, vaults, water sources, pumps,
+          tanks, telecom cores and hubs, stations, gateways, utility vaults; 4 h, restoration on) are precomputed. Other
+          components and connection failures need the live engine.
         </p>
       )}
       <div className="mt-2.5 flex items-center gap-1">
