@@ -156,6 +156,19 @@ export async function loadOfflineBundle(): Promise<OfflineBundle> {
 const sameSet = (a: string[] = [], b: string[] = []) =>
   a.length === b.length && [...a].sort().join("|") === [...b].sort().join("|");
 
+/** Re-expand a delta-encoded snapshot result (see DemoSnapshot.single_failures_encoding). */
+export function expandDelta(r: SimulationResult, baseline: SimulationResult): SimulationResult {
+  const unreachable = new Set(r.reachable_nodes);
+  return {
+    ...r,
+    node_states: { ...baseline.node_states, ...r.node_states },
+    edge_states: { ...baseline.edge_states, ...r.edge_states },
+    edge_flows: { ...baseline.edge_flows, ...r.edge_flows },
+    reachable_nodes: baseline.reachable_nodes.filter((id) => !unreachable.has(id)),
+    assumptions: r.assumptions.length ? r.assumptions : baseline.assumptions,
+  };
+}
+
 /** Resolve a scenario against the precomputed snapshot. Returns null if it was not precomputed. */
 export function snapshotSimulate(snapshot: DemoSnapshot, scenario: ScenarioInput): SimulationResult | null {
   for (const preset of snapshot.presets) {
@@ -177,7 +190,9 @@ export function snapshotSimulate(snapshot: DemoSnapshot, scenario: ScenarioInput
     scenario.horizon_hours === 4 &&
     scenario.enable_restoration
   ) {
-    return snapshot.single_failures[scenario.failed_nodes[0]] ?? null;
+    const r = snapshot.single_failures[scenario.failed_nodes[0]];
+    if (!r) return null;
+    return snapshot.single_failures_encoding === "delta_from_baseline" ? expandDelta(r, snapshot.baseline) : r;
   }
   return null;
 }

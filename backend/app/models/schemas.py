@@ -601,6 +601,13 @@ class DemoSnapshot(BaseModel):
     comparisons: dict[str, ScenarioComparison]
     traces: dict[str, TraceResult]
     single_failures: dict[str, SimulationResult] | None = None
+    single_failures_encoding: Literal["full", "delta_from_baseline"] = Field(
+        default="full",
+        description=(
+            "delta_from_baseline: node_states/edge_states/edge_flows only list entries that differ from baseline, "
+            "reachable_nodes lists baseline-reachable nodes that became unreachable, empty assumptions = baseline's"
+        ),
+    )
     demo: DemoScript
     analyst_replays: dict[str, list[dict[str, Any]]] | None = Field(
         default=None,

@@ -27,7 +27,6 @@ SINGLE_FAILURE_TYPES = {
     "transmission_substation",
     "distribution_substation",
     "network_vault",
-    "switch",
     "supply_source",
     "pump_station",
     "storage_tank",
@@ -39,6 +38,25 @@ SINGLE_FAILURE_TYPES = {
     "gateway",
     "utility_vault",
 }
+
+
+def _delta(r, baseline):
+    """Delta-encode a result against the baseline (re-expanded by src/lib/api.ts expandDelta):
+
+    * node_states / edge_states / edge_flows keep only entries that differ from baseline;
+    * reachable_nodes lists the baseline-reachable nodes that are NOT reachable in this result;
+    * assumptions is emptied when identical to the baseline's.
+    """
+    reachable = set(r.reachable_nodes)
+    return r.model_copy(
+        update={
+            "node_states": {k: v for k, v in r.node_states.items() if baseline.node_states.get(k) != v},
+            "edge_states": {k: v for k, v in r.edge_states.items() if baseline.edge_states.get(k) != v},
+            "edge_flows": {k: v for k, v in r.edge_flows.items() if baseline.edge_flows.get(k) != v},
+            "reachable_nodes": [n for n in baseline.reachable_nodes if n not in reachable],
+            "assumptions": [] if r.assumptions == baseline.assumptions else r.assumptions,
+        }
+    )
 
 
 def build_snapshot(single_failures: bool = True) -> DemoSnapshot:
@@ -70,7 +88,8 @@ def build_snapshot(single_failures: bool = True) -> DemoSnapshot:
         singles = {}
         for n in net.nodes:
             if n.type in SINGLE_FAILURE_TYPES:
-                singles[n.id] = engine.simulate(ScenarioInput(name=f"Failure of {n.name}", failed_nodes=[n.id]))
+                r = engine.simulate(ScenarioInput(name=f"Failure of {n.name}", failed_nodes=[n.id]))
+                singles[n.id] = _delta(r, baseline)
 
     # Record the offline analyst's answer to the demo question so demo mode can replay it
     # (clearly labelled) if the backend is unavailable during a presentation.
@@ -100,6 +119,7 @@ def build_snapshot(single_failures: bool = True) -> DemoSnapshot:
         comparisons=comparisons,
         traces=traces,
         single_failures=singles,
+        single_failures_encoding="delta_from_baseline",
         demo=demo,
         analyst_replays=replays or None,
     )

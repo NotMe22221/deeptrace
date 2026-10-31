@@ -442,6 +442,12 @@ export interface DemoSnapshot {
   traces: Record<string, TraceResult>;
   /** keyed by node id: single-node failure results for every node (lets the UI simulate offline) */
   single_failures?: Record<string, SimulationResult>;
+  /**
+   * "delta_from_baseline": single_failures store only node/edge state + flow entries that differ
+   * from baseline, reachable_nodes lists nodes that became unreachable, and empty assumptions mean
+   * "same as baseline". Use expandDelta() in src/lib/api.ts before rendering.
+   */
+  single_failures_encoding?: "full" | "delta_from_baseline";
   demo: DemoScript;
   /** Recorded offline-analyst event streams keyed by question (replayed only when the backend is down). */
   analyst_replays?: Record<string, AnalystEvent[]> | null;
