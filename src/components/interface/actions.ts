@@ -90,6 +90,18 @@ export async function simulateEdgeFailure(id: string) {
   await S().runSimulation(scenario, quickSlot());
 }
 
+/**
+ * Add/remove a failure target in the draft. Editing a loaded preset turns the draft into a
+ * custom scenario (so it is no longer labelled with the preset's name).
+ */
+export function toggleDraftTarget(kind: "node" | "edge", id: string) {
+  const st = S();
+  if (kind === "node") st.toggleDraftNode(id);
+  else st.toggleDraftEdge(id);
+  const d = S().draft;
+  if (d.scenario_id || d.name) S().setDraft({ scenario_id: null, name: null });
+}
+
 export function runPreset(presetId: string, slot: "active" | "A" | "B" = "active") {
   const p = S().presets.find((x) => x.id === presetId);
   if (!p) return;
@@ -132,5 +144,7 @@ export function startDemo() {
 export function restoreWorld() {
   S().restoreWorld();
   useUI.getState().setSimTab("build");
-  useUI.getState().pushToast({ tone: "success", title: "World restored", body: "Baseline network, default layers and camera." });
+  useUI
+    .getState()
+    .pushToast({ tone: "success", title: "World restored", body: "Baseline network, default layers and camera." });
 }

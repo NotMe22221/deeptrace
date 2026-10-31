@@ -73,8 +73,33 @@ export function fmtDate(iso: string | null | undefined): string {
 
 export const pluralize = (n: number, one: string, many = `${one}s`) => `${fmtNum(n, 0)} ${n === 1 ? one : many}`;
 
-/** Prettify a property key: "backup_hours" -> "Backup hours". */
-export const humanizeKey = (k: string) => k.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+const UNIT_SUFFIXES: [RegExp, string][] = [
+  [/_kv$/i, " (kV)"],
+  [/_mw$/i, " (MW)"],
+  [/_mva$/i, " (MVA)"],
+  [/_lps$/i, " (L/s)"],
+  [/_m3$/i, " (m³)"],
+  [/_gbps$/i, " (Gbps)"],
+  [/_pct$/i, " (%)"],
+  [/_hours$/i, " (h)"],
+  [/_h$/i, " (h)"],
+  [/_m$/i, " (m)"],
+  [/_mm$/i, " (mm)"],
+  [/_km$/i, " (km)"],
+];
+
+/** Prettify a property key: "voltage_kv" -> "Voltage (kV)", "backup_hours" -> "Backup (h)". */
+export const humanizeKey = (k: string) => {
+  let unit = "";
+  let base = k;
+  for (const [re, u] of UNIT_SUFFIXES)
+    if (re.test(base)) {
+      unit = u;
+      base = base.replace(re, "");
+      break;
+    }
+  return base.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase()) + unit;
+};
 
 export function fmtValue(v: unknown): string {
   if (v === null || v === undefined) return "—";
@@ -122,9 +147,13 @@ export const SCENARIO_FOR_SYSTEM: Record<SystemType, ScenarioType> = {
   facility: "custom",
 };
 
+const NON_TEXT_INPUTS = new Set(["range", "checkbox", "radio", "button", "submit", "reset", "color", "file", "image"]);
+
+/** True when keystrokes should go to a text field rather than global shortcuts. */
 export const isTypingTarget = (t: EventTarget | null) => {
   const el = t as HTMLElement | null;
-  if (!el) return false;
+  if (!el || !el.tagName) return false;
   const tag = el.tagName;
-  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable;
+  if (tag === "INPUT") return !NON_TEXT_INPUTS.has((el as HTMLInputElement).type);
+  return tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable;
 };

@@ -23,8 +23,20 @@ export function CameraControls() {
 
   const btn = "rounded-md";
   return (
-    <div role="toolbar" aria-label="Camera" aria-orientation="vertical" className="dt-panel pointer-events-auto flex w-10 flex-col items-center gap-0.5 py-1">
-      <IconButton label="Home view" shortcut="H" tooltipSide="left" size="sm" className={btn} onClick={() => world().flyHome()}>
+    <div
+      role="toolbar"
+      aria-label="Camera"
+      aria-orientation="vertical"
+      className="dt-panel pointer-events-auto flex w-10 flex-col items-center gap-0.5 py-1"
+    >
+      <IconButton
+        label="Home view"
+        shortcut="H"
+        tooltipSide="left"
+        size="sm"
+        className={btn}
+        onClick={() => world().flyHome()}
+      >
         <House className="size-4" />
       </IconButton>
       <span className="my-0.5 h-px w-5 bg-white/[0.08]" />
@@ -35,10 +47,22 @@ export function CameraControls() {
         <Minus className="size-4" />
       </IconButton>
       <span className="my-0.5 h-px w-5 bg-white/[0.08]" />
-      <IconButton label="Tilt up (towards horizon)" tooltipSide="left" size="sm" className={btn} onClick={() => world().tilt(8)}>
+      <IconButton
+        label="Tilt up (towards horizon)"
+        tooltipSide="left"
+        size="sm"
+        className={btn}
+        onClick={() => world().tilt(8)}
+      >
         <ChevronUp className="size-4" />
       </IconButton>
-      <IconButton label="Tilt down (towards top-down)" tooltipSide="left" size="sm" className={btn} onClick={() => world().tilt(-8)}>
+      <IconButton
+        label="Tilt down (towards top-down)"
+        tooltipSide="left"
+        size="sm"
+        className={btn}
+        onClick={() => world().tilt(-8)}
+      >
         <ChevronDown className="size-4" />
       </IconButton>
       <IconButton label="Reset north" tooltipSide="left" size="sm" className={btn} onClick={() => world().resetNorth()}>

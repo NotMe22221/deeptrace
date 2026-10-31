@@ -24,7 +24,9 @@ function ScenarioHeader({ slot, r, index }: { slot: "A" | "B"; r: SimulationResu
         >
           {slot}
         </span>
-        <span className="line-clamp-2 text-[12.5px] leading-tight font-medium text-ink-50">{r.scenario.name ?? "Custom scenario"}</span>
+        <span className="line-clamp-2 text-[12.5px] leading-tight font-medium text-ink-50">
+          {r.scenario.name ?? "Custom scenario"}
+        </span>
       </div>
       <div className="mt-1 text-[10.5px] text-ink-400">{SCENARIO_TYPE_LABELS[r.scenario.scenario_type]}</div>
       <div className="mt-1.5 flex flex-wrap gap-1">
@@ -46,7 +48,10 @@ function ScenarioHeader({ slot, r, index }: { slot: "A" | "B"; r: SimulationResu
         {targets.length > 3 && <span className="text-[10px] text-ink-400">+{targets.length - 3}</span>}
       </div>
       <div className="mt-2 flex items-baseline gap-1.5">
-        <span className="dt-num text-[20px] leading-none" style={{ color: severityColor(r.impact_metrics.severity_index) }}>
+        <span
+          className="dt-num text-[20px] leading-none"
+          style={{ color: severityColor(r.impact_metrics.severity_index) }}
+        >
           {Math.round(r.impact_metrics.severity_index)}
         </span>
         <span className="text-[10px] text-ink-400">severity · {r.affected_nodes.length} affected</span>
@@ -62,7 +67,14 @@ function MetricRow({ m }: { m: ComparisonMetric }) {
       <td className="py-[5px] pl-2 text-right">
         <span
           className={cx("dt-num rounded px-1 py-[1px] text-[12px]", worse ? "text-ink-50" : "text-ink-200")}
-          style={worse ? { background: `${side === "a" ? DIFF_COLORS.a : DIFF_COLORS.b}22`, boxShadow: `inset 0 0 0 1px ${side === "a" ? DIFF_COLORS.a : DIFF_COLORS.b}55` } : undefined}
+          style={
+            worse
+              ? {
+                  background: `${side === "a" ? DIFF_COLORS.a : DIFF_COLORS.b}22`,
+                  boxShadow: `inset 0 0 0 1px ${side === "a" ? DIFF_COLORS.a : DIFF_COLORS.b}55`,
+                }
+              : undefined
+          }
         >
           {fmtNum(m[side])}
         </span>
@@ -82,7 +94,12 @@ function MetricRow({ m }: { m: ComparisonMetric }) {
       {cell("a")}
       {cell("b")}
       <td className="py-[5px] pl-2 text-right">
-        <span className={cx("dt-num inline-flex items-center justify-end gap-0.5 text-[11px]", zero ? "text-ink-400" : bad ? "text-[#fda4af]" : "text-[#86efac]")}>
+        <span
+          className={cx(
+            "dt-num inline-flex items-center justify-end gap-0.5 text-[11px]",
+            zero ? "text-ink-400" : bad ? "text-[#fda4af]" : "text-[#86efac]",
+          )}
+        >
           {zero ? <Minus className="size-3" /> : up ? <ArrowUp className="size-3" /> : <ArrowDown className="size-3" />}
           {zero ? "0" : fmtNum(Math.abs(m.delta))}
         </span>
@@ -91,7 +108,17 @@ function MetricRow({ m }: { m: ComparisonMetric }) {
   );
 }
 
-function OverlapList({ label, color, ids, index }: { label: string; color: string; ids: string[]; index: NetworkIndex | null }) {
+function OverlapList({
+  label,
+  color,
+  ids,
+  index,
+}: {
+  label: string;
+  color: string;
+  ids: string[];
+  index: NetworkIndex | null;
+}) {
   const [open, setOpen] = useState(false);
   return (
     <div className="rounded-lg border border-white/[0.06] bg-white/[0.02]">
@@ -105,7 +132,9 @@ function OverlapList({ label, color, ids, index }: { label: string; color: strin
         <span className="size-2 rounded-full" style={{ background: color, boxShadow: `0 0 8px ${color}` }} />
         <span className="flex-1 text-[12px] text-ink-100">{label}</span>
         <span className="dt-num text-[13px] text-ink-50">{ids.length}</span>
-        {ids.length > 0 && <ChevronDown className={cx("size-3.5 text-ink-400 transition-transform", !open && "-rotate-90")} />}
+        {ids.length > 0 && (
+          <ChevronDown className={cx("size-3.5 text-ink-400 transition-transform", !open && "-rotate-90")} />
+        )}
       </button>
       {open && (
         <ul className="dt-scroll max-h-[180px] overflow-y-auto border-t border-white/[0.05] px-1 py-1">
@@ -131,6 +160,35 @@ function OverlapList({ label, color, ids, index }: { label: string; color: strin
   );
 }
 
+function Summary({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const long = text.length > 260;
+  return (
+    <div className="mt-1.5">
+      <div
+        className="text-[12px] leading-relaxed text-ink-300"
+        style={
+          !open && long
+            ? { display: "-webkit-box", WebkitLineClamp: 4, WebkitBoxOrient: "vertical", overflow: "hidden" }
+            : undefined
+        }
+      >
+        {renderMarkdown(text)}
+      </div>
+      {long && (
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          className="mt-0.5 text-[11px] text-sky-200/80 hover:text-sky-100"
+        >
+          {open ? "Show less" : "Show full summary"}
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function ScenarioComparison() {
   const comparison = useStore((s) => s.comparison);
   const slots = useStore((s) => s.slots);
@@ -150,7 +208,9 @@ export function ScenarioComparison() {
       <div className="flex h-11 shrink-0 items-center gap-2.5 border-b border-white/[0.07] pr-1.5 pl-3.5">
         <GitCompareArrows className="size-4 text-ink-300" />
         <div className="min-w-0 flex-1">
-          <h2 className="font-display text-[12.5px] font-semibold tracking-[0.12em] text-ink-50 uppercase">Compare scenarios</h2>
+          <h2 className="font-display text-[12.5px] font-semibold tracking-[0.12em] text-ink-50 uppercase">
+            Compare scenarios
+          </h2>
           <div className="truncate text-[10.5px] leading-tight text-ink-300">A vs B · same network, same engine</div>
         </div>
         <IconButton label="Close comparison" shortcut="C" size="sm" onClick={() => closePanel("comparison")}>
@@ -167,8 +227,15 @@ export function ScenarioComparison() {
               return r ? (
                 <ScenarioHeader key={k} slot={k} r={r} index={index} />
               ) : (
-                <div key={k} className="flex flex-col items-center justify-center rounded-lg border border-dashed border-white/12 p-3 text-center" style={{ minHeight: 112 }}>
-                  <span className="dt-num flex size-6 items-center justify-center rounded-md text-[11px] font-semibold" style={{ background: `${color}22`, color }}>
+                <div
+                  key={k}
+                  className="flex flex-col items-center justify-center rounded-lg border border-dashed border-white/12 p-3 text-center"
+                  style={{ minHeight: 112 }}
+                >
+                  <span
+                    className="dt-num flex size-6 items-center justify-center rounded-md text-[11px] font-semibold"
+                    style={{ background: `${color}22`, color }}
+                  >
                     {k}
                   </span>
                   <span className="mt-1.5 text-[11.5px] text-ink-300">Slot {k} empty</span>
@@ -216,7 +283,12 @@ export function ScenarioComparison() {
           {stale && (
             <div className="mx-3.5 mt-2 flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-1.5 text-[11.5px] text-ink-300">
               <span className="flex-1">Slots changed since this comparison.</span>
-              <Button size="xs" variant="outline" loading={compareStatus === "running"} onClick={() => void runComparison()}>
+              <Button
+                size="xs"
+                variant="outline"
+                loading={compareStatus === "running"}
+                onClick={() => void runComparison()}
+              >
                 Re-run
               </Button>
             </div>
@@ -224,7 +296,11 @@ export function ScenarioComparison() {
 
           <div className="px-3.5 pt-3">
             <SectionLabel className="mb-1.5">Show on map</SectionLabel>
-            <div role="radiogroup" aria-label="Map view" className="grid grid-cols-3 gap-1 rounded-lg bg-white/[0.04] p-0.5">
+            <div
+              role="radiogroup"
+              aria-label="Map view"
+              className="grid grid-cols-3 gap-1 rounded-lg bg-white/[0.04] p-0.5"
+            >
               {(
                 [
                   ["A", "Show A"],
@@ -240,7 +316,9 @@ export function ScenarioComparison() {
                   onClick={() => setCompareView(v)}
                   className={cx(
                     "h-7 rounded-md text-[11.5px] transition-colors",
-                    compareView === v ? "bg-white/[0.12] text-ink-50 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12)]" : "text-ink-300 hover:text-ink-100",
+                    compareView === v
+                      ? "bg-white/[0.12] text-ink-50 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12)]"
+                      : "text-ink-300 hover:text-ink-100",
                   )}
                 >
                   {label}
@@ -265,22 +343,32 @@ export function ScenarioComparison() {
 
           <div className="mx-3.5 mt-3 rounded-lg border border-white/[0.08] bg-white/[0.025] px-3 py-2.5">
             <div className="dt-label">Verdict</div>
-            <p className="mt-1 font-display text-[14px] leading-snug font-medium text-ink-50">{comparison.verdict}</p>
-            <div className="mt-1 text-[12px] leading-relaxed text-ink-200">{renderMarkdown(comparison.summary)}</div>
+            <p className="mt-1 text-[13px] leading-snug font-medium text-ink-50">{comparison.verdict}</p>
+            {comparison.summary && comparison.summary !== comparison.verdict && <Summary text={comparison.summary} />}
           </div>
 
           <div className="px-3.5 pt-3">
             <table className="w-full">
               <thead>
                 <tr className="border-b border-white/[0.07]">
-                  <th className="pb-1 text-left font-mono text-[9.5px] font-normal tracking-[0.12em] text-ink-400 uppercase">Metric</th>
-                  <th className="pb-1 text-right font-mono text-[9.5px] font-normal tracking-[0.12em] uppercase" style={{ color: DIFF_COLORS.a }}>
+                  <th className="pb-1 text-left font-mono text-[9.5px] font-normal tracking-[0.12em] text-ink-400 uppercase">
+                    Metric
+                  </th>
+                  <th
+                    className="pb-1 text-right font-mono text-[9.5px] font-normal tracking-[0.12em] uppercase"
+                    style={{ color: DIFF_COLORS.a }}
+                  >
                     A
                   </th>
-                  <th className="pb-1 text-right font-mono text-[9.5px] font-normal tracking-[0.12em] uppercase" style={{ color: DIFF_COLORS.b }}>
+                  <th
+                    className="pb-1 text-right font-mono text-[9.5px] font-normal tracking-[0.12em] uppercase"
+                    style={{ color: DIFF_COLORS.b }}
+                  >
                     B
                   </th>
-                  <th className="pb-1 text-right font-mono text-[9.5px] font-normal tracking-[0.12em] text-ink-400 uppercase">Δ B−A</th>
+                  <th className="pb-1 text-right font-mono text-[9.5px] font-normal tracking-[0.12em] text-ink-400 uppercase">
+                    Δ B−A
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -289,7 +377,9 @@ export function ScenarioComparison() {
                 ))}
               </tbody>
             </table>
-            <p className="mt-1 text-[10px] text-ink-400">Outlined value = worse side. Modelled outcomes, illustrative only.</p>
+            <p className="mt-1 text-[10px] text-ink-400">
+              Outlined value = worse side. Modelled outcomes, illustrative only.
+            </p>
           </div>
 
           <div className="space-y-1.5 px-3.5 pt-3 pb-4">

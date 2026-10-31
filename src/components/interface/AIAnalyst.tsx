@@ -34,7 +34,10 @@ function IdChip({ id, index }: { id: string; index: NetworkIndex }) {
       onClick={() => (n ? focusNode(id) : focusEdge(id))}
       title={`${name} — click to select and fly to it`}
       className="mx-[1px] inline-flex translate-y-[-1px] items-center gap-1 rounded-[5px] border px-1 py-[0px] align-middle font-mono text-[10.5px] leading-[16px] text-ink-50 transition-colors hover:bg-white/[0.1]"
-      style={{ borderColor: system ? `${SYSTEM_STYLES[system].color}55` : "rgba(255,255,255,0.15)", background: system ? `${SYSTEM_STYLES[system].color}12` : undefined }}
+      style={{
+        borderColor: system ? `${SYSTEM_STYLES[system].color}55` : "rgba(255,255,255,0.15)",
+        background: system ? `${SYSTEM_STYLES[system].color}12` : undefined,
+      }}
     >
       {system && <SystemDot system={system} size={5} />}
       {id}
@@ -92,7 +95,7 @@ function ToolRow({ t, index }: { t: ToolActivity; index: NetworkIndex | null }) 
           </span>
           {target && <span className="min-w-0 truncate text-[10.5px] text-ink-400">{target}</span>}
         </span>
-        {t.summary && <span className="line-clamp-2 block text-[10.5px] leading-snug text-ink-400">{t.summary}</span>}
+        {t.summary && <span className="line-clamp-2 text-[10.5px] leading-snug text-ink-400">{t.summary}</span>}
       </span>
     </li>
   );
@@ -122,7 +125,9 @@ function AssistantMessage({ m, index, re }: { m: ChatMessage; index: NetworkInde
         ? renderMarkdown(m.content, {
             renderText: (t, k) => linkify(t, re, index, k),
             renderCode: (code, k) =>
-              index && (index.nodes.has(code) || index.edges.has(code)) ? <IdChip key={k} id={code} index={index} /> : null,
+              index && (index.nodes.has(code) || index.edges.has(code)) ? (
+                <IdChip key={k} id={code} index={index} />
+              ) : null,
           })
         : null,
     [m.content, re, index],
@@ -210,7 +215,9 @@ export function AIAnalyst() {
   const dataMode = useStore((s) => s.dataMode);
   const health = useStore((s) => s.health);
   const index = useStore((s) => s.index);
-  const hasReplays = useStore((s) => !!s.snapshot?.analyst_replays && Object.keys(s.snapshot.analyst_replays).length > 0);
+  const hasReplays = useStore(
+    (s) => !!s.snapshot?.analyst_replays && Object.keys(s.snapshot.analyst_replays).length > 0,
+  );
   const selectedName = useStore((s) => (s.selectedNodeId ? s.index?.nodes.get(s.selectedNodeId)?.name : null));
   const re = useIdMatcher(index);
   const suggestions = useSuggestions();
@@ -221,10 +228,20 @@ export function AIAnalyst() {
   const live = dataMode === "live";
   const last = messages[messages.length - 1];
 
+  // While a question is in flight, follow the tool activity at the bottom. Once the answer
+  // arrives, bring the question to the top so the answer reads from its first line.
+  const lastUserId = [...messages].reverse().find((m) => m.role === "user")?.id;
+  const answered = !!last && last.role === "assistant" && !!last.content;
   useEffect(() => {
     const el = scrollRef.current;
-    if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-  }, [messages.length, last?.content, last?.tools.length]);
+    if (!el) return;
+    const raf = requestAnimationFrame(() => {
+      const q = lastUserId ? el.querySelector<HTMLElement>(`[data-msg="${lastUserId}"]`) : null;
+      if (answered && q) el.scrollTo({ top: Math.max(0, q.offsetTop - 12), behavior: "smooth" });
+      else el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [messages.length, answered, lastUserId, last?.tools.length]);
 
   useEffect(() => {
     const ta = taRef.current;
@@ -259,7 +276,9 @@ export function AIAnalyst() {
       <div className="flex h-11 shrink-0 items-center gap-2.5 border-b border-white/[0.07] pr-1.5 pl-3.5">
         <Bot className="size-4 text-ink-300" />
         <div className="min-w-0 flex-1">
-          <h2 className="font-display text-[12.5px] font-semibold tracking-[0.12em] text-ink-50 uppercase">AI Analyst</h2>
+          <h2 className="font-display text-[12.5px] font-semibold tracking-[0.12em] text-ink-50 uppercase">
+            AI Analyst
+          </h2>
           <div className="truncate text-[10.5px] leading-tight text-ink-300">{headerMode}</div>
         </div>
         <IconButton label="Clear conversation" size="sm" disabled={!messages.length || pending} onClick={clearChat}>
@@ -272,18 +291,25 @@ export function AIAnalyst() {
 
       {!live && (
         <div className="mx-3 mt-3 rounded-lg border border-[#e9c46a]/25 bg-[#e9c46a]/[0.06] px-3 py-2 text-[11.5px] leading-snug text-ink-200">
-          <span className="font-medium text-[#f3d98b]">Offline snapshot.</span> The analyst calls live DEEPTRACE tools, so it needs
-          the engine: <code className="font-mono text-[10.5px] text-ink-100">cd backend &amp;&amp; .venv/bin/uvicorn app.main:app --port 8000</code>
+          <span className="font-medium text-[#f3d98b]">Offline snapshot.</span> The analyst calls live DEEPTRACE tools,
+          so it needs the engine:{" "}
+          <code className="font-mono text-[10.5px] text-ink-100">
+            cd backend &amp;&amp; .venv/bin/uvicorn app.main:app --port 8000
+          </code>
           {hasReplays && <span className="text-ink-300"> Recorded answers are available for the demo question.</span>}
         </div>
       )}
 
-      <div ref={scrollRef} className="dt-scroll min-h-0 flex-1 space-y-4 overflow-y-auto px-3.5 py-3" aria-live="polite">
+      <div
+        ref={scrollRef}
+        className="dt-scroll relative min-h-0 flex-1 space-y-4 overflow-y-auto px-3.5 py-3"
+        aria-live="polite"
+      >
         {!messages.length && (
           <div className="pt-2">
             <p className="text-[13px] leading-relaxed text-ink-100">
-              Ask about dependencies, failure impacts and mitigations. Every answer is computed by DEEPTRACE tools — traces,
-              simulations and network metrics — and shown on the map as it runs.
+              Ask about dependencies, failure impacts and mitigations. Every answer is computed by DEEPTRACE tools —
+              traces, simulations and network metrics — and shown on the map as it runs.
             </p>
             {selectedName && (
               <p className="mt-2 text-[12px] text-ink-300">
@@ -294,7 +320,7 @@ export function AIAnalyst() {
         )}
         {messages.map((m) =>
           m.role === "user" ? (
-            <div key={m.id} className="flex justify-end">
+            <div key={m.id} data-msg={m.id} className="flex justify-end">
               <div className="max-w-[88%] rounded-xl rounded-br-sm border border-white/[0.08] bg-white/[0.06] px-3 py-2 text-[13px] leading-snug whitespace-pre-wrap text-ink-50">
                 {m.content}
               </div>

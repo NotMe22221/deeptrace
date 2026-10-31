@@ -20,7 +20,7 @@ import { useMemo } from "react";
 import { useStore } from "@/lib/store";
 import { connectionLabel, SCENARIO_TYPE_LABELS, SYSTEM_STYLES } from "@/lib/systems";
 import type { ScenarioPreset, ScenarioType, SimulationResult } from "@/types/infrastructure";
-import { closePanel, focusAny, openPanel, restoreWorld, runPreset } from "./actions";
+import { closePanel, focusAny, openPanel, restoreWorld, runPreset, toggleDraftTarget } from "./actions";
 import { CascadeTimeline, PlaybackControls, ResultDetails, ResultOverview, severityColor } from "./SimulationResults";
 import { Button, cx, IconButton, SectionLabel, Slider, Spinner, Switch, SystemDot, Tooltip } from "./ui";
 import { useUI } from "./uiStore";
@@ -29,11 +29,24 @@ const TYPE_TABS: { type: ScenarioType; label: string; Icon: LucideIcon; color: s
   { type: "power_failure", label: "Power failure", Icon: Zap, color: SYSTEM_STYLES.power.color },
   { type: "water_rupture", label: "Water pipeline rupture", Icon: Droplets, color: SYSTEM_STYLES.water.color },
   { type: "telecom_outage", label: "Internet exchange outage", Icon: Server, color: SYSTEM_STYLES.telecom.color },
-  { type: "road_disruption", label: "Road network disruption", Icon: Construction, color: SYSTEM_STYLES.transport.color },
-  { type: "corridor_strike", label: "Utility corridor strike", Icon: Building2, color: SYSTEM_STYLES.underground.color },
+  {
+    type: "road_disruption",
+    label: "Road network disruption",
+    Icon: Construction,
+    color: SYSTEM_STYLES.transport.color,
+  },
+  {
+    type: "corridor_strike",
+    label: "Utility corridor strike",
+    Icon: Building2,
+    color: SYSTEM_STYLES.underground.color,
+  },
 ];
 
-const sameTargets = (a: { failed_nodes: string[]; failed_edges: string[] }, b: { failed_nodes: string[]; failed_edges: string[] }) =>
+const sameTargets = (
+  a: { failed_nodes: string[]; failed_edges: string[] },
+  b: { failed_nodes: string[]; failed_edges: string[] },
+) =>
   [...a.failed_nodes].sort().join() === [...b.failed_nodes].sort().join() &&
   [...a.failed_edges].sort().join() === [...b.failed_edges].sort().join();
 
@@ -60,7 +73,11 @@ function SlotChips() {
         return (
           <Tooltip
             key={k}
-            label={r ? `Scenario ${k}: ${r.scenario.name ?? r.scenario_id} — click to show` : `Slot ${k} empty — use “Run as ${k}”`}
+            label={
+              r
+                ? `Scenario ${k}: ${r.scenario.name ?? r.scenario_id} — click to show`
+                : `Slot ${k} empty — use “Run as ${k}”`
+            }
           >
             <button
               type="button"
@@ -133,7 +150,10 @@ function PresetCard({ p }: { p: ScenarioPreset }) {
           const n = index?.nodes.get(id);
           const e = index?.edges.get(id);
           return (
-            <span key={id} className="inline-flex max-w-[150px] items-center gap-1 rounded bg-white/[0.04] px-1.5 py-[1px] text-[10px] text-ink-200">
+            <span
+              key={id}
+              className="inline-flex max-w-[150px] items-center gap-1 rounded bg-white/[0.04] px-1.5 py-[1px] text-[10px] text-ink-200"
+            >
               {n && <SystemDot system={n.system} size={5} />}
               {e && <SystemDot system={e.infrastructure_type} size={5} />}
               <span className="truncate">{n?.name ?? (e ? e.name || connectionLabel(e.connection_type) : id)}</span>
@@ -143,17 +163,40 @@ function PresetCard({ p }: { p: ScenarioPreset }) {
         {targets.length > 3 && <span className="text-[10px] text-ink-400">+{targets.length - 3}</span>}
       </div>
       <div className="mt-2 flex items-center gap-1">
-        <Button size="xs" variant={loaded ? "subtle" : "ghost"} onClick={() => setDraft({ ...p.scenario })} disabled={loaded}>
+        <Button
+          size="xs"
+          variant={loaded ? "subtle" : "ghost"}
+          onClick={() => setDraft({ ...p.scenario })}
+          disabled={loaded}
+        >
           {loaded ? "Loaded" : "Load"}
         </Button>
         <span className="flex-1" />
-        <Button size="xs" variant="outline" disabled={busy} onClick={() => void runPreset(p.id, "A")} aria-label={`Run ${p.name} as scenario A`}>
+        <Button
+          size="xs"
+          variant="outline"
+          disabled={busy}
+          onClick={() => void runPreset(p.id, "A")}
+          aria-label={`Run ${p.name} as scenario A`}
+        >
           A
         </Button>
-        <Button size="xs" variant="outline" disabled={busy} onClick={() => void runPreset(p.id, "B")} aria-label={`Run ${p.name} as scenario B`}>
+        <Button
+          size="xs"
+          variant="outline"
+          disabled={busy}
+          onClick={() => void runPreset(p.id, "B")}
+          aria-label={`Run ${p.name} as scenario B`}
+        >
           B
         </Button>
-        <Button size="xs" variant="primary" icon={<Play className="size-3" />} disabled={busy} onClick={() => void runPreset(p.id, "active")}>
+        <Button
+          size="xs"
+          variant="primary"
+          icon={<Play className="size-3" />}
+          disabled={busy}
+          onClick={() => void runPreset(p.id, "active")}
+        >
           Run
         </Button>
       </div>
@@ -169,11 +212,17 @@ function ScenarioLibrary({ tab, setTab }: { tab: ScenarioType; setTab: (t: Scena
     for (const p of presets) m[p.scenario_type] = (m[p.scenario_type] ?? 0) + 1;
     return m;
   }, [presets]);
-  const tabs = counts.custom ? [...TYPE_TABS, { type: "custom" as const, label: "Custom", Icon: FlaskConical, color: "#94a3b8" }] : TYPE_TABS;
+  const tabs = counts.custom
+    ? [...TYPE_TABS, { type: "custom" as const, label: "Custom", Icon: FlaskConical, color: "#94a3b8" }]
+    : TYPE_TABS;
   const list = presets.filter((p) => p.scenario_type === tab);
   return (
     <div className="flex flex-col @3xl:min-h-0">
-      <div role="tablist" aria-label="Scenario type" className="dt-scroll -mx-0.5 flex shrink-0 gap-1 overflow-x-auto px-0.5 pb-2">
+      <div
+        role="tablist"
+        aria-label="Scenario type"
+        className="dt-scroll -mx-0.5 flex shrink-0 gap-1 overflow-x-auto px-0.5 pb-2"
+      >
         {tabs.map(({ type, label, Icon, color }) => {
           const active = tab === type;
           return (
@@ -185,7 +234,9 @@ function ScenarioLibrary({ tab, setTab }: { tab: ScenarioType; setTab: (t: Scena
               onClick={() => setTab(type)}
               className={cx(
                 "flex h-7 shrink-0 items-center gap-1.5 rounded-md border px-2 text-[11.5px] transition-colors",
-                active ? "border-white/20 bg-white/[0.08] text-ink-50" : "border-transparent text-ink-300 hover:bg-white/[0.04] hover:text-ink-100",
+                active
+                  ? "border-white/20 bg-white/[0.08] text-ink-50"
+                  : "border-transparent text-ink-300 hover:bg-white/[0.04] hover:text-ink-100",
               )}
             >
               <Icon className="size-3.5" style={{ color: active ? color : undefined }} />
@@ -219,8 +270,6 @@ function ScenarioLibrary({ tab, setTab }: { tab: ScenarioType; setTab: (t: Scena
 function DraftBuilder() {
   const draft = useStore((s) => s.draft);
   const setDraft = useStore((s) => s.setDraft);
-  const toggleDraftNode = useStore((s) => s.toggleDraftNode);
-  const toggleDraftEdge = useStore((s) => s.toggleDraftEdge);
   const clearDraft = useStore((s) => s.clearDraft);
   const runSimulation = useStore((s) => s.runSimulation);
   const simStatus = useStore((s) => s.simStatus);
@@ -242,7 +291,11 @@ function DraftBuilder() {
       <SectionLabel
         right={
           !empty && (
-            <button type="button" onClick={clearDraft} className="flex items-center gap-1 text-[10.5px] text-ink-300 hover:text-ink-50">
+            <button
+              type="button"
+              onClick={clearDraft}
+              className="flex items-center gap-1 text-[10.5px] text-ink-300 hover:text-ink-50"
+            >
               <Trash2 className="size-3" /> Clear
             </button>
           )
@@ -257,7 +310,8 @@ function DraftBuilder() {
       <div className="dt-scroll mt-1.5 max-h-[76px] min-h-[30px] overflow-y-auto">
         {empty ? (
           <p className="text-[11px] leading-snug text-ink-400">
-            Add failure targets with <span className="text-ink-200">Add to scenario</span> in the inspector, or load a preset.
+            Add failure targets with <span className="text-ink-200">Add to scenario</span> in the inspector, or load a
+            preset.
           </p>
         ) : (
           <div className="flex flex-wrap gap-1">
@@ -266,15 +320,22 @@ function DraftBuilder() {
               const e = kind === "edge" ? index?.edges.get(id) : null;
               const sys = n?.system ?? e?.infrastructure_type;
               return (
-                <span key={id} className="inline-flex h-6 max-w-full items-center gap-1 rounded-md border border-white/12 bg-white/[0.04] pr-0.5 pl-1.5 text-[11px] text-ink-100">
+                <span
+                  key={id}
+                  className="inline-flex h-6 max-w-full items-center gap-1 rounded-md border border-white/12 bg-white/[0.04] pr-0.5 pl-1.5 text-[11px] text-ink-100"
+                >
                   {sys && <SystemDot system={sys} size={6} />}
-                  <button type="button" onClick={() => focusAny(id)} className="max-w-[150px] truncate hover:text-ink-50">
+                  <button
+                    type="button"
+                    onClick={() => focusAny(id)}
+                    className="max-w-[150px] truncate hover:text-ink-50"
+                  >
                     {n?.name ?? (e ? e.name || connectionLabel(e.connection_type) : id)}
                   </button>
                   <button
                     type="button"
                     aria-label={`Remove ${id} from scenario`}
-                    onClick={() => (kind === "node" ? toggleDraftNode(id) : toggleDraftEdge(id))}
+                    onClick={() => toggleDraftTarget(kind, id)}
                     className="flex size-4 items-center justify-center rounded text-ink-400 hover:bg-white/10 hover:text-ink-50"
                   >
                     <X className="size-3" />
@@ -300,7 +361,9 @@ function DraftBuilder() {
           marks={[4, 24, 48]}
           format={(v) => `${v} hours`}
         />
-        <p className="text-[10.5px] text-ink-400">Impacts assessed {draft.horizon_hours} h after onset — backups may run out.</p>
+        <p className="text-[10.5px] text-ink-400">
+          Impacts assessed {draft.horizon_hours} h after onset — backups may run out.
+        </p>
       </div>
       <div className="mt-2 flex items-center justify-between">
         <span className="text-[11.5px] text-ink-200">Automatic restoration</span>
@@ -318,7 +381,15 @@ function DraftBuilder() {
         </p>
       )}
       <div className="mt-2.5 flex items-center gap-1">
-        <Button size="sm" variant="primary" className="flex-1" icon={<Play className="size-3.5" />} disabled={empty} loading={busy} onClick={() => run("active")}>
+        <Button
+          size="sm"
+          variant="primary"
+          className="flex-1"
+          icon={<Play className="size-3.5" />}
+          disabled={empty}
+          loading={busy}
+          onClick={() => run("active")}
+        >
           Run
         </Button>
         <Button size="sm" variant="outline" disabled={empty || busy} onClick={() => run("A")}>
@@ -360,19 +431,30 @@ export function SimulationPanel({ narrow }: { narrow?: boolean }) {
         className="dt-panel pointer-events-auto flex h-11 max-w-full items-center gap-2 pr-1.5 pl-3"
       >
         <FlaskConical className="size-4 shrink-0 text-ink-300" />
-        <button type="button" onClick={() => openPanel("simulation")} className="flex min-w-0 items-center gap-2 text-left">
-          <span className="font-display text-[11.5px] font-semibold tracking-[0.16em] whitespace-nowrap text-ink-50">SIMULATION</span>
+        <button
+          type="button"
+          onClick={() => openPanel("simulation")}
+          className="flex min-w-0 items-center gap-2 text-left"
+        >
+          <span className="font-display text-[11.5px] font-semibold tracking-[0.16em] whitespace-nowrap text-ink-50">
+            SIMULATION
+          </span>
           {simStatus === "running" ? (
             <span className="flex items-center gap-1.5 text-[11.5px] text-ink-300">
               <Spinner /> Propagating…
             </span>
           ) : result ? (
             <span className="flex min-w-0 items-center gap-2">
-              <span className="dt-num text-[13px]" style={{ color: severityColor(result.impact_metrics.severity_index) }}>
+              <span
+                className="dt-num text-[13px]"
+                style={{ color: severityColor(result.impact_metrics.severity_index) }}
+              >
                 {Math.round(result.impact_metrics.severity_index)}
               </span>
               {slot && <span className="dt-num rounded bg-white/[0.08] px-1 text-[9.5px] text-ink-100">{slot}</span>}
-              <span className="max-w-[200px] truncate text-[12px] text-ink-200">{result.scenario.name ?? "Custom scenario"}</span>
+              <span className="max-w-[200px] truncate text-[12px] text-ink-200">
+                {result.scenario.name ?? "Custom scenario"}
+              </span>
               <span className="dt-num text-[10.5px] whitespace-nowrap text-ink-400">
                 step {playback.step}/{playback.maxStep}
               </span>
@@ -418,7 +500,11 @@ export function SimulationPanel({ narrow }: { narrow?: boolean }) {
         <h2 className="font-display text-[12.5px] font-semibold tracking-[0.12em] whitespace-nowrap text-ink-50 uppercase">
           Simulation<span className="hidden @4xl/dock:inline"> center</span>
         </h2>
-        <div role="tablist" aria-label="Simulation view" className="ml-1 flex shrink-0 items-center rounded-md bg-white/[0.04] p-0.5">
+        <div
+          role="tablist"
+          aria-label="Simulation view"
+          className="ml-1 flex shrink-0 items-center rounded-md bg-white/[0.04] p-0.5"
+        >
           {(["build", "results"] as const).map((t) => (
             <button
               key={t}
@@ -442,12 +528,18 @@ export function SimulationPanel({ narrow }: { narrow?: boolean }) {
           </span>
         )}
         <span className="min-w-0 flex-1" />
-        <div className="hidden min-w-0 @xl/dock:block">
+        <div className="hidden min-w-0 overflow-hidden @2xl/dock:flex">
           <SlotChips />
         </div>
         <span className="mx-0.5 h-5 w-px shrink-0 bg-white/[0.08]" />
         <Tooltip label="Restore world: clear results, slots, selection and layers">
-          <Button size="xs" variant="ghost" icon={<RotateCcw className="size-3" />} onClick={restoreWorld} aria-label="Restore world">
+          <Button
+            size="xs"
+            variant="ghost"
+            icon={<RotateCcw className="size-3" />}
+            onClick={restoreWorld}
+            aria-label="Restore world"
+          >
             <span className="hidden @4xl/dock:inline">Restore</span>
           </Button>
         </Tooltip>
@@ -509,7 +601,6 @@ function useScenarioTab() {
   const presets = useStore((s) => s.presets);
   const tab = useUI((s) => s.scenarioTab);
   const setScenarioTab = useUI((s) => s.setScenarioTab);
-  const fallback: ScenarioType =
-    draftType !== "custom" ? draftType : (presets[0]?.scenario_type ?? "power_failure");
+  const fallback: ScenarioType = draftType !== "custom" ? draftType : (presets[0]?.scenario_type ?? "power_failure");
   return { tab: tab ?? fallback, setTab: setScenarioTab };
 }

@@ -55,14 +55,19 @@ export function ShortcutsOverlay() {
             className="dt-panel-strong w-full max-w-[440px] p-1 focus:outline-none"
           >
             <div className="flex items-center justify-between px-3 pt-2 pb-1">
-              <h2 className="font-display text-[12.5px] font-semibold tracking-[0.12em] text-ink-50 uppercase">Keyboard shortcuts</h2>
+              <h2 className="font-display text-[12.5px] font-semibold tracking-[0.12em] text-ink-50 uppercase">
+                Keyboard shortcuts
+              </h2>
               <IconButton label="Close" size="sm" onClick={() => setOpen(false)}>
                 <X className="size-4" />
               </IconButton>
             </div>
             <ul className="grid grid-cols-1 gap-x-4 px-3 pb-3 sm:grid-cols-1">
               {SHORTCUTS.map((s) => (
-                <li key={s.label} className="flex items-center justify-between border-b border-white/[0.05] py-[7px] last:border-0">
+                <li
+                  key={s.label}
+                  className="flex items-center justify-between border-b border-white/[0.05] py-[7px] last:border-0"
+                >
                   <span className="text-[12.5px] text-ink-200">{s.label}</span>
                   <span className="flex gap-1">
                     {s.keys.map((k) => (

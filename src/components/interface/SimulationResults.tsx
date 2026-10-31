@@ -7,6 +7,7 @@ import { LAYER_ORDER, NODE_STATE_STYLES, SYSTEM_STYLES, typeLabel } from "@/lib/
 import { world } from "@/engine/worldBridge";
 import type { AlternativePath, SimulationResult, SystemType } from "@/types/infrastructure";
 import { focusNode } from "./actions";
+import { affectedStyle } from "./stateStyle";
 import { Chip, cx, IconButton, SectionLabel, Slider, SystemDot, Tooltip } from "./ui";
 
 export const severityColor = (v: number) =>
@@ -20,7 +21,12 @@ export function SeverityGauge({ value, size = 128 }: { value: number; size?: num
   const c = Math.PI * r;
   const color = severityColor(v);
   return (
-    <div className="relative" style={{ width: size, height: size * 0.62 }} role="img" aria-label={`Severity index ${Math.round(v)} of 100`}>
+    <div
+      className="relative"
+      style={{ width: size, height: size * 0.62 }}
+      role="img"
+      aria-label={`Severity index ${Math.round(v)} of 100`}
+    >
       <svg viewBox="0 0 110 64" className="h-full w-full overflow-visible">
         <defs>
           <linearGradient id="sev-grad" x1="0" x2="1" y1="0" y2="0">
@@ -30,7 +36,13 @@ export function SeverityGauge({ value, size = 128 }: { value: number; size?: num
             <stop offset="100%" stopColor="#f43f5e" />
           </linearGradient>
         </defs>
-        <path d="M9 57 A46 46 0 0 1 101 57" fill="none" stroke="rgba(255,255,255,0.07)" strokeWidth="6" strokeLinecap="round" />
+        <path
+          d="M9 57 A46 46 0 0 1 101 57"
+          fill="none"
+          stroke="rgba(255,255,255,0.07)"
+          strokeWidth="6"
+          strokeLinecap="round"
+        />
         <path
           d="M9 57 A46 46 0 0 1 101 57"
           fill="none"
@@ -65,7 +77,49 @@ export function SeverityGauge({ value, size = 128 }: { value: number; size?: num
   );
 }
 
-function Metric({ label, value, unit, hint, tone }: { label: string; value: string; unit?: string; hint?: string; tone?: string }) {
+/** Paragraph clamped to a few lines with a "more" toggle (engine summaries can be long). */
+function ExpandableText({ text, lines = 4 }: { text: string; lines?: number }) {
+  const [open, setOpen] = useState(false);
+  const long = text.length > lines * 48;
+  return (
+    <div>
+      <p
+        className="text-[12.5px] leading-snug text-ink-100"
+        style={
+          !open && long
+            ? { display: "-webkit-box", WebkitLineClamp: lines, WebkitBoxOrient: "vertical", overflow: "hidden" }
+            : undefined
+        }
+      >
+        {text}
+      </p>
+      {long && (
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          className="mt-0.5 text-[11px] text-sky-200/80 hover:text-sky-100"
+        >
+          {open ? "Show less" : "Show full summary"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function Metric({
+  label,
+  value,
+  unit,
+  hint,
+  tone,
+}: {
+  label: string;
+  value: string;
+  unit?: string;
+  hint?: string;
+  tone?: string;
+}) {
   return (
     <div className="rounded-md border border-white/[0.06] bg-white/[0.02] px-2 py-1.5">
       <div className="flex items-baseline gap-1">
@@ -76,7 +130,9 @@ function Metric({ label, value, unit, hint, tone }: { label: string; value: stri
       </div>
       <div className="mt-1 flex items-start gap-1 text-[10px] leading-tight text-ink-300">
         <span className="line-clamp-2">{label}</span>
-        {hint && <span className="shrink-0 font-mono text-[8.5px] tracking-[0.08em] text-ink-500 uppercase">{hint}</span>}
+        {hint && (
+          <span className="shrink-0 font-mono text-[8.5px] tracking-[0.08em] text-ink-500 uppercase">{hint}</span>
+        )}
       </div>
     </div>
   );
@@ -108,12 +164,31 @@ export function ResultOverview({ result }: { result: SimulationResult }) {
           </div>
         </dl>
       </div>
-      <p className="text-[12.5px] leading-snug text-ink-100">{result.summary}</p>
+      <ExpandableText text={result.summary} />
       <div className="grid grid-cols-2 gap-1.5">
-        <Metric label="Power unserved" value={fmtNum(m.power_load_unserved_mw)} unit="MW" tone={m.power_load_unserved_mw ? SYSTEM_STYLES.power.color : undefined} />
-        <Metric label="Water unserved" value={fmtNum(m.water_demand_unserved_lps)} unit="L/s" tone={m.water_demand_unserved_lps ? SYSTEM_STYLES.water.color : undefined} />
-        <Metric label="Telecom endpoints disconnected" value={fmtNum(m.telecom_nodes_disconnected, 0)} tone={m.telecom_nodes_disconnected ? SYSTEM_STYLES.telecom.color : undefined} />
-        <Metric label="Travel time" value={`+${fmtNum(m.transport_travel_time_increase_pct, 0)}`} unit="%" tone={m.transport_travel_time_increase_pct ? SYSTEM_STYLES.transport.color : undefined} />
+        <Metric
+          label="Power unserved"
+          value={fmtNum(m.power_load_unserved_mw)}
+          unit="MW"
+          tone={m.power_load_unserved_mw ? SYSTEM_STYLES.power.color : undefined}
+        />
+        <Metric
+          label="Water unserved"
+          value={fmtNum(m.water_demand_unserved_lps)}
+          unit="L/s"
+          tone={m.water_demand_unserved_lps ? SYSTEM_STYLES.water.color : undefined}
+        />
+        <Metric
+          label="Telecom endpoints disconnected"
+          value={fmtNum(m.telecom_nodes_disconnected, 0)}
+          tone={m.telecom_nodes_disconnected ? SYSTEM_STYLES.telecom.color : undefined}
+        />
+        <Metric
+          label="Travel time"
+          value={`+${fmtNum(m.transport_travel_time_increase_pct, 0)}`}
+          unit="%"
+          tone={m.transport_travel_time_increase_pct ? SYSTEM_STYLES.transport.color : undefined}
+        />
         <Metric label="Stations closed" value={fmtNum(m.transit_stations_closed, 0)} />
         <Tooltip
           label={critCount ? "Highlight affected critical facilities" : "No critical facilities affected"}
@@ -168,7 +243,10 @@ export function ResultOverview({ result }: { result: SimulationResult }) {
                       <div className="mt-[3px] h-[4px] overflow-hidden rounded-full bg-white/[0.06]">
                         <div
                           className="h-full rounded-full transition-[width] duration-700"
-                          style={{ width: `${Math.max(0, Math.min(1, p.percent_served)) * 100}%`, background: st?.color ?? "#94a3b8" }}
+                          style={{
+                            width: `${Math.max(0, Math.min(1, p.percent_served)) * 100}%`,
+                            background: st?.color ?? "#94a3b8",
+                          }}
                         />
                       </div>
                     </div>
@@ -247,7 +325,13 @@ export function PlaybackControls({ compact }: { compact?: boolean }) {
         pressed={playback.playing}
         onClick={() => (playback.playing ? setPlaying(false) : atEnd ? replayCascade() : setPlaying(true))}
       >
-        {playback.playing ? <Pause className="size-3.5" /> : atEnd && compact ? <RotateCcw className="size-3.5" /> : <Play className="size-3.5" />}
+        {playback.playing ? (
+          <Pause className="size-3.5" />
+        ) : atEnd && compact ? (
+          <RotateCcw className="size-3.5" />
+        ) : (
+          <Play className="size-3.5" />
+        )}
       </IconButton>
       {!compact && (
         <IconButton
@@ -364,9 +448,10 @@ export function CascadeTimeline({ result }: { result: SimulationResult }) {
                     </span>
                   </span>
                   <span
+                    title={s.description}
                     className={cx(
-                      "mt-0.5 block text-[11.5px] leading-snug text-ink-300",
-                      !current && "line-clamp-1",
+                      "mt-0.5 text-[11.5px] leading-snug text-ink-300",
+                      current ? "line-clamp-4" : "line-clamp-1",
                     )}
                   >
                     {s.description}
@@ -397,7 +482,9 @@ export function CascadeTimeline({ result }: { result: SimulationResult }) {
                           </span>
                         );
                       })}
-                      {s.node_ids.length > 6 && <span className="text-[10.5px] text-ink-400">+{s.node_ids.length - 6}</span>}
+                      {s.node_ids.length > 6 && (
+                        <span className="text-[10.5px] text-ink-400">+{s.node_ids.length - 6}</span>
+                      )}
                     </span>
                   )}
                 </span>
@@ -415,7 +502,19 @@ export function CascadeTimeline({ result }: { result: SimulationResult }) {
 // Details: affected components, alternative paths, assumptions
 // ---------------------------------------------------------------------------
 
-function Collapsible({ title, count, children, defaultOpen = true, right }: { title: string; count?: number; children: ReactNode; defaultOpen?: boolean; right?: ReactNode }) {
+function Collapsible({
+  title,
+  count,
+  children,
+  defaultOpen = true,
+  right,
+}: {
+  title: string;
+  count?: number;
+  children: ReactNode;
+  defaultOpen?: boolean;
+  right?: ReactNode;
+}) {
   const [open, setOpen] = useState(defaultOpen);
   return (
     <div>
@@ -445,7 +544,9 @@ function AffectedGroups({ result }: { result: SimulationResult }) {
       arr.push(a);
       m.set(a.system, arr);
     }
-    for (const arr of m.values()) arr.sort((x, y) => x.step - y.step);
+    // Impacted components first (by cascade step), rerouted-with-full-service last.
+    for (const arr of m.values())
+      arr.sort((x, y) => Number(affectedStyle(x).rerouted) - Number(affectedStyle(y).rerouted) || x.step - y.step);
     return LAYER_ORDER.filter((k) => m.has(k)).map((k) => ({ system: k, items: m.get(k)! }));
   }, [result]);
   if (!index) return null;
@@ -455,17 +556,21 @@ function AffectedGroups({ result }: { result: SimulationResult }) {
         const st = SYSTEM_STYLES[system];
         const all = expanded[system];
         const shown = all ? items : items.slice(0, 5);
+        const rerouted = items.filter((a) => affectedStyle(a).rerouted).length;
         return (
           <div key={system}>
             <div className="flex items-center gap-1.5 px-1">
               <SystemDot system={system} size={6} />
               <span className="text-[11px] font-medium text-ink-200">{st.label}</span>
-              <span className="dt-num text-[10px] text-ink-400">{items.length}</span>
+              <span className="dt-num text-[10px] text-ink-400">
+                {items.length - rerouted}
+                {rerouted > 0 && <span className="text-[#86efac]/80"> · {rerouted} rerouted</span>}
+              </span>
             </div>
             <ul className="mt-0.5">
               {shown.map((a) => {
                 const n = index.nodes.get(a.node_id);
-                const s = NODE_STATE_STYLES[a.state];
+                const s = affectedStyle(a);
                 return (
                   <li key={a.node_id}>
                     <Tooltip label={a.cause} side="left" className="block">
@@ -479,11 +584,14 @@ function AffectedGroups({ result }: { result: SimulationResult }) {
                           <span className="block truncate text-[9.5px] text-ink-400">{n ? typeLabel(n.type) : ""}</span>
                         </span>
                         <span
-                          className="inline-flex shrink-0 items-center gap-1 rounded-[4px] px-1 py-[1px] text-[9.5px]"
-                          style={{ color: s?.color, background: `${s?.color ?? "#999"}1a` }}
+                          className={cx(
+                            "inline-flex shrink-0 items-center gap-1 rounded-[4px] px-1 py-[1px] text-[9.5px]",
+                            s.rerouted && "border border-dashed border-ok/30",
+                          )}
+                          style={{ color: s.color, background: s.rerouted ? undefined : `${s.color}1a` }}
                         >
-                          <span className="size-1 rounded-full" style={{ background: s?.color }} />
-                          {s?.label ?? a.state}
+                          <span className="size-1 rounded-full" style={{ background: s.color }} />
+                          {s.rerouted ? "Rerouted" : s.label}
                         </span>
                       </button>
                     </Tooltip>
@@ -519,7 +627,13 @@ function AltPathRow({ p }: { p: AlternativePath }) {
         aria-pressed={active}
         onClick={() => {
           if (active) return setHighlight(null);
-          setHighlight({ node_ids: p.node_ids, edge_ids: p.edge_ids, label: p.purpose, tone: "success", source: "user" });
+          setHighlight({
+            node_ids: p.node_ids,
+            edge_ids: p.edge_ids,
+            label: p.purpose,
+            tone: "success",
+            source: "user",
+          });
           if (p.node_ids.length) world().flyToNodes(p.node_ids);
         }}
         className={cx(
@@ -550,7 +664,10 @@ export function ResultDetails({ result }: { result: SimulationResult }) {
   const dataMode = useStore((s) => s.dataMode);
   return (
     <div className="space-y-3">
-      <Collapsible title="Affected components" count={result.affected_nodes.length}>
+      <Collapsible
+        title="Affected components"
+        count={result.affected_nodes.filter((a) => !affectedStyle(a).rerouted).length}
+      >
         <AffectedGroups result={result} />
       </Collapsible>
       {result.alternative_paths.length > 0 && (

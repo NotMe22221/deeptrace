@@ -68,8 +68,12 @@ function StatusChip({
           className={cx("size-1.5 rounded-full", tone === "busy" && "animate-pulse-soft")}
           style={{ background: c, boxShadow: `0 0 6px ${c}` }}
         />
-        {showLabel && <span className="font-mono text-[9.5px] tracking-[0.14em] whitespace-nowrap text-ink-400">{label}</span>}
-        <span className="max-w-[150px] truncate font-mono text-[10.5px] tracking-[0.02em] whitespace-nowrap text-ink-100">{value}</span>
+        {showLabel && (
+          <span className="font-mono text-[9.5px] tracking-[0.14em] whitespace-nowrap text-ink-400">{label}</span>
+        )}
+        <span className="max-w-[150px] truncate font-mono text-[10.5px] tracking-[0.02em] whitespace-nowrap text-ink-100">
+          {value}
+        </span>
       </span>
     </Tooltip>
   );
@@ -100,11 +104,21 @@ function useStatus() {
           }
         : dataMode === "loading"
           ? { value: "Connecting", short: "Connecting", tone: "busy", detail: "Connecting to the simulation engine…" }
-          : { value: "Error", short: "Error", tone: "error", detail: "No engine and no offline snapshot could be loaded." };
+          : {
+              value: "Error",
+              short: "Error",
+              tone: "error",
+              detail: "No engine and no offline snapshot could be loaded.",
+            };
 
   const city: { value: string; short: string; tone: Tone; detail: string } =
     ws.buildings === "ion-osm"
-      ? { value: "OSM Buildings", short: "3D city", tone: "ok", detail: "3D buildings: Cesium OSM Buildings (© OpenStreetMap contributors)." }
+      ? {
+          value: "OSM Buildings",
+          short: "3D city",
+          tone: "ok",
+          detail: "3D buildings: Cesium OSM Buildings (© OpenStreetMap contributors).",
+        }
       : ws.buildings === "unavailable"
         ? {
             value: ws.ionToken ? "Buildings unavailable" : "No buildings",
@@ -118,7 +132,12 @@ function useStatus() {
 
   const ai: { value: string; short: string; tone: Tone; detail: string } =
     dataMode !== "live"
-      ? { value: "Analyst offline", short: "AI off", tone: "idle", detail: "The AI analyst needs the live engine so it can call simulation tools." }
+      ? {
+          value: "Analyst offline",
+          short: "AI off",
+          tone: "idle",
+          detail: "The AI analyst needs the live engine so it can call simulation tools.",
+        }
       : health?.llm_available
         ? {
             value: prettyModel(health.llm_model),
@@ -187,13 +206,7 @@ export function MainToolbar() {
           </IconButton>
         </div>
         <AnimatePresence>
-          {menuOpen && (
-            <NarrowMenu
-              onClose={() => setMenuOpen(false)}
-              status={status}
-              demoDisabled={!demoScript}
-            />
-          )}
+          {menuOpen && <NarrowMenu onClose={() => setMenuOpen(false)} status={status} demoDisabled={!demoScript} />}
         </AnimatePresence>
       </header>
     );
@@ -227,9 +240,24 @@ export function MainToolbar() {
         )}
         <span className="h-6 w-px bg-white/[0.08]" />
         <div className="flex items-center gap-1.5">
-          <StatusChip label="ENGINE" {...status.engine} value={shortChips ? status.engine.short : status.engine.value} showLabel={showChipLabels} />
-          <StatusChip label="3D CITY" {...status.city} value={shortChips ? status.city.short : status.city.value} showLabel={showChipLabels} />
-          <StatusChip label="AI" {...status.ai} value={shortChips ? status.ai.short : status.ai.value} showLabel={showChipLabels} />
+          <StatusChip
+            label="ENGINE"
+            {...status.engine}
+            value={shortChips ? status.engine.short : status.engine.value}
+            showLabel={showChipLabels}
+          />
+          <StatusChip
+            label="3D CITY"
+            {...status.city}
+            value={shortChips ? status.city.short : status.city.value}
+            showLabel={showChipLabels}
+          />
+          <StatusChip
+            label="AI"
+            {...status.ai}
+            value={shortChips ? status.ai.short : status.ai.value}
+            showLabel={showChipLabels}
+          />
         </div>
       </div>
 
@@ -255,9 +283,7 @@ export function MainToolbar() {
         <span className="mx-1 h-6 w-px bg-white/[0.08]" />
         {ACTIONS.map(({ key, label, shortcut, Icon }) => {
           const badge =
-            key === "comparison" && (slots.A || slots.B)
-              ? `${slots.A ? "A" : ""}${slots.B ? "B" : ""}`
-              : null;
+            key === "comparison" && (slots.A || slots.B) ? `${slots.A ? "A" : ""}${slots.B ? "B" : ""}` : null;
           return showLabels ? (
             <Tooltip key={key} label={label} shortcut={shortcut}>
               <button
@@ -270,7 +296,10 @@ export function MainToolbar() {
                 )}
               >
                 <Icon className="size-3.5" />
-                {label.replace(" center", "").replace("Compare scenarios", "Compare").replace("Data provenance", "Provenance")}
+                {label
+                  .replace(" center", "")
+                  .replace("Compare scenarios", "Compare")
+                  .replace("Data provenance", "Provenance")}
                 {badge && <span className="dt-num text-[9.5px] text-ink-300">{badge}</span>}
               </button>
             </Tooltip>
@@ -289,7 +318,13 @@ export function MainToolbar() {
         })}
         <span className="mx-1 h-6 w-px bg-white/[0.08]" />
         <Tooltip
-          label={demoScript ? (demoActive ? "Guided demo is running" : "Start the guided 10-step walkthrough") : "Demo script not available"}
+          label={
+            demoScript
+              ? demoActive
+                ? "Guided demo is running"
+                : "Start the guided 10-step walkthrough"
+              : "Demo script not available"
+          }
         >
           <button
             type="button"
@@ -346,7 +381,13 @@ function NarrowMenu({
       window.removeEventListener("keydown", onKey);
     };
   }, [onClose]);
-  const item = (label: string, Icon: typeof FlaskConical, onClick: () => void, active?: boolean, disabled?: boolean) => (
+  const item = (
+    label: string,
+    Icon: typeof FlaskConical,
+    onClick: () => void,
+    active?: boolean,
+    disabled?: boolean,
+  ) => (
     <button
       key={label}
       type="button"

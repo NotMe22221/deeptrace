@@ -4,7 +4,7 @@
  * Everything here is presentational; data comes from callers.
  */
 import clsx from "clsx";
-import { LoaderCircle } from "lucide-react";
+import { Check, LoaderCircle } from "lucide-react";
 import {
   type ButtonHTMLAttributes,
   type CSSProperties,
@@ -57,9 +57,12 @@ export function Tooltip({
       if (!r) return;
       const vw = window.innerWidth;
       const clampX = (x: number) => Math.min(vw - 90, Math.max(90, x));
-      if (side === "bottom") setPos({ left: clampX(r.left + r.width / 2), top: r.bottom + 8, transform: "translateX(-50%)" });
-      else if (side === "top") setPos({ left: clampX(r.left + r.width / 2), top: r.top - 8, transform: "translate(-50%,-100%)" });
-      else if (side === "left") setPos({ left: r.left - 8, top: r.top + r.height / 2, transform: "translate(-100%,-50%)" });
+      if (side === "bottom")
+        setPos({ left: clampX(r.left + r.width / 2), top: r.bottom + 8, transform: "translateX(-50%)" });
+      else if (side === "top")
+        setPos({ left: clampX(r.left + r.width / 2), top: r.top - 8, transform: "translate(-50%,-100%)" });
+      else if (side === "left")
+        setPos({ left: r.left - 8, top: r.top + r.height / 2, transform: "translate(-100%,-50%)" });
       else setPos({ left: r.right + 8, top: r.top + r.height / 2, transform: "translateY(-50%)" });
     }, 260);
   }, [side, disabled]);
@@ -233,31 +236,47 @@ export function Switch({
   size?: "sm" | "md";
   disabled?: boolean;
 }) {
-  const w = size === "sm" ? "w-6 h-3.5" : "w-7 h-4";
-  const knob = size === "sm" ? "size-2.5" : "size-3";
-  const travel = size === "sm" ? 10 : 12;
+  // ON: system-coloured border + tinted track + filled knob with a check, on the right.
+  // OFF: dark track, faint border, hollow dim knob on the left. Unambiguous for every hue,
+  // including the grey/white systems.
+  const dims = size === "sm" ? { w: 26, h: 16, k: 10 } : { w: 30, h: 18, k: 12 };
+  const travel = dims.w - dims.k - 6;
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
+      data-state={checked ? "on" : "off"}
       aria-label={label}
+      title={`${label}: ${checked ? "on" : "off"}`}
       disabled={disabled}
       onClick={() => onChange(!checked)}
-      className={cx(
-        "relative inline-flex shrink-0 items-center rounded-full border transition-colors duration-200 disabled:opacity-40",
-        w,
-        checked ? "border-transparent" : "border-white/15 bg-white/[0.04]",
-      )}
-      style={checked ? { background: `${color}cc`, boxShadow: `0 0 12px -2px ${color}88` } : undefined}
+      className="relative inline-flex shrink-0 items-center rounded-full border transition-[background,border-color,box-shadow] duration-200 disabled:opacity-40"
+      style={{
+        width: dims.w,
+        height: dims.h,
+        background: checked ? `${color}30` : "rgba(255,255,255,0.025)",
+        borderColor: checked ? color : "rgba(148,163,184,0.22)",
+        boxShadow: checked ? `0 0 10px -3px ${color}, inset 0 0 6px -2px ${color}66` : undefined,
+      }}
     >
       <span
-        className={cx("absolute left-[1px] rounded-full transition-transform duration-200", knob)}
+        aria-hidden
+        className="absolute flex items-center justify-center rounded-full transition-[transform,background,border-color] duration-200"
         style={{
+          left: 2,
+          width: dims.k,
+          height: dims.k,
           transform: `translateX(${checked ? travel : 0}px)`,
-          background: checked ? "#04060b" : "#6b7791",
+          background: checked ? color : "transparent",
+          border: checked ? "none" : "1.5px solid #5b6781",
+          boxShadow: checked ? `0 0 6px ${color}` : undefined,
         }}
-      />
+      >
+        {checked && (
+          <Check className="text-ink-950" style={{ width: dims.k - 4, height: dims.k - 4 }} strokeWidth={4} />
+        )}
+      </span>
     </button>
   );
 }
@@ -306,8 +325,7 @@ export function Chip({
 }
 
 export function StateChip({ state, kind = "node" }: { state: NodeState | EdgeState; kind?: "node" | "edge" }) {
-  const s =
-    kind === "node" ? NODE_STATE_STYLES[state as NodeState] : EDGE_STATE_STYLES[state as EdgeState];
+  const s = kind === "node" ? NODE_STATE_STYLES[state as NodeState] : EDGE_STATE_STYLES[state as EdgeState];
   if (!s) return <Chip>{String(state)}</Chip>;
   return (
     <Chip color={s.impacted ? s.color : "#9fb3c8"}>
@@ -329,7 +347,11 @@ export function ProvenanceChip({ category, className }: { category: ProvenanceCa
         simulated && "dt-hatch border-dashed",
         className,
       )}
-      style={{ color: p.color, borderColor: `${p.color}${simulated ? "88" : "55"}`, background: simulated ? undefined : `${p.color}12` }}
+      style={{
+        color: p.color,
+        borderColor: `${p.color}${simulated ? "88" : "55"}`,
+        background: simulated ? undefined : `${p.color}12`,
+      }}
     >
       {p.short}
     </span>
@@ -377,12 +399,17 @@ export function PanelHeader({
   return (
     <div className="flex h-11 shrink-0 items-center gap-2.5 border-b border-white/[0.07] pr-1.5 pl-3.5">
       {icon && (
-        <span className="flex size-5 items-center justify-center text-ink-300" style={accent ? { color: accent } : undefined}>
+        <span
+          className="flex size-5 items-center justify-center text-ink-300"
+          style={accent ? { color: accent } : undefined}
+        >
           {icon}
         </span>
       )}
       <div className="min-w-0 flex-1">
-        <h2 className="truncate font-display text-[12.5px] font-semibold tracking-[0.12em] text-ink-50 uppercase">{title}</h2>
+        <h2 className="truncate font-display text-[12.5px] font-semibold tracking-[0.12em] text-ink-50 uppercase">
+          {title}
+        </h2>
         {subtitle && <div className="truncate text-[11px] leading-tight text-ink-300">{subtitle}</div>}
       </div>
       {actions && <div className="flex items-center gap-0.5">{actions}</div>}
@@ -424,7 +451,10 @@ export function ShareBar({
 }) {
   const total = parts.reduce((a, p) => a + p.value, 0) || 1;
   return (
-    <div className={cx("flex w-full gap-px overflow-hidden rounded-full bg-white/[0.04]", className)} style={{ height }}>
+    <div
+      className={cx("flex w-full gap-px overflow-hidden rounded-full bg-white/[0.04]", className)}
+      style={{ height }}
+    >
       {parts
         .filter((p) => p.value > 0)
         .map((p) => (

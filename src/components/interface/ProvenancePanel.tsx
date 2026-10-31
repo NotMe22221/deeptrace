@@ -41,8 +41,12 @@ export function ProvenancePanel() {
       <div className="flex h-11 shrink-0 items-center gap-2.5 border-b border-white/[0.07] pr-1.5 pl-3.5">
         <BookOpenCheck className="size-4 text-ink-300" />
         <div className="min-w-0 flex-1">
-          <h2 className="font-display text-[12.5px] font-semibold tracking-[0.12em] text-ink-50 uppercase">Data provenance</h2>
-          <div className="truncate text-[10.5px] leading-tight text-ink-300">What is real, what is mapped, what is modelled</div>
+          <h2 className="font-display text-[12.5px] font-semibold tracking-[0.12em] text-ink-50 uppercase">
+            Data provenance
+          </h2>
+          <div className="truncate text-[10.5px] leading-tight text-ink-300">
+            What is real, what is mapped, what is modelled
+          </div>
         </div>
         <IconButton label="Close provenance" shortcut="P" size="sm" onClick={() => closePanel("provenance")}>
           <X className="size-4" />
@@ -103,17 +107,33 @@ export function ProvenancePanel() {
         )}
 
         {network && network.datasets.length > 0 && (
-          <Section title="Datasets" right={<span className="dt-num text-[10px] text-ink-400">{network.datasets.length}</span>}>
+          <Section
+            title="Datasets"
+            right={<span className="dt-num text-[10px] text-ink-400">{network.datasets.length}</span>}
+          >
             <ul className="space-y-2">
               {network.datasets.map((d) => (
-                <li key={d.id} className={cx("rounded-lg border px-2.5 py-2", d.category === "simulated" ? "dt-hatch border-dashed border-white/12" : "border-white/[0.07] bg-white/[0.02]")}>
+                <li
+                  key={d.id}
+                  className={cx(
+                    "rounded-lg border px-2.5 py-2",
+                    d.category === "simulated"
+                      ? "dt-hatch border-dashed border-white/12"
+                      : "border-white/[0.07] bg-white/[0.02]",
+                  )}
+                >
                   <div className="flex items-start gap-2">
                     <span className="min-w-0 flex-1 text-[12px] font-medium text-ink-50">{d.name}</span>
                     <ProvenanceChip category={d.category} />
                   </div>
                   <div className="mt-1 text-[11px] leading-snug text-ink-300">
                     {d.source_url && /^https?:\/\//.test(d.source_url) ? (
-                      <a href={d.source_url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-sky-200/90 hover:text-sky-100">
+                      <a
+                        href={d.source_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-sky-200/90 hover:text-sky-100"
+                      >
                         {d.source}
                         <ExternalLink className="size-3" />
                       </a>
@@ -167,13 +187,14 @@ export function ProvenancePanel() {
         <Section title="Limitations">
           <div className="rounded-lg border border-warn/25 bg-warn/[0.05] px-3 py-2 text-[11.5px] leading-relaxed text-ink-200">
             <p>
-              This build ships an <span className="font-medium text-ink-50">illustrative network</span>. Real utility routes,
-              capacities and interconnections are not public, so buried power, water and telecom assets are{" "}
-              <span className="font-medium text-ink-50">simulated</span> along public street corridors and anchored to publicly
-              mapped landmarks.
+              This build ships an <span className="font-medium text-ink-50">illustrative network</span>. Real utility
+              routes, capacities and interconnections are not public, so buried power, water and telecom assets are{" "}
+              <span className="font-medium text-ink-50">simulated</span> along public street corridors and anchored to
+              publicly mapped landmarks.
             </p>
             <p className="mt-1.5">
-              Simulation results are modelled outcomes for exploration and discussion — not validated engineering predictions.
+              Simulation results are modelled outcomes for exploration and discussion — not validated engineering
+              predictions.
             </p>
             <p className="mt-1.5 text-ink-300">
               Data mode:{" "}
@@ -190,8 +211,8 @@ export function ProvenancePanel() {
         <Section title="Attributions">
           <ul className="space-y-1.5 text-[11.5px] leading-snug text-ink-200">
             <li>
-              © <span className="text-ink-50">OpenStreetMap contributors</span> — street network, landmarks and 3D buildings, licensed
-              under the Open Database License (ODbL).
+              © <span className="text-ink-50">OpenStreetMap contributors</span> — street network, landmarks and 3D
+              buildings, licensed under the Open Database License (ODbL).
             </li>
             <li>
               <span className="text-ink-50">CesiumJS</span> (Apache-2.0) 3D globe renderer

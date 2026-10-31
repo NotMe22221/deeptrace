@@ -4,25 +4,18 @@
  * "no ion token" notice and the cascade initiation flash. Anchored bottom-left (left 12 / bottom 12,
  * 288 px wide) in the space the interface keeps free at the foot of the left column.
  */
-import { useEffect, useState } from "react";
 import { STRATA } from "@/engine/rendering/StrataLayer";
 import { DIFF_HEX, rgbToHex } from "@/engine/rendering/palette";
 import { useWorldUi } from "@/engine/worldUi";
 import { useStore } from "@/lib/store";
 
 function Flash() {
+  // keyed by the flash counter: each initiating failure remounts a one-shot CSS animation
   const flash = useWorldUi((s) => s.flash);
-  const [on, setOn] = useState(0);
-  useEffect(() => {
-    if (!flash) return;
-    setOn(flash);
-    const t = setTimeout(() => setOn(0), 900);
-    return () => clearTimeout(t);
-  }, [flash]);
-  if (!on) return null;
+  if (!flash) return null;
   return (
     <div
-      key={on}
+      key={flash}
       aria-hidden
       className="pointer-events-none absolute inset-0 z-20"
       style={{

@@ -46,7 +46,11 @@ export function DemoBar() {
                     <span
                       className={cx(
                         "block h-[3px] rounded-full transition-all duration-300",
-                        i === demo.step ? "w-5 bg-sky-200" : i < demo.step ? "w-2.5 bg-ink-200/70" : "w-2.5 bg-white/15 group-hover:bg-white/30",
+                        i === demo.step
+                          ? "w-5 bg-sky-200"
+                          : i < demo.step
+                            ? "w-2.5 bg-ink-200/70"
+                            : "w-2.5 bg-white/15 group-hover:bg-white/30",
                       )}
                     />
                   </button>
@@ -63,44 +67,56 @@ export function DemoBar() {
             </IconButton>
           </div>
           <div className="flex items-center gap-3 px-3 py-2.5">
-            <IconButton label="Previous step" shortcut="←" size="sm" disabled={demo.step === 0 || demo.busy} onClick={() => void demoPrev()}>
+            <IconButton
+              label="Previous step"
+              shortcut="←"
+              size="sm"
+              disabled={demo.step === 0 || demo.busy}
+              onClick={() => void demoPrev()}
+            >
               <ChevronLeft className="size-4" />
             </IconButton>
             <div className="min-w-0 flex-1">
-              <AnimatePresence mode="wait" initial={false}>
-                <motion.div
-                  key={demo.step}
-                  initial={{ opacity: 0, y: 4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -4 }}
-                  transition={{ duration: 0.18 }}
-                >
-                  <div className="flex items-center gap-2">
-                    <h2 className="truncate font-display text-[14.5px] font-semibold text-ink-50">
-                      {script.steps[demo.step]?.title}
-                    </h2>
-                    {demo.busy && (
-                      <span className="flex items-center gap-1 text-[10.5px] text-ink-300">
-                        <Spinner className="size-3" /> running
-                      </span>
-                    )}
-                  </div>
-                  <p className="mt-0.5 text-[12.5px] leading-snug text-ink-200">{script.steps[demo.step]?.narration}</p>
-                </motion.div>
-              </AnimatePresence>
+              {/* Keyed so each step's text eases in; no exit phase, so the text is never blank. */}
+              <motion.div
+                key={demo.step}
+                initial={{ opacity: 0.4, y: 3 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.2 }}
+              >
+                <div className="flex items-center gap-2">
+                  <h2 className="truncate font-display text-[14.5px] font-semibold text-ink-50">
+                    {script.steps[demo.step]?.title}
+                  </h2>
+                  {demo.busy && (
+                    <span className="flex items-center gap-1 text-[10.5px] text-ink-300">
+                      <Spinner className="size-3" /> running
+                    </span>
+                  )}
+                </div>
+                <p className="mt-0.5 text-[12.5px] leading-snug text-ink-200">{script.steps[demo.step]?.narration}</p>
+              </motion.div>
             </div>
-            <Tooltip label="Next step" shortcut="→">
-            <Button
-              size="sm"
-              variant={demo.step === script.steps.length - 1 ? "subtle" : "primary"}
-              disabled={demo.busy || demo.step === script.steps.length - 1}
-              onClick={() => void demoNext()}
-              className="min-w-[78px]"
-            >
-              {demo.step === script.steps.length - 1 ? "Done" : "Next"}
-              {demo.step < script.steps.length - 1 && <ChevronRight className="size-3.5" />}
-            </Button>
-            </Tooltip>
+            {demo.step < script.steps.length - 1 ? (
+              <Tooltip label="Next step" shortcut="→">
+                <Button
+                  size="sm"
+                  variant="primary"
+                  disabled={demo.busy}
+                  onClick={() => void demoNext()}
+                  className="min-w-[78px]"
+                >
+                  Next
+                  <ChevronRight className="size-3.5" />
+                </Button>
+              </Tooltip>
+            ) : (
+              <Tooltip label="End the walkthrough and keep exploring">
+                <Button size="sm" variant="subtle" disabled={demo.busy} onClick={exitDemo} className="min-w-[78px]">
+                  Finish
+                </Button>
+              </Tooltip>
+            )}
           </div>
         </motion.div>
       )}

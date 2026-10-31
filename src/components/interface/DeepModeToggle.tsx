@@ -130,7 +130,10 @@ export function DeepModeDescent() {
             <motion.div
               key={y}
               className="absolute right-[18%] left-[18%] h-px"
-              style={{ top: `${y * 100}%`, background: `linear-gradient(90deg, transparent, ${STRATA[i]}55, transparent)` }}
+              style={{
+                top: `${y * 100}%`,
+                background: `linear-gradient(90deg, transparent, ${STRATA[i]}55, transparent)`,
+              }}
               initial={{ scaleX: 0, opacity: 0 }}
               animate={{ scaleX: 1, opacity: [0, 1, 0] }}
               transition={{ duration: 1.2, delay: 0.15 + i * 0.12, ease: "easeOut" }}

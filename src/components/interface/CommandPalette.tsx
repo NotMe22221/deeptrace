@@ -134,12 +134,53 @@ function useCommands(): Command[] {
         keywords: "demo walkthrough tour judge",
         run: () => (demoScript ? startDemo() : undefined),
       },
-      { id: "restore", label: "Restore world", Icon: RotateCcw, keywords: "reset restore clear baseline", run: restoreWorld },
-      { id: "home", label: "Fly home", hint: "H", Icon: House, keywords: "camera home overview", run: () => world().flyHome() },
-      { id: "sim", label: "Open simulation center", hint: "S", Icon: FlaskConical, keywords: "simulation scenarios", run: () => openPanel("simulation") },
-      { id: "ai", label: "Open AI analyst", hint: "A", Icon: Bot, keywords: "ai analyst claude chat ask", run: () => openPanel("analyst") },
-      { id: "cmp", label: "Open scenario comparison", hint: "C", Icon: GitCompareArrows, keywords: "compare a b diff", run: () => openPanel("comparison") },
-      { id: "prov", label: "Open data provenance", hint: "P", Icon: BookOpenCheck, keywords: "provenance data sources license attribution", run: () => openPanel("provenance") },
+      {
+        id: "restore",
+        label: "Restore world",
+        Icon: RotateCcw,
+        keywords: "reset restore clear baseline",
+        run: restoreWorld,
+      },
+      {
+        id: "home",
+        label: "Fly home",
+        hint: "H",
+        Icon: House,
+        keywords: "camera home overview",
+        run: () => world().flyHome(),
+      },
+      {
+        id: "sim",
+        label: "Open simulation center",
+        hint: "S",
+        Icon: FlaskConical,
+        keywords: "simulation scenarios",
+        run: () => openPanel("simulation"),
+      },
+      {
+        id: "ai",
+        label: "Open AI analyst",
+        hint: "A",
+        Icon: Bot,
+        keywords: "ai analyst claude chat ask",
+        run: () => openPanel("analyst"),
+      },
+      {
+        id: "cmp",
+        label: "Open scenario comparison",
+        hint: "C",
+        Icon: GitCompareArrows,
+        keywords: "compare a b diff",
+        run: () => openPanel("comparison"),
+      },
+      {
+        id: "prov",
+        label: "Open data provenance",
+        hint: "P",
+        Icon: BookOpenCheck,
+        keywords: "provenance data sources license attribution",
+        run: () => openPanel("provenance"),
+      },
     ];
     if (selectedNodeId)
       cmds.push({
@@ -316,13 +357,20 @@ function PaletteDialog() {
                         {typeLabel(it.node.type)} · {SYSTEM_STYLES[it.node.system]?.label}
                       </span>
                     </span>
-                    {it.node.critical && <span className="font-mono text-[9px] tracking-[0.1em] text-[#fda4af]">CRITICAL</span>}
+                    {it.node.critical && (
+                      <span className="font-mono text-[9px] tracking-[0.1em] text-[#fda4af]">CRITICAL</span>
+                    )}
                     <ProvenanceChip category={it.node.provenance.category} />
-                    <span className="hidden w-[110px] truncate text-right font-mono text-[10px] text-ink-500 sm:block">{it.node.id}</span>
+                    <span className="hidden w-[110px] truncate text-right font-mono text-[10px] text-ink-500 sm:block">
+                      {it.node.id}
+                    </span>
                   </>
                 ) : (
                   <>
-                    <span className="flex size-5 items-center justify-center" style={{ color: it.cmd.color ?? "#a1abc0" }}>
+                    <span
+                      className="flex size-5 items-center justify-center"
+                      style={{ color: it.cmd.color ?? "#a1abc0" }}
+                    >
                       <it.cmd.Icon className="size-4" />
                     </span>
                     <span className="min-w-0 flex-1 truncate text-[13px] text-ink-100">{it.cmd.label}</span>

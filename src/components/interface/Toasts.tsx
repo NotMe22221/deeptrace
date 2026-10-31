@@ -22,7 +22,10 @@ function ToastCard({ t, onClose, persistent }: { t: Toast; onClose: () => void; 
       animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={{ opacity: 0, y: 6, transition: { duration: 0.15 } }}
       transition={{ duration: 0.18 }}
-      className={cx("dt-panel-strong pointer-events-auto flex w-[340px] max-w-full gap-2.5 px-3 py-2.5", persistent && "border-alert/30")}
+      className={cx(
+        "dt-panel-strong pointer-events-auto flex w-[340px] max-w-full gap-2.5 px-3 py-2.5",
+        persistent && "border-alert/30",
+      )}
     >
       <Icon className="mt-[1px] size-4 shrink-0" style={{ color }} />
       <div className="min-w-0 flex-1">

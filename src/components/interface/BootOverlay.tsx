@@ -61,7 +61,15 @@ export function BootOverlay() {
   const geo: LineState = worldReady ? (ws.status === "error" ? "warn" : "done") : "active";
   const graph: LineState = network ? "done" : dataMode === "error" ? "warn" : "active";
   const engine: LineState =
-    dataMode === "live" ? "done" : dataMode === "snapshot" ? "warn" : dataMode === "error" ? "warn" : network ? "active" : "pending";
+    dataMode === "live"
+      ? "done"
+      : dataMode === "snapshot"
+        ? "warn"
+        : dataMode === "error"
+          ? "warn"
+          : network
+            ? "active"
+            : "pending";
 
   return (
     <AnimatePresence>
@@ -74,8 +82,14 @@ export function BootOverlay() {
           initial={{ opacity: 1 }}
           exit={{ opacity: 0, transition: { duration: 0.8, ease: "easeInOut" } }}
         >
-          <div aria-hidden className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_50%_42%,rgba(34,211,238,0.06),transparent_55%)]" />
-          <div aria-hidden className="pointer-events-none absolute inset-x-0 top-1/2 h-px bg-[linear-gradient(90deg,transparent,rgba(148,163,184,0.12),transparent)]" />
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_50%_42%,rgba(34,211,238,0.06),transparent_55%)]"
+          />
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-x-0 top-1/2 h-px bg-[linear-gradient(90deg,transparent,rgba(148,163,184,0.12),transparent)]"
+          />
           <motion.div
             className="relative w-[min(420px,calc(100vw-32px))]"
             initial={{ opacity: 0, y: 8 }}
@@ -99,16 +113,23 @@ export function BootOverlay() {
                 <pre className="mt-1 overflow-x-auto rounded-md border border-white/[0.07] bg-black/40 px-2.5 py-2 font-mono text-[11px] text-ink-100">
                   cd backend && .venv/bin/uvicorn app.main:app --port 8000
                 </pre>
-                <p className="mt-2.5 text-[12px] text-ink-200">…or export the offline snapshot (no server needed afterwards):</p>
+                <p className="mt-2.5 text-[12px] text-ink-200">
+                  …or export the offline snapshot (no server needed afterwards):
+                </p>
                 <pre className="mt-1 overflow-x-auto rounded-md border border-white/[0.07] bg-black/40 px-2.5 py-2 font-mono text-[11px] text-ink-100">
                   make snapshot
                 </pre>
                 <p className="mt-1.5 text-[11px] text-ink-400">
-                  Runs <code className="font-mono">app.scripts.export_snapshot</code>, writing public/demo/network.json and
-                  public/demo/snapshot.json. Then press Retry.
+                  Runs <code className="font-mono">app.scripts.export_snapshot</code>, writing public/demo/network.json
+                  and public/demo/snapshot.json. Then press Retry.
                 </p>
                 <div className="mt-3 flex justify-end">
-                  <Button size="sm" variant="primary" icon={<RotateCw className="size-3.5" />} onClick={() => void bootstrap()}>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    icon={<RotateCw className="size-3.5" />}
+                    onClick={() => void bootstrap()}
+                  >
                     Retry
                   </Button>
                 </div>
@@ -119,7 +140,15 @@ export function BootOverlay() {
                   <Line
                     state={geo}
                     label="Loading geographic environment…"
-                    detail={worldReady ? (ws.buildings === "ion-osm" ? "3D buildings" : "globe") : graceOver ? "continuing" : undefined}
+                    detail={
+                      worldReady
+                        ? ws.buildings === "ion-osm"
+                          ? "3D buildings"
+                          : "globe"
+                        : graceOver
+                          ? "continuing"
+                          : undefined
+                    }
                   />
                   <Line
                     state={graph}
@@ -129,7 +158,13 @@ export function BootOverlay() {
                   <Line
                     state={engine}
                     label="Connecting simulation engine…"
-                    detail={dataMode === "live" ? `live · v${health?.version ?? "?"}` : dataMode === "snapshot" ? "offline snapshot" : undefined}
+                    detail={
+                      dataMode === "live"
+                        ? `live · v${health?.version ?? "?"}`
+                        : dataMode === "snapshot"
+                          ? "offline snapshot"
+                          : undefined
+                    }
                   />
                 </ul>
                 <div className="relative mt-7 h-px overflow-hidden bg-white/[0.06]">
@@ -137,7 +172,8 @@ export function BootOverlay() {
                 </div>
                 {network?.region && (
                   <p className="dt-num mt-3 text-center text-[10px] tracking-[0.16em] text-ink-400 uppercase">
-                    {network.region.name} · {network.region.center[0].toFixed(3)}°, {network.region.center[1].toFixed(3)}°
+                    {network.region.name} · {network.region.center[0].toFixed(3)}°,{" "}
+                    {network.region.center[1].toFixed(3)}°
                   </p>
                 )}
               </>

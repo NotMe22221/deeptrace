@@ -867,7 +867,7 @@ export const useStore = create<DeeptraceState>((set, get) => {
               set({ draft: { ...presetA.scenario } });
               const existing = get().slots.A;
               if (step.action === "cascade" && existing) {
-                set((s) => ({ result: existing, compareView: null }));
+                set({ result: existing, compareView: null });
                 get().replayCascade();
               } else {
                 set({ traceVisible: false });

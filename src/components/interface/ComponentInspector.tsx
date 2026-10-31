@@ -26,24 +26,9 @@ import {
   SYSTEM_STYLES,
   typeLabel,
 } from "@/lib/systems";
-import {
-  fmtElevation,
-  fmtLat,
-  fmtLon,
-  fmtMeters,
-  fmtNum,
-  fmtPct,
-  fmtValue,
-  humanizeKey,
-} from "@/lib/format";
+import { fmtElevation, fmtLat, fmtLon, fmtMeters, fmtNum, fmtPct, fmtValue, humanizeKey } from "@/lib/format";
 import { world } from "@/engine/worldBridge";
-import type {
-  InfrastructureEdge,
-  InfrastructureNode,
-  Provenance,
-  Relation,
-  SystemType,
-} from "@/types/infrastructure";
+import type { InfrastructureEdge, InfrastructureNode, Provenance, Relation, SystemType } from "@/types/infrastructure";
 import {
   askAnalyst,
   closePanel,
@@ -52,9 +37,22 @@ import {
   focusNode,
   simulateEdgeFailure,
   simulateNodeFailure,
+  toggleDraftTarget,
 } from "./actions";
-import { Chip, cx, IconButton, KeyValue, ProvenanceChip, SectionLabel, Spinner, StateChip, SystemDot, Tooltip } from "./ui";
+import {
+  Chip,
+  cx,
+  IconButton,
+  KeyValue,
+  ProvenanceChip,
+  SectionLabel,
+  Spinner,
+  StateChip,
+  SystemDot,
+  Tooltip,
+} from "./ui";
 import { useUI } from "./uiStore";
+import { affectedStyle } from "./stateStyle";
 
 // ---------------------------------------------------------------------------
 // Shared bits
@@ -85,10 +83,7 @@ export function ProvenanceBlock({ provenance }: { provenance: Provenance }) {
   const simulated = provenance.category === "simulated";
   return (
     <div
-      className={cx(
-        "rounded-lg border px-3 py-2.5",
-        simulated ? "dt-hatch border-dashed" : "bg-white/[0.02]",
-      )}
+      className={cx("rounded-lg border px-3 py-2.5", simulated ? "dt-hatch border-dashed" : "bg-white/[0.02]")}
       style={{ borderColor: `${p.color}${simulated ? "66" : "33"}` }}
     >
       <div className="flex items-center gap-2">
@@ -119,15 +114,50 @@ export function ProvenanceBlock({ provenance }: { provenance: Provenance }) {
   );
 }
 
+/** Property value; ids of known components/connections become clickable links. */
+function PropValue({ v, index }: { v: unknown; index: NetworkIndex }) {
+  const ids = (Array.isArray(v) ? v : [v]).filter(
+    (x): x is string => typeof x === "string" && (index.nodes.has(x) || index.edges.has(x)),
+  );
+  if (!ids.length) return <>{fmtValue(v)}</>;
+  return (
+    <span className="inline-flex flex-wrap justify-end gap-1">
+      {ids.map((id) => {
+        const n = index.nodes.get(id);
+        const e = n ? null : index.edges.get(id);
+        const sys = n?.system ?? e?.infrastructure_type;
+        return (
+          <button
+            key={id}
+            type="button"
+            onClick={() => (n ? focusNode(id) : focusEdge(id))}
+            title={n?.name ?? e?.name ?? id}
+            className="inline-flex items-center gap-1 rounded border border-white/10 bg-white/[0.03] px-1 font-mono text-[10.5px] text-ink-100 hover:border-white/25"
+          >
+            {sys && <SystemDot system={sys} size={5} />}
+            {id}
+          </button>
+        );
+      })}
+    </span>
+  );
+}
+
 function RelationTag({ relation }: { relation?: Relation }) {
   if (!relation) return null;
   return relation === "physical" ? (
-    <span className="flex items-center gap-1 font-mono text-[9px] tracking-[0.1em] text-ink-300" title="Physical conduit">
+    <span
+      className="flex items-center gap-1 font-mono text-[9px] tracking-[0.1em] text-ink-300"
+      title="Physical conduit"
+    >
       <span className="h-0 w-3 border-t-[1.5px] border-ink-300" />
       PHYS
     </span>
   ) : (
-    <span className="flex items-center gap-1 font-mono text-[9px] tracking-[0.1em] text-sky-200/80" title="Service dependency">
+    <span
+      className="flex items-center gap-1 font-mono text-[9px] tracking-[0.1em] text-sky-200/80"
+      title="Service dependency"
+    >
       <span className="h-0 w-3 border-t-[1.5px] border-dashed border-sky-200/80" />
       DEP
     </span>
@@ -326,7 +356,10 @@ function InspectorHeader({
       />
       <div aria-hidden className="absolute top-0 left-0 h-full w-[2px]" style={{ background: st.color }} />
       <div className="relative flex items-center gap-2">
-        <span className="flex items-center gap-1.5 font-mono text-[9.5px] tracking-[0.14em] uppercase" style={{ color: st.color }}>
+        <span
+          className="flex items-center gap-1.5 font-mono text-[9.5px] tracking-[0.14em] uppercase"
+          style={{ color: st.color }}
+        >
           <SystemDot system={system} size={7} />
           {st.label}
         </span>
@@ -356,7 +389,6 @@ function NodeInspector({ node, index }: { node: InfrastructureNode; index: Netwo
   const showTrace = useStore((s) => s.showTrace);
   const hideTrace = useStore((s) => s.hideTrace);
   const draft = useStore((s) => s.draft);
-  const toggleDraftNode = useStore((s) => s.toggleDraftNode);
   const result = useStore((s) => s.result);
   const simStatus = useStore((s) => s.simStatus);
   const metrics = useStore((s) => s.metrics);
@@ -373,7 +405,9 @@ function NodeInspector({ node, index }: { node: InfrastructureNode; index: Netwo
   const spof = details?.is_single_point_of_failure || isArticulation;
   const critEntry = useMemo(() => {
     const i = metrics?.criticality_ranking.findIndex((c) => c.node_id === node.id) ?? -1;
-    return i >= 0 ? { rank: i + 1, entry: metrics!.criticality_ranking[i], of: metrics!.criticality_ranking.length } : null;
+    return i >= 0
+      ? { rank: i + 1, entry: metrics!.criticality_ranking[i], of: metrics!.criticality_ranking.length }
+      : null;
   }, [metrics, node.id]);
   const rank = details?.criticality_rank ?? critEntry?.rank ?? null;
 
@@ -417,10 +451,16 @@ function NodeInspector({ node, index }: { node: InfrastructureNode; index: Netwo
     details?.downstream_ids?.length ? details.downstream_ids : trace?.downstream.map((h) => h.node_id),
   );
   const dependencies = toRows(
-    details?.dependency_ids ?? [...direct.entries()].filter(([, e]) => e.relation === "dependency" && e.target_node === node.id).map(([id]) => id),
+    details?.dependency_ids ??
+      [...direct.entries()]
+        .filter(([, e]) => e.relation === "dependency" && e.target_node === node.id)
+        .map(([id]) => id),
   );
   const dependents = toRows(
-    details?.dependent_ids ?? [...direct.entries()].filter(([, e]) => e.relation === "dependency" && e.source_node === node.id).map(([id]) => id),
+    details?.dependent_ids ??
+      [...direct.entries()]
+        .filter(([, e]) => e.relation === "dependency" && e.source_node === node.id)
+        .map(([id]) => id),
   );
   const listed = new Set([...upstream, ...downstream, ...dependencies, ...dependents].map((r) => r.id));
   const connected = toRows(physicalNeighbours.filter((id) => !listed.has(id)));
@@ -428,7 +468,9 @@ function NodeInspector({ node, index }: { node: InfrastructureNode; index: Netwo
   const affected = result?.affected_nodes.find((a) => a.node_id === node.id) ?? null;
   const simState = result?.node_states[node.id] ?? null;
 
-  const propEntries = Object.entries(node.properties ?? {}).filter(([, v]) => v !== null && v !== undefined && v !== "");
+  const propEntries = Object.entries(node.properties ?? {}).filter(
+    ([, v]) => v !== null && v !== undefined && v !== "",
+  );
   const modelled = node.provenance.category === "simulated" || node.provenance.category === "estimated";
 
   const onTrace = async () => {
@@ -472,7 +514,7 @@ function NodeInspector({ node, index }: { node: InfrastructureNode; index: Netwo
           label={inDraft ? "In scenario" : "Add to scenario"}
           active={inDraft}
           onClick={() => {
-            toggleDraftNode(node.id);
+            toggleDraftTarget("node", node.id);
             pushToast({
               tone: "info",
               title: inDraft ? "Removed from scenario" : "Added to scenario",
@@ -501,13 +543,21 @@ function NodeInspector({ node, index }: { node: InfrastructureNode; index: Netwo
         {result && simState && (
           <Section
             title="Simulation status"
-            right={<span className="dt-num text-[10px] text-ink-400">{result.scenario.name ?? result.scenario_id}</span>}
+            right={
+              <span className="dt-num text-[10px] text-ink-400">{result.scenario.name ?? result.scenario_id}</span>
+            }
           >
             <div className="flex flex-wrap items-center gap-1.5">
-              <StateChip state={simState} />
-              {affected && (
+              {affected && affectedStyle(affected).rerouted ? (
+                <Chip color="#4ade80">Rerouted · no service loss</Chip>
+              ) : (
+                <StateChip state={simState} />
+              )}
+              {affected && !affectedStyle(affected).rerouted && (
                 <>
-                  <Chip color={SEVERITY_STYLES[affected.severity].color}>{SEVERITY_STYLES[affected.severity].label}</Chip>
+                  <Chip color={SEVERITY_STYLES[affected.severity].color}>
+                    {SEVERITY_STYLES[affected.severity].label}
+                  </Chip>
                   <span className="dt-num text-[10.5px] text-ink-300">
                     step {affected.step} · service {fmtPct(affected.service_level)}
                   </span>
@@ -623,8 +673,13 @@ function NodeInspector({ node, index }: { node: InfrastructureNode; index: Netwo
               {propEntries.map(([k, v]) => {
                 const assumed = /assum|estimat|model/i.test(k) || (modelled && typeof v === "number");
                 return (
-                  <KeyValue key={k} label={humanizeKey(k)} mono={typeof v === "number"} hint={assumed ? "modelled" : undefined}>
-                    {fmtValue(v)}
+                  <KeyValue
+                    key={k}
+                    label={humanizeKey(k)}
+                    mono={typeof v === "number"}
+                    hint={assumed ? "modelled" : undefined}
+                  >
+                    <PropValue v={v} index={index} />
                   </KeyValue>
                 );
               })}
@@ -634,7 +689,9 @@ function NodeInspector({ node, index }: { node: InfrastructureNode; index: Netwo
 
         <Section
           title="Connections"
-          right={detailsLoading ? <Spinner /> : <span className="dt-num text-[10px] text-ink-400">{direct.size} direct</span>}
+          right={
+            detailsLoading ? <Spinner /> : <span className="dt-num text-[10px] text-ink-400">{direct.size} direct</span>
+          }
         >
           <div className="-mx-1">
             <LinkGroup title="Upstream" hint="supplies this" rows={upstream} index={index} />
@@ -648,9 +705,11 @@ function NodeInspector({ node, index }: { node: InfrastructureNode; index: Netwo
               index={index}
               defaultOpen={!upstream.length && !downstream.length}
             />
-            {!upstream.length && !downstream.length && !dependencies.length && !dependents.length && !connected.length && (
-              <p className="px-1 py-1 text-[12px] text-ink-400">No connections recorded.</p>
-            )}
+            {!upstream.length &&
+              !downstream.length &&
+              !dependencies.length &&
+              !dependents.length &&
+              !connected.length && <p className="px-1 py-1 text-[12px] text-ink-400">No connections recorded.</p>}
           </div>
           <div className="mt-2 flex items-center gap-3 px-0.5 text-[10px] text-ink-400">
             <RelationTag relation="physical" />
@@ -674,7 +733,6 @@ function NodeInspector({ node, index }: { node: InfrastructureNode; index: Netwo
 
 function EdgeInspector({ edge, index }: { edge: InfrastructureEdge; index: NetworkIndex }) {
   const draft = useStore((s) => s.draft);
-  const toggleDraftEdge = useStore((s) => s.toggleDraftEdge);
   const result = useStore((s) => s.result);
   const simStatus = useStore((s) => s.simStatus);
   const network = useStore((s) => s.network);
@@ -686,10 +744,7 @@ function EdgeInspector({ edge, index }: { edge: InfrastructureEdge; index: Netwo
   const corridorKey = edge.infrastructure_type === "underground" ? edge.id : edge.corridor_id;
   const corridorEdge = edge.corridor_id ? index.edges.get(edge.corridor_id) : null;
   const hosted = useMemo(
-    () =>
-      corridorKey
-        ? (network?.edges ?? []).filter((e) => e.corridor_id === corridorKey && e.id !== edge.id)
-        : [],
+    () => (corridorKey ? (network?.edges ?? []).filter((e) => e.corridor_id === corridorKey && e.id !== edge.id) : []),
     [network, corridorKey, edge.id],
   );
 
@@ -742,8 +797,11 @@ function EdgeInspector({ edge, index }: { edge: InfrastructureEdge; index: Netwo
           label={inDraft ? "In scenario" : "Add to scenario"}
           active={inDraft}
           onClick={() => {
-            toggleDraftEdge(edge.id);
-            pushToast({ tone: "info", title: inDraft ? "Connection removed from scenario" : "Connection added to scenario" });
+            toggleDraftTarget("edge", edge.id);
+            pushToast({
+              tone: "info",
+              title: inDraft ? "Connection removed from scenario" : "Connection added to scenario",
+            });
           }}
           title={inDraft ? "Remove connection from the draft scenario" : "Add connection to the draft scenario"}
         />
@@ -763,7 +821,9 @@ function EdgeInspector({ edge, index }: { edge: InfrastructureEdge; index: Netwo
               <StateChip state={state} kind="edge" />
               {interrupted && <span className="dt-num text-[10.5px] text-ink-300">step {interrupted.step}</span>}
             </div>
-            {interrupted?.reason && <p className="mt-2 text-[12.5px] leading-snug text-ink-100">{interrupted.reason}</p>}
+            {interrupted?.reason && (
+              <p className="mt-2 text-[12.5px] leading-snug text-ink-100">{interrupted.reason}</p>
+            )}
             {!EDGE_STATE_STYLES[state]?.impacted && !interrupted && (
               <p className="mt-1.5 text-[12px] text-ink-300">Not affected in this scenario.</p>
             )}
@@ -783,7 +843,9 @@ function EdgeInspector({ edge, index }: { edge: InfrastructureEdge; index: Netwo
         <Section title="Specification">
           <dl>
             <KeyValue label="Connection">{connectionLabel(edge.connection_type)}</KeyValue>
-            <KeyValue label="Relation">{edge.relation === "dependency" ? "Service dependency" : "Physical conduit"}</KeyValue>
+            <KeyValue label="Relation">
+              {edge.relation === "dependency" ? "Service dependency" : "Physical conduit"}
+            </KeyValue>
             {edge.capacity != null && (
               <KeyValue label="Capacity" mono>
                 {fmtNum(edge.capacity)} {edge.capacity_unit ?? ""}
@@ -804,7 +866,7 @@ function EdgeInspector({ edge, index }: { edge: InfrastructureEdge; index: Netwo
               .filter(([, v]) => v !== null && v !== undefined && v !== "")
               .map(([k, v]) => (
                 <KeyValue key={k} label={humanizeKey(k)} mono={typeof v === "number"}>
-                  {fmtValue(v)}
+                  <PropValue v={v} index={index} />
                 </KeyValue>
               ))}
           </dl>

@@ -65,7 +65,13 @@ function renderInline(text: string, opts: MarkdownOptions, keyBase: string): Rea
       const href = lm?.[2] ?? "";
       if (/^https?:\/\//i.test(href)) {
         out.push(
-          <a key={k} href={href} target="_blank" rel="noopener noreferrer" className="text-sky-200 underline decoration-sky-200/30 underline-offset-2 hover:text-sky-100">
+          <a
+            key={k}
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-sky-200 underline decoration-sky-200/30 underline-offset-2 hover:text-sky-100"
+          >
             {label}
           </a>,
         );
@@ -109,7 +115,10 @@ export function renderMarkdown(src: string, opts: MarkdownOptions = {}): ReactNo
       while (i < lines.length && !/^\s*```/.test(lines[i])) body.push(lines[i++]);
       i++;
       blocks.push(
-        <pre key={key()} className="dt-scroll my-2 overflow-x-auto rounded-md border border-white/[0.06] bg-black/30 p-2 font-mono text-[11px] leading-relaxed text-ink-100">
+        <pre
+          key={key()}
+          className="dt-scroll my-2 overflow-x-auto rounded-md border border-white/[0.06] bg-black/30 p-2 font-mono text-[11px] leading-relaxed text-ink-100"
+        >
           <code>{body.join("\n")}</code>
         </pre>,
       );
@@ -157,7 +166,10 @@ export function renderMarkdown(src: string, opts: MarkdownOptions = {}): ReactNo
             <thead>
               <tr className="bg-white/[0.03]">
                 {header.map((c, ci) => (
-                  <th key={ci} className="border-b border-white/[0.07] px-2 py-1 text-left font-mono text-[9.5px] font-medium tracking-[0.1em] text-ink-300 uppercase">
+                  <th
+                    key={ci}
+                    className="border-b border-white/[0.07] px-2 py-1 text-left font-mono text-[9.5px] font-medium tracking-[0.1em] text-ink-300 uppercase"
+                  >
                     {renderInline(c, opts, `${k}h${ci}`)}
                   </th>
                 ))}

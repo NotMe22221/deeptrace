@@ -3,13 +3,7 @@ import { ChevronsLeft, ChevronsRight, Eye, EyeOff, Layers } from "lucide-react";
 import { motion } from "framer-motion";
 import { useStore } from "@/lib/store";
 import { fmtNum } from "@/lib/format";
-import {
-  EDGE_STATE_STYLES,
-  LAYER_ORDER,
-  NODE_STATE_STYLES,
-  PROVENANCE_STYLES,
-  SYSTEM_STYLES,
-} from "@/lib/systems";
+import { EDGE_STATE_STYLES, LAYER_ORDER, NODE_STATE_STYLES, PROVENANCE_STYLES, SYSTEM_STYLES } from "@/lib/systems";
 import { useNetworkStats, type NetworkStats } from "@/hooks/useNetworkStats";
 import { PROVENANCE_CATEGORIES } from "@/types/infrastructure";
 import { SYSTEM_ICONS } from "./icons";
@@ -114,7 +108,12 @@ function SystemList({ stats }: { stats: NetworkStats | null }) {
                       {s ? `${s.nodes} nodes · ${s.edges} links` : "—"}
                     </div>
                   </button>
-                  <Switch checked={on} onChange={(v) => setLayer(key, v)} label={`${st.label} layer`} color={st.color} />
+                  <Switch
+                    checked={on}
+                    onChange={(v) => setLayer(key, v)}
+                    label={`${st.label} layer`}
+                    color={st.color}
+                  />
                 </div>
                 {s && s.nodes + s.edges > 0 && (
                   <ProvenanceBar provenance={s.provenance} className="mt-[5px] ml-[34px] mr-[38px]" />
@@ -130,7 +129,9 @@ function SystemList({ stats }: { stats: NetworkStats | null }) {
             <span key={c} className="flex items-center gap-1 text-[9.5px] text-ink-300">
               <span
                 className={cx("inline-block h-[5px] w-2.5 rounded-[1px]", c === "simulated" && "dt-hatch")}
-                style={{ background: c === "simulated" ? `${PROVENANCE_STYLES[c].color}55` : PROVENANCE_STYLES[c].color }}
+                style={{
+                  background: c === "simulated" ? `${PROVENANCE_STYLES[c].color}55` : PROVENANCE_STYLES[c].color,
+                }}
               />
               {PROVENANCE_STYLES[c].label}
             </span>
@@ -214,7 +215,11 @@ function Overlays({ stats }: { stats: NetworkStats | null }) {
           <span className="flex w-6 justify-center" aria-hidden>
             {r.preview}
           </span>
-          <button type="button" onClick={() => r.set(!r.value)} className="flex min-w-0 flex-1 items-baseline gap-1.5 text-left">
+          <button
+            type="button"
+            onClick={() => r.set(!r.value)}
+            className="flex min-w-0 flex-1 items-baseline gap-1.5 text-left"
+          >
             <span className="shrink-0 text-[12.5px] text-ink-100">{r.label}</span>
             {r.hint && <span className="dt-num truncate text-[10px] text-ink-400">{r.hint}</span>}
           </button>
@@ -239,9 +244,7 @@ function DeepBlock({ stats }: { stats: NetworkStats | null }) {
   const depthScale = useStore((s) => s.depthScale);
   const setDepthScale = useStore((s) => s.setDepthScale);
   const maxDepth = Math.max(stats?.maxDepth ?? 0, 1);
-  const strata = DEEP_SYSTEMS.map((k) => ({ key: k, s: stats?.bySystem[k] })).filter(
-    (x) => x.s && x.s.depthMax > 0,
-  );
+  const strata = DEEP_SYSTEMS.map((k) => ({ key: k, s: stats?.bySystem[k] })).filter((x) => x.s && x.s.depthMax > 0);
   return (
     <div
       className={cx(
@@ -251,7 +254,9 @@ function DeepBlock({ stats }: { stats: NetworkStats | null }) {
     >
       <SectionLabel
         className="mb-1.5 px-0.5"
-        right={<Switch checked={deepMode} onChange={() => toggleDeepMode()} label="Deep Mode" size="sm" color="#22d3ee" />}
+        right={
+          <Switch checked={deepMode} onChange={() => toggleDeepMode()} label="Deep Mode" size="sm" color="#22d3ee" />
+        }
       >
         <span className={deepMode ? "text-cyan-200" : undefined}>Deep mode · subsurface</span>
       </SectionLabel>
@@ -302,8 +307,7 @@ function DeepBlock({ stats }: { stats: NetworkStats | null }) {
                       />
                     </div>
                     <span className="dt-num w-[84px] text-right text-[9.5px] text-ink-300">
-                      {fmtNum(s!.depthMin, 1)}–{fmtNum(s!.depthMax, 1)} m
-                      <span className="text-ink-500"> · </span>
+                      {fmtNum(s!.depthMin, 1)}–{fmtNum(s!.depthMax, 1)} m<span className="text-ink-500"> · </span>
                       <span className={deepMode ? "text-cyan-200/80" : "text-ink-400"}>
                         {fmtNum(s!.depthMax * depthScale, 0)}
                       </span>
@@ -329,7 +333,10 @@ function StateLegend() {
             {s.kind === "edge" ? (
               <span className="h-[2px] w-2.5 rounded-full" style={{ background: s.color }} />
             ) : (
-              <span className="size-[7px] rounded-full" style={{ background: s.color, boxShadow: `0 0 6px ${s.color}66` }} />
+              <span
+                className="size-[7px] rounded-full"
+                style={{ background: s.color, boxShadow: `0 0 6px ${s.color}66` }}
+              />
             )}
             {s.label}
           </span>
@@ -360,7 +367,11 @@ function LayerRail({ stats, onExpand }: { stats: NetworkStats | null; onExpand?:
         const Icon = SYSTEM_ICONS[k];
         const s = stats?.bySystem[k];
         return (
-          <Tooltip key={k} side="right" label={`${st.label}${s ? ` · ${s.nodes} nodes` : ""} — ${layers[k] ? "visible" : "hidden"}`}>
+          <Tooltip
+            key={k}
+            side="right"
+            label={`${st.label}${s ? ` · ${s.nodes} nodes` : ""} — ${layers[k] ? "visible" : "hidden"}`}
+          >
             <button
               type="button"
               aria-pressed={layers[k]}
