@@ -70,6 +70,27 @@ _STREET_SUFFIXES = {
 }  # fmt: skip
 
 
+# Which normalised OSM point kinds (app.ingest.normalize.classify_point) may stand for a
+# landmark of a given kind. Landmark kinds not listed are never matched (e.g. commercial).
+LANDMARK_OSM_KINDS: dict[str, frozenset[str]] = {
+    "transit_station": frozenset({"station"}),
+    "hospital": frozenset({"hospital"}),
+    "government": frozenset({"townhall", "courthouse", "government"}),
+    "emergency_services": frozenset({"police", "fire_station"}),
+    "university": frozenset({"university"}),
+    "venue": frozenset({"stadium", "sports_centre", "park", "aquarium", "named_feature"}),
+    "internet_exchange": frozenset({"data_center", "telecom_exchange", "telecom", "named_feature"}),
+}
+
+# Mirrors app.simulation.power.EMERGENCY_LIMIT (a test keeps them in sync): a line loaded above
+# this multiple of its rating trips.
+EMERGENCY_LIMIT = 1.2
+
+
+def _join(items: list[str]) -> str:
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
 def street_key(name: str) -> str:
     """Normalised street name for matching ('Peachtree Street Northeast' -> 'peachtree')."""
     tokens = re.sub(r"[^a-z0-9 ]+", " ", name.lower()).split()
@@ -159,7 +180,8 @@ class NetworkBuilder:
         self.street_node_to_trn: dict[str, str] = {}
         self.warnings: list[str] = []
         self.osm_points_used: set[str] = set()
-        self.osm_matches = 0
+        self.asset_osm_matches = 0  # simulated assets positioned at a mapped OSM feature (location only)
+        self.landmark_osm_ids: set[str] = set()  # landmarks whose position came from OSM
         self.site_nodes: set[str] = set()  # off-street nodes free to join the street graph at any nearby node
         self.place_names: dict[str, str] = {}  # street node -> well-known place name (e.g. "Five Points")
         self._sp_cache: dict[str, dict[str, float]] = {}
@@ -225,9 +247,11 @@ class NetworkBuilder:
         critical: bool = False,
         description: str | None = None,
         properties: dict[str, Any] | None = None,
+        location: dict[str, Any] | None = None,
     ) -> str:
         if node_id in self.nodes:
             raise ValueError(f"duplicate node id {node_id}")
+        properties = {**(properties or {}), **(location or {})}
         lon, lat = r6(point)
         self.nodes[node_id] = {
             "id": node_id,
@@ -399,26 +423,31 @@ class NetworkBuilder:
 
     def site_and_provenance(
         self, site: Sequence[float], kinds: set[str], role: str, max_m: float = 600.0
-    ) -> tuple[tuple[float, float], dict[str, Any]]:
-        """Position a simulated asset; with OSM data, snap to a mapped feature of a plausible kind."""
+    ) -> tuple[tuple[float, float], dict[str, Any], dict[str, Any]]:
+        """Position a simulated asset; with OSM data, snap it to a mapped feature of a plausible kind.
+
+        The asset stays SIMULATED: only its *location* comes from the mapped feature, which is
+        recorded in the provenance notes / ``source_url`` and in ``properties.location_source``.
+        Returns ``(point, provenance, extra_properties)``.
+        """
         point = latlon(site)
         match = self.osm_site(kinds, point, max_m) if kinds else None
         if match is None:
-            return point, sim_prov()
-        from app.ingest.normalize import osm_provenance
+            return point, sim_prov(), {}
+        from app.ingest.normalize import osm_url
 
-        self.osm_matches += 1
+        self.asset_osm_matches += 1
         label = match.get("name") or match["kind"].replace("_", " ")
-        prov = osm_provenance(
-            match["osm_type"],
-            match["osm_numeric_id"],
-            (self.inp.osm or {}).get("meta", {}).get("retrieved_at"),
-            0.6,
-            f"LOCATION ONLY from OpenStreetMap feature {match['osm_id']} ('{label}', © OpenStreetMap contributors, ODbL). "
-            f"Its modelled role ({role}), capacity and every connection are SIMULATED - the mapped feature is not "
-            "known to play this role.",
+        prov = sim_prov(
+            f"Illustrative asset. LOCATION ONLY snapped to OpenStreetMap feature {match['osm_id']} ('{label}', "
+            f"\u00a9 OpenStreetMap contributors, ODbL). Its modelled role ({role}), capacity and every connection are "
+            "SIMULATED - the mapped feature is not known to play this role.",
+            confidence=0.15,
         )
-        return (match["lon"], match["lat"]), prov
+        prov["source_url"] = osm_url(match["osm_type"], match["osm_numeric_id"])
+        prov["retrieved_at"] = (self.inp.osm or {}).get("meta", {}).get("retrieved_at")
+        extra = {"location_source": f"OpenStreetMap {match['osm_id']}", "location_source_name": label}
+        return (match["lon"], match["lat"]), prov, extra
 
     def landmark_position(self, lm: dict[str, Any]) -> tuple[tuple[float, float], dict[str, Any]]:
         """Landmark position + provenance (ESTIMATED, or PUBLICLY_MAPPED when matched in OSM)."""
@@ -440,9 +469,10 @@ class NetworkBuilder:
 
             want = normalize_name(match_spec["name"])
             tags_req = match_spec.get("tags") or {}
+            allowed = LANDMARK_OSM_KINDS.get(lm.get("kind"), frozenset())
             best = None
             for p in osm["points"]:
-                if p["osm_id"] in self.osm_points_used:
+                if p["osm_id"] in self.osm_points_used or p["kind"] not in allowed:
                     continue
                 if any(p["tags"].get(k) != v for k, v in tags_req.items()):
                     continue
@@ -451,10 +481,12 @@ class NetworkBuilder:
                 d = geo.haversine_m(point, (p["lon"], p["lat"]))
                 if d <= 800 and (best is None or (d, p["osm_id"]) < best[0]):
                     best = ((d, p["osm_id"]), p)
-            if best is not None:
+            if best is None:
+                self.warnings.append(f"landmark {lm['id']} ('{match_spec['name']}') not matched in the OSM cache; position stays ESTIMATED")
+            else:
                 p = best[1]
                 self.osm_points_used.add(p["osm_id"])
-                self.osm_matches += 1
+                self.landmark_osm_ids.add(lm["id"])
                 point = (p["lon"], p["lat"])
                 prov = osm_provenance(
                     p["osm_type"],
@@ -605,7 +637,7 @@ class NetworkBuilder:
             point, prov = self.landmark_position(lm)
             nid = f"TRN-STN-{lm_id}"
             props = dict(lm.get("properties") or {})
-            props.update({"backup_hours": 0, "power": "traction & station power (modelled)"})
+            props.update({"backup_hours": 0, "power": "traction & station power (modelled)", "modelled_figures": True})
             elevation = float(lm.get("elevation_m", 0.0))
             self.add_node(
                 nid,
@@ -664,7 +696,7 @@ class NetworkBuilder:
         pd = self.design["power"]
         ds_meta: dict[str, dict[str, Any]] = {}
         for ts in pd["transmission_substations"]:
-            point, prov = self.site_and_provenance(ts["site"], {"substation"}, "transmission bulk supply point")
+            point, prov, loc = self.site_and_provenance(ts["site"], {"substation"}, "transmission bulk supply point")
             self.add_node(
                 ts["id"],
                 ts["name"],
@@ -672,13 +704,14 @@ class NetworkBuilder:
                 "transmission_substation",
                 point,
                 prov,
+                location=loc,
                 capacity=float(ts["capacity_mw"]),
                 capacity_unit="MW",
                 description="Bulk supply point where 115 kV transmission enters the district (simulated source).",
                 properties={"voltage_kv": 115, "role": "source"},
             )
         for ds in pd["distribution_substations"]:
-            point, prov = self.site_and_provenance(ds["site"], {"substation"}, "distribution substation")
+            point, prov, loc = self.site_and_provenance(ds["site"], {"substation"}, "distribution substation")
             ds_meta[ds["id"]] = ds
             self.add_node(
                 ds["id"],
@@ -687,6 +720,7 @@ class NetworkBuilder:
                 "distribution_substation",
                 point,
                 prov,
+                location=loc,
                 capacity=float(ds["capacity_mw"]),
                 capacity_unit="MW",
                 description=f"Distribution substation stepping 115 kV down to 12.47 kV radial feeders ({ds['label']}, simulated).",
@@ -862,25 +896,25 @@ class NetworkBuilder:
     def build_water(self) -> None:
         wd = self.design["water"]
         for s in wd["sources"]:
-            point, prov = self.site_and_provenance(s["site"], {"water_works"}, "treated-water supply entry")
+            point, prov, loc = self.site_and_provenance(s["site"], {"water_works"}, "treated-water supply entry")
             self.add_node(
-                s["id"], s["name"], "water", "supply_source", point, prov,
+                s["id"], s["name"], "water", "supply_source", point, prov, location=loc,
                 elevation=-2.5, capacity=float(s["capacity_lps"]), capacity_unit="L/s",
                 description="Point where a treated-water transmission main enters the district (simulated source).",
                 properties={"pressure_zone": "low", "role": "source"},
             )  # fmt: skip
         for p in wd.get("pump_stations", []):
-            point, prov = self.site_and_provenance(p["site"], {"pumping_station"}, "booster pump station")
+            point, prov, loc = self.site_and_provenance(p["site"], {"pumping_station"}, "booster pump station")
             self.add_node(
-                p["id"], p["name"], "water", "pump_station", point, prov,
+                p["id"], p["name"], "water", "pump_station", point, prov, location=loc,
                 capacity=float(p["capacity_lps"]), capacity_unit="L/s",
                 description=f"Booster pump lifting low-zone water into the {p['serves_pressure_zone']}-pressure zone; needs grid power (simulated).",
                 properties={"serves_pressure_zone": p["serves_pressure_zone"], "backup_hours": float(p.get("backup_hours", 0)), "power_kw": 450},
             )  # fmt: skip
         for t in wd.get("storage_tanks", []):
-            point, prov = self.site_and_provenance(t["site"], {"water_tower", "storage_tank"}, "elevated storage tank")
+            point, prov, loc = self.site_and_provenance(t["site"], {"water_tower", "storage_tank"}, "elevated storage tank")
             self.add_node(
-                t["id"], t["name"], "water", "storage_tank", point, prov,
+                t["id"], t["name"], "water", "storage_tank", point, prov, location=loc,
                 elevation=float(t.get("elevation_m", 40)), capacity=float(t.get("capacity_lps", 150)), capacity_unit="L/s",
                 description=f"Elevated storage ({t['storage_m3']} m³) floating on the {t['pressure_zone']}-pressure zone (simulated).",
                 properties={"storage_m3": float(t["storage_m3"]), "pressure_zone": t["pressure_zone"]},
@@ -965,30 +999,31 @@ class NetworkBuilder:
             if c.get("landmark"):
                 lm = self.landmarks[c["landmark"]]
                 point, prov = self.landmark_position(lm)
+                loc = {}
                 prov = dict(prov)
                 prov["notes"] = (prov.get("notes") or "") + " Modelled connections, capacity and backup hours are SIMULATED."
                 desc = f"{lm['name']}: real carrier hotel / interconnection facility (position approximate). Its role as the district's core and every link attached to it are SIMULATED."
             else:
-                point, prov = self.site_and_provenance(c["site"], {"data_center", "telecom_exchange"}, "internet exchange / data centre")
+                point, prov, loc = self.site_and_provenance(c["site"], {"data_center", "telecom_exchange"}, "internet exchange / data centre")
                 desc = "Secondary core: data centre with an internet exchange (simulated)."
             self.add_node(
-                c["id"], c["name"], "telecom", c.get("type", "internet_exchange"), point, prov,
+                c["id"], c["name"], "telecom", c.get("type", "internet_exchange"), point, prov, location=loc,
                 capacity=float(c["capacity_gbps"]), capacity_unit="Gbps", description=desc,
-                properties={"role": "core", "backup_hours": float(c["backup_hours"]), "water_backup_hours": float(c.get("water_backup_hours", 0)),
+                properties={"role": "core", "modelled_figures": True, "backup_hours": float(c["backup_hours"]), "water_backup_hours": float(c.get("water_backup_hours", 0)),
                             **({"facility_type": c["facility_type"]} if c.get("facility_type") else {})},
             )  # fmt: skip
         for c in td.get("central_offices", []):
-            point, prov = self.site_and_provenance(c["site"], {"telecom_exchange"}, "central office")
+            point, prov, loc = self.site_and_provenance(c["site"], {"telecom_exchange"}, "central office")
             self.add_node(
-                c["id"], c["name"], "telecom", "central_office", point, prov,
+                c["id"], c["name"], "telecom", "central_office", point, prov, location=loc,
                 capacity=float(c["capacity_gbps"]), capacity_unit="Gbps",
                 description="Aggregation exchange with battery + generator backup (simulated).",
                 properties={"backup_hours": float(c["backup_hours"])},
             )  # fmt: skip
         for c in td.get("data_centers", []):
-            point, prov = self.site_and_provenance(c["site"], {"data_center"}, "data centre")
+            point, prov, loc = self.site_and_provenance(c["site"], {"data_center"}, "data centre")
             self.add_node(
-                c["id"], c["name"], "telecom", "data_center", point, prov,
+                c["id"], c["name"], "telecom", "data_center", point, prov, location=loc,
                 capacity_unit="Gbps", demand=float(c["demand_gbps"]),
                 description="Colocation data centre consuming transit capacity; needs power and cooling water (simulated).",
                 properties={"backup_hours": float(c["backup_hours"]), "water_backup_hours": float(c.get("water_backup_hours", 0))},
@@ -1103,6 +1138,7 @@ class NetworkBuilder:
             props: dict[str, Any] = {
                 "occupancy": int(f["occupancy"]),
                 "occupancy_basis": "modelled typical weekday daytime occupancy",
+                "modelled_figures": True,
                 "backup_power_hours": float(f["backup_power_hours"]),
                 "backup_hours": float(f["backup_power_hours"]),
                 "water_storage_hours": float(f.get("water_storage_hours", 0)),
@@ -1225,12 +1261,11 @@ class NetworkBuilder:
     # ------------------------------------------------------------------ outputs
 
     def datasets(self) -> list[dict[str, Any]]:
-        counts = Counter(n["provenance"]["category"] for n in self.nodes.values())
-        counts.update(e["provenance"]["category"] for e in self.edges.values())
         sim_count = sum(1 for x in list(self.nodes.values()) + list(self.edges.values()) if x["provenance"]["category"] == "simulated")
         osm = self.inp.osm
         street_count = len(self.inp.streets)
         landmark_count = len(self.landmarks) + len(self.inp.landmarks.get("rail_lines", []))
+        n_lm = len(self.landmark_osm_ids)
         out: list[dict[str, Any]] = []
         if self.inp.street_source == "authored":
             out.append({
@@ -1243,13 +1278,15 @@ class NetworkBuilder:
             "id": "authored-landmarks", "name": "Authored landmark positions and MARTA alignments", "category": "estimated",
             "source": "General public knowledge (not surveyed)", "license": "CC0-1.0",
             "feature_count": landmark_count, "systems": ["transport", "telecom", "facility"], "inspected": False,
-            "notes": "Real public places (MARTA stations, Grady, City Hall, State Capitol, venues, 56 Marietta St) at approximate positions; station depths and rail alignments are low-confidence estimates." + (" Some positions were replaced by matched OpenStreetMap features." if osm else ""),
+            "notes": "Real public places (MARTA stations, Grady, City Hall, State Capitol, venues, 56 Marietta St) at approximate positions; station depths and rail alignments are low-confidence estimates."
+            + (f" {n_lm} of {len(self.landmarks)} landmark positions were replaced by matched OpenStreetMap features." if n_lm else ""),
         })  # fmt: skip
         out.append({
             "id": "deeptrace-generator", "name": f"DEEPTRACE illustrative infrastructure generator v{GENERATOR_VERSION}", "category": "simulated",
             "source": SIM_SOURCE, "license": "CC0-1.0", "feature_count": sim_count,
             "systems": ["power", "water", "telecom", "underground", "facility", "transport"], "inspected": False,
-            "notes": "All utility assets, capacities, loads, backup durations, occupancies, corridors and cross-system dependencies are generated from design.json for illustration. They do NOT describe real Georgia Power, Atlanta Watershed, carrier or MARTA infrastructure.",
+            "notes": "All utility assets, capacities, loads, backup durations, occupancies, corridors and cross-system dependencies are generated from design.json for illustration. They do NOT describe real Georgia Power, Atlanta Watershed, carrier or MARTA infrastructure."
+            + (f" {self.asset_osm_matches} of these simulated assets take only their location from a mapped OpenStreetMap feature (recorded in properties.location_source); they remain SIMULATED." if self.asset_osm_matches else ""),
         })  # fmt: skip
         if osm:
             meta = osm["meta"]
@@ -1257,9 +1294,9 @@ class NetworkBuilder:
                 "id": "osm-overpass", "name": "OpenStreetMap via Overpass API", "category": "publicly_mapped",
                 "source": "OpenStreetMap contributors via Overpass API", "source_url": "https://www.openstreetmap.org/copyright",
                 "license": "ODbL-1.0", "retrieved_at": meta.get("retrieved_at"),
-                "feature_count": len(osm["streets"]) + self.osm_matches, "systems": ["transport", "power", "water", "telecom", "facility"],
-                "inspected": True,
-                "notes": f"Road ways ({len(osm['streets'])}) replace the authored streets; {self.osm_matches} mapped points positioned modelled assets or landmarks (location only - roles and topology stay SIMULATED). © OpenStreetMap contributors.",
+                "feature_count": len(osm["streets"]) + n_lm + self.asset_osm_matches,
+                "systems": ["transport", "power", "water", "telecom", "facility"], "inspected": True,
+                "notes": f"Road ways ({len(osm['streets'])}) replace the authored streets. {n_lm} landmark position(s) come from matched OSM features (PUBLICLY_MAPPED); {self.asset_osm_matches} simulated asset(s) were snapped to a mapped feature for location only and stay SIMULATED. \u00a9 OpenStreetMap contributors.",
             })  # fmt: skip
         else:
             out.append({
@@ -1277,42 +1314,178 @@ class NetworkBuilder:
         })  # fmt: skip
         return out
 
+    # -- data-derived assumption sentences (each one is checked against the data it describes)
+
+    def _deps_into(self, consumer: str, ctype: str) -> list[str]:
+        return [e["source_node"] for e in self.edges.values() if e["target_node"] == consumer and e["connection_type"] == ctype]
+
+    def _label(self, node_id: str) -> str:
+        return re.sub(r"\s*\(simulated\)$", "", self.nodes[node_id]["name"])
+
+    def _power_sentence(self) -> str:
+        pd = self.design["power"]
+        feeder_load: dict[str, float] = defaultdict(float)
+        for n in self.nodes.values():
+            if n["type"] == "network_vault":
+                feeder_load[n["properties"]["feeder"]] += n["demand"] or 0.0
+        ties = [n for n in self.nodes.values() if n["properties"].get("normally_open")]
+        below = [t for t in ties if all(t["properties"]["tie_capacity_mw"] < feeder_load[f] for f in t["properties"]["feeders"])]
+        tie_text = (
+            "every tie is rated below the load of the feeders it joins, so restoration can be partial"
+            if len(below) == len(ties)
+            else f"{len(below)} of {len(ties)} ties are rated below the load of the feeders they join, so restoration can be partial"
+        )
+        lf = [float(d["load_factor"]) for d in pd["distribution_substations"]]
+        return (
+            "Power: 115 kV bulk supply points feed distribution substations over underground cables; each substation feeds "
+            "radial 12.47 kV feeders (head switch, then network transformer vaults). Normally-open tie switches join feeders "
+            f"of different substations; {tie_text}. Substation load = rating x properties.load_factor "
+            f"({min(lf):.0%}-{max(lf):.0%}); vault loads are split deterministically from stable hashes; population_served "
+            f"is about {pd.get('population_per_mw', 1000):,.0f} people per MW of load (modelled daytime population)."
+        )
+
+    def _alternate_line_sentence(self) -> str:
+        under: list[str] = []
+        for e in self.edges.values():
+            if e["connection_type"] != "transmission_line" or e["properties"].get("role") != "alternate":
+                continue
+            ds = self.nodes[e["target_node"]]
+            load = float(ds["demand"] or 0.0)
+            if e["capacity"] * EMERGENCY_LIMIT < load:
+                under.append(f"{e['id']} ({self._label(ds['id'])}, {e['capacity']:.0f} MW vs {load:.1f} MW load)")
+        text = "Alternate (standby) transmission lines can carry their substation's full load"
+        if under:
+            text += (
+                " except " + ", ".join(under) + ", which is rated below that load and trips (above the "
+                f"{EMERGENCY_LIMIT:.0%} emergency limit) when its primary supply is lost"
+            )
+        return text + "."
+
+    def _water_sentence(self) -> str:
+        import networkx as nx
+
+        boundary = {"valve", "supply_source", "pump_station", "storage_tank", "service_zone"}
+        g = nx.Graph()
+        for e in self.edges.values():
+            if e["infrastructure_type"] == "water" and e["relation"] == "physical":
+                g.add_edge(e["source_node"], e["target_node"])
+        interior = g.subgraph(n for n in g if self.nodes[n]["type"] not in boundary)
+        biggest = max((len(c) for c in nx.connected_components(interior)), default=0)
+        dual = sorted(
+            self._label(n["id"]) for n in self.nodes.values() if n["properties"].get("service_connections", 1) >= 2
+        )
+        dual_text = f" {' and '.join(dual)} have a second service connection." if dual else ""
+        return (
+            "Water: two transmission-main entries feed a looped low-pressure grid; isolation valves sit on the mains between "
+            f"junctions, so closing the valves around a break isolates at most {biggest} junction(s) and the zones they serve."
+            f"{dual_text} A booster pump (needs grid power) feeds the high-pressure zone, backed by an elevated tank; "
+            "normally-closed boundary valves separate the zones and are treated as closed unless opened."
+        )
+
+    def _telecom_sentence(self) -> str:
+        import networkx as nx
+
+        g = nx.Graph()
+        homes: dict[str, set[str]] = defaultdict(set)
+        for e in self.edges.values():
+            if e["connection_type"] != "fiber_link":
+                continue
+            a, b = e["source_node"], e["target_node"]
+            g.add_edge(a, b)
+            for x, y in ((a, b), (b, a)):
+                if self.nodes[x]["type"] in ("cell_site", "access_node"):
+                    homes[x].add(y)
+        cores = sorted(n for n in g if self.nodes[n]["type"] == "internet_exchange")
+        g.add_edges_from(("__core__", c) for c in cores)
+        single = sorted(k for k, v in homes.items() if len(v) == 1)
+        dual = sorted(k for k, v in homes.items() if len(v) >= 2)
+        only_core = {c: sorted(k for k, v in homes.items() if v == {c}) for c in cores}
+        spur = nx.Graph()
+        spur.add_edges_from(
+            (e["source_node"], e["target_node"]) for e in self.edges.values() if e["properties"].get("role") == "spur"
+        )
+        spur_nodes = sorted(spur.nodes)
+        ends = sorted(n for n in spur if spur.degree(n) == 1)
+        if len(ends) == 2 and nx.is_connected(spur):
+            spur_nodes = nx.shortest_path(spur, ends[0], ends[1])
+        spur_text = ""
+        if spur_nodes:
+            stub = [n for n in spur_nodes if n not in cores and nx.edge_connectivity(g, "__core__", n) < 2]
+            names = " - ".join(self._label(n) for n in spur_nodes)
+            spur_text = (
+                f" A spur ({names}) links the rings, so its sites are reachable both ways."
+                if not stub
+                else f" A spur ({names}) leaves {', '.join(self._label(n) for n in stub)} single-homed."
+            )
+        core_text = "".join(
+            f" {_join([self._label(n) for n in v])} reach the core only through {self._label(c)}." for c, v in only_core.items() if v
+        )
+        return (
+            f"Telecom: dual cores ({' and '.join(self._label(c) for c in cores)}; the carrier hotel is a real building whose "
+            "modelled links are simulated) with west and east fibre rings." + spur_text
+            + f" {len(dual)} access/cell sites are dual-homed and {len(single)} single-homed." + core_text
+            + " properties.backup_hours is battery/generator autonomy."
+        )
+
+    def _transport_sentence(self) -> str:
+        signals = [n for n in self.nodes.values() if n["type"] == "intersection" and n["properties"].get("signalized")]
+        ups = [n for n in signals if (n["properties"].get("backup_hours") or 0) > 0]
+        hours = sorted({n["properties"]["backup_hours"] for n in ups})
+        ups_text = (
+            f"{len(ups)} of {len(signals)} signalised intersections (those on primary streets) have "
+            f"{'/'.join(f'{h:g}' for h in hours)} h of UPS backup, the rest go dark when grid power is lost"
+            if ups
+            else f"all {len(signals)} signalised intersections go dark when grid power is lost"
+        )
+        return (
+            f"Transport: {ups_text}; one-way flags are recorded in properties.oneway but road edges are modelled as "
+            "undirected; MARTA stations draw traction and station power from the power grid like any other consumer "
+            "(see the power-feed exceptions below)."
+        )
+
+    def _power_feed_sentence(self) -> str:
+        vaults = sorted(n for n, v in self.nodes.items() if v["type"] == "network_vault")
+        exceptions: list[str] = []
+        for consumer in sorted(self.nodes):
+            providers = self._deps_into(consumer, "power_supply")
+            if not providers:
+                continue
+            nearest = self.nearest(self.pos(consumer), vaults)
+            if len(providers) > 1 or providers[0] != nearest:
+                feeders = ", ".join(f"{self.nodes[p]['properties']['feeder']} ({self._label(p)})" for p in providers)
+                exceptions.append(f"{self._label(consumer)} <- {feeders}")
+        text = "Each power consumer is fed from its nearest network vault"
+        if exceptions:
+            text += ", except these deliberate design choices: " + "; ".join(exceptions)
+        return text + "."
+
     def assumptions(self) -> list[str]:
+        n_lm = len(self.landmark_osm_ids)
         street_line = (
             "Street centrelines are authored approximations (ESTIMATED, typically within tens of metres); landmark "
             "positions are approximate public knowledge (ESTIMATED), not surveyed."
             if self.inp.street_source == "authored"
-            else "Road geometry comes from OpenStreetMap (PUBLICLY_MAPPED, © OpenStreetMap contributors, ODbL); "
-            "landmark positions are OSM-matched where possible, otherwise ESTIMATED."
+            else "Road geometry comes from OpenStreetMap (PUBLICLY_MAPPED, \u00a9 OpenStreetMap contributors, ODbL); "
+            f"{n_lm} of {len(self.landmarks)} landmark positions are OSM-matched, the rest ESTIMATED; "
+            f"{self.asset_osm_matches} simulated asset(s) take only their location from a mapped feature and stay SIMULATED."
         )
         return [
             "Every utility asset (substations, feeders, vaults, switches, mains, valves, pumps, tanks, fibre, hubs, cell sites, "
             "duct banks) and every cross-system dependency is SIMULATED for illustration; none describes the real Georgia Power, "
             "Atlanta Department of Watershed Management, carrier or MARTA systems.",
             street_line,
-            "Utility routes follow the street graph (shortest path over surface streets) with a fixed lateral offset per system; "
-            "burial depths are typical values, not surveyed.",
-            "Power: 115 kV bulk supply points feed distribution substations over underground cables; each substation feeds "
-            "radial 12.47 kV feeders (head switch, then network transformer vaults). Normally-open tie switches join feeders of "
-            "different substations and are rated below full feeder load, so restoration can be partial.",
+            "Utility routes follow the street graph (shortest path over surface streets; off-street sites join through a short "
+            "service drop) with a fixed lateral offset per system; burial depths are typical values, not surveyed.",
+            self._power_sentence(),
             "Tie switches are operated remotely over a SCADA control link; if that link is down, a crew closes them manually "
-            "after properties.manual_switch_hours. Alternate (standby) transmission lines are rated below the full load of "
-            "the substation they back up, so losing a primary supply can overload and trip them.",
-            "Substation load = rating x properties.load_factor (55-70%); vault loads are split deterministically from stable "
-            "hashes; population_served is about 1,000 people per MW of load (modelled daytime population).",
-            "Water: two transmission-main entries feed a looped low-pressure grid with an isolation valve on each main between "
-            "junctions (a break isolates roughly one junction and its zone); the Grady and Georgia State zones have a second "
-            "service connection. A booster pump (needs grid power) feeds the high-pressure zone, backed by an elevated tank; "
-            "normally-closed boundary valves separate the zones and are treated as closed unless opened.",
-            "Telecom: dual cores (the 56 Marietta St carrier hotel, whose modelled links are simulated, and a simulated east "
-            "data centre), west and east fibre rings, a single-homed spur and a mix of single- and dual-homed sites; the "
-            "Capitol Hill access node and the Five Points rooftop cell are backhauled only into 56 Marietta. "
-            "properties.backup_hours is battery/generator autonomy.",
-            "Transport: most surface intersections are signalised and need grid power (a few primary-street signals have short "
-            "UPS backup); one-way flags are recorded in properties.oneway but road edges are modelled as undirected; MARTA "
-            "traction and station power is modelled as drawn from the nearest network vault.",
+            "after properties.manual_switch_hours. " + self._alternate_line_sentence(),
+            self._water_sentence(),
+            self._telecom_sentence(),
+            self._transport_sentence(),
+            self._power_feed_sentence(),
             "Facilities: occupancy, backup-generator hours and water-storage hours are modelled assumptions, not published "
-            "figures. Grady Memorial Hospital is modelled with two power feeds from different substations.",
+            "figures (properties.modelled_figures). Grady Memorial Hospital is modelled with two power feeds from different "
+            "substations.",
             "Shared corridors: a feeder, tie or fibre route that runs at least "
             f"{self.design.get('underground', {}).get('min_shared_length_m', 60)} m inside a duct bank or utility tunnel is "
             "recorded as hosted (corridor_id); a strike on the corridor fails every hosted edge.",
@@ -1320,6 +1493,16 @@ class NetworkBuilder:
             "Units: power MW, water L/s, telecom Gbps, roads vehicles/hour, rail riders/hour.",
             "Generated deterministically (no randomness); generated_at is fixed so output is byte-stable.",
         ]
+
+    def description(self) -> str | None:
+        nd = self.design.get("network", {})
+        if self.inp.street_source == "authored":
+            return nd.get("description")
+        return (
+            "Six interdependent infrastructure systems for downtown Atlanta. Road geometry is PUBLICLY_MAPPED "
+            "(OpenStreetMap contributors, ODbL); landmark positions are OSM-matched where possible, otherwise ESTIMATED; "
+            "every utility asset, connection and capacity is SIMULATED for demonstration and does not describe the real grid."
+        )
 
     def build(self) -> dict[str, Any]:
         self.build_transport()
@@ -1335,7 +1518,7 @@ class NetworkBuilder:
             "name": nd.get("name", f"DEEPTRACE {self.region.name}"),
             "version": GENERATOR_VERSION,
             "generated_at": self.generated_at,
-            "description": nd.get("description"),
+            "description": self.description(),
             "region": self.region.model_dump(mode="json"),
             "nodes": list(self.nodes.values()),
             "edges": list(self.edges.values()),

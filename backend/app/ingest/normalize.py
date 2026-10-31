@@ -139,7 +139,13 @@ def _element_point(el: dict[str, Any], node_index: dict[int, tuple[float, float]
 
 
 def classify_point(tags: dict[str, str]) -> str | None:
-    """Map OSM tags to a DEEPTRACE candidate kind (or ``None`` if not of interest)."""
+    """Map OSM tags to a DEEPTRACE candidate kind (or ``None`` if not of interest).
+
+    Water candidates require evidence that they carry *water* (an untagged storage tank
+    or a sewage pumping station must not stand in for a water-supply asset). Named
+    elements that match nothing else become ``named_feature`` so that landmarks fetched
+    by name can still be matched; asset placement never uses that kind.
+    """
     power = tags.get("power")
     man_made = tags.get("man_made")
     amenity = tags.get("amenity")
@@ -149,10 +155,13 @@ def classify_point(tags: dict[str, str]) -> str | None:
         return "transformer"
     if man_made == "water_tower":
         return "water_tower"
-    if man_made == "storage_tank" and tags.get("content", "water") == "water":
-        return "storage_tank"
-    if man_made in ("pumping_station", "water_works"):
-        return man_made
+    if man_made == "storage_tank":
+        return "storage_tank" if tags.get("content") == "water" else "storage_tank_other"
+    if man_made == "water_works":
+        return "water_works"
+    if man_made == "pumping_station":
+        water = tags.get("pumping_station") in ("water", "water_supply", "drinking_water") or tags.get("substance") == "water"
+        return "pumping_station" if water else "pumping_station_other"
     if tags.get("telecom") == "data_center" or tags.get("building") == "data_center":
         return "data_center"
     if tags.get("telecom") == "exchange":
@@ -163,8 +172,14 @@ def classify_point(tags: dict[str, str]) -> str | None:
         return amenity
     if tags.get("public_transport") == "station" or tags.get("railway") == "station":
         return "station"
-    if tags.get("leisure") in ("stadium", "park") or tags.get("tourism") == "aquarium":
-        return tags.get("leisure") or tags.get("tourism")
+    if tags.get("leisure") in ("stadium", "sports_centre", "park"):
+        return tags["leisure"]
+    if tags.get("tourism") == "aquarium":
+        return "aquarium"
+    if tags.get("building") == "government" or tags.get("office") == "government":
+        return "government"
+    if tags.get("name"):
+        return "named_feature"
     return None
 
 

@@ -89,7 +89,10 @@ def _client(client: httpx.Client | None) -> tuple[httpx.Client, bool]:
 def get_json(client: httpx.Client, url: str) -> Any:
     response = client.get(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
     response.raise_for_status()
-    return response.json()
+    try:
+        return response.json()
+    except ValueError as exc:  # e.g. an HTML captive portal answering with HTTP 200
+        raise AssetError(f"non-JSON response from {url} (HTTP {response.status_code})") from exc
 
 
 def normalise_catalog(raw: Any) -> dict[str, dict[str, Any]]:

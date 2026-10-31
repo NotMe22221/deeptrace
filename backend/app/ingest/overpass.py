@@ -29,7 +29,7 @@ from typing import Any
 
 import httpx
 
-from app.config import CACHE_DIR, get_settings
+from app.config import CACHE_DIR, REGIONS_DIR, get_settings
 from app.networks.loader import load_region
 
 DEFAULT_MAX_AGE_HOURS = 24 * 7
@@ -45,8 +45,38 @@ HIGHWAY_REGEX = (
 )
 
 
-def build_query(bbox: Sequence[float], timeout_s: int = DEFAULT_TIMEOUT_S) -> str:
-    """Overpass QL for the infrastructure-relevant features inside ``(south, west, north, east)``."""
+def _name_pattern(name: str) -> str:
+    """Case-insensitive Overpass regex for a landmark name (non-alphanumerics become wildcards)."""
+    return "".join(ch if ch.isalnum() or ch == " " else "." for ch in name.strip())
+
+
+def landmark_clauses(landmarks: Sequence[dict[str, Any]], bbox_text: str) -> list[str]:
+    """One clause per landmark ``osm_match`` spec: its tag filters plus a name filter.
+
+    Generic tags such as ``building=yes`` are only ever queried together with the name, so
+    the query never asks for every building in the box.
+    """
+    clauses: list[str] = []
+    for lm in landmarks:
+        spec = lm.get("osm_match") or {}
+        name = spec.get("name")
+        if not name:
+            continue
+        filters = "".join(f'["{k}"="{v}"]' for k, v in sorted((spec.get("tags") or {}).items()))
+        clause = f'  nwr{filters}["name"~"{_name_pattern(name)}",i]({bbox_text});'
+        if clause not in clauses:
+            clauses.append(clause)
+    return clauses
+
+
+def build_query(
+    bbox: Sequence[float], timeout_s: int = DEFAULT_TIMEOUT_S, landmarks: Sequence[dict[str, Any]] | None = None
+) -> str:
+    """Overpass QL for the infrastructure-relevant features inside ``(south, west, north, east)``.
+
+    ``landmarks`` (the region's landmarks.json entries) adds a clause per ``osm_match`` spec so
+    every landmark the generator tries to match can actually be present in the cache.
+    """
     s, w, n, e = (float(v) for v in bbox)
     b = f"{s:.6f},{w:.6f},{n:.6f},{e:.6f}"
     return "\n".join(
@@ -61,11 +91,19 @@ def build_query(bbox: Sequence[float], timeout_s: int = DEFAULT_TIMEOUT_S) -> st
             f'  nwr["man_made"~"^(water_tower|storage_tank|pumping_station|water_works)$"]({b});',
             f'  nwr["telecom"]({b});',
             f'  nwr["building"="data_center"]({b});',
-            f'  nwr["amenity"~"^(hospital|fire_station|police)$"]({b});',
+            f'  nwr["amenity"~"^(hospital|fire_station|police|townhall|courthouse|university)$"]({b});',
+            *landmark_clauses(landmarks or [], b),
             ");",
             "out body geom;",
         ]
     )
+
+
+def region_landmarks(region_id: str) -> list[dict[str, Any]]:
+    path = REGIONS_DIR / region_id / "landmarks.json"
+    if not path.exists():
+        return []
+    return list(json.loads(path.read_text()).get("landmarks", []))
 
 
 def cache_path(region_id: str) -> Path:
@@ -118,7 +156,14 @@ def fetch_overpass(
         if response.status_code == 504:
             raise RuntimeError("Overpass API timeout (HTTP 504). The server is busy; retry later.")
         response.raise_for_status()
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError as exc:  # JSONDecodeError / UnicodeDecodeError, e.g. an HTML captive portal
+            ctype = response.headers.get("content-type", "unknown")
+            raise RuntimeError(
+                f"Overpass returned a non-JSON response (HTTP {response.status_code}, {ctype}) from {url}; "
+                "check DEEPTRACE_OVERPASS_URL or any proxy / captive portal"
+            ) from exc
     finally:
         if owns:
             client.close()
@@ -149,7 +194,7 @@ def ingest_region(
     if not force and cache_is_fresh(path, max_age_hours, now):
         return path, False
     url = url or get_settings().overpass_url
-    query = build_query(region.bbox)
+    query = build_query(region.bbox, landmarks=region_landmarks(region.id))
     data = fetch_overpass(query, url, client=client)
     retrieved = (now or datetime.now(UTC)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     data["deeptrace_meta"] = {
@@ -185,7 +230,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.print_query:
-        print(build_query(load_region(args.region).bbox))
+        region = load_region(args.region)
+        print(build_query(region.bbox, landmarks=region_landmarks(region.id)))
         return 0
     try:
         path, fetched = ingest_region(args.region, force=args.force, max_age_hours=args.max_age_hours, url=args.url)

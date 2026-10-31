@@ -80,6 +80,10 @@ def check_network(
             problems.append(f"node {n['id']} is PUBLICLY_MAPPED but no inspected public dataset is listed")
         if cat == "simulated" and n["provenance"]["confidence"] > 0.2:
             problems.append(f"node {n['id']}: simulated asset with confidence > 0.2")
+        if "(simulated)" in n["name"] and cat != "simulated":
+            problems.append(f"node {n['id']} is named as simulated but labelled {cat.upper()}")
+        if n["system"] in ("power", "water", "underground") and cat != "simulated":
+            problems.append(f"node {n['id']}: utility assets must stay SIMULATED (an OSM match only sets location)")
     for e in edges:
         rel = e["relation"]
         if e["connection_type"] not in EDGE_CONNECTION_TYPES[rel]:

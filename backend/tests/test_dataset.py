@@ -312,6 +312,48 @@ def test_carrier_hotel_has_single_homed_dependants(nodes, edges) -> None:
     assert any(nodes[f]["critical"] for f in served)
 
 
+def test_assumptions_match_the_data(raw, nodes, edges) -> None:
+    """Every data-derived assumption sentence agrees with the network it describes."""
+    from app.networks.generate import EMERGENCY_LIMIT
+    from app.simulation import power as engine_power
+
+    assert EMERGENCY_LIMIT == engine_power.EMERGENCY_LIMIT
+    text = " ".join(raw["assumptions"])
+    under = [
+        e["id"]
+        for e in edges.values()
+        if e["connection_type"] == "transmission_line"
+        and e["properties"].get("role") == "alternate"
+        and e["capacity"] * EMERGENCY_LIMIT < nodes[e["target_node"]]["demand"]
+    ]
+    assert under == ["PWR-TL-02"]
+    for e in edges.values():
+        if e["connection_type"] == "transmission_line" and e["properties"].get("role") == "alternate":
+            assert (e["id"] in text) == (e["id"] in under)
+    assert "single-homed spur" not in text and "links the rings" in text
+    assert "drawn from the nearest network vault" not in text
+    assert "Georgia State station (MARTA) <- GR-1" in text and "Fairlie-Poplar booster pump station <- FP-1" in text
+    vaults = [n for n in nodes.values() if n["type"] == "network_vault"]
+    for consumer in ("TRN-STN-FIVEPOINTS", "TEL-IX-56MARIETTA", "FAC-STADIUM"):  # pinned, but to their nearest vault anyway
+        assert f"{nodes[consumer]['name']} <-" not in text
+        c = nodes[consumer]
+        nearest = min(vaults, key=lambda v: (geo.haversine_m((c["longitude"], c["latitude"]), (v["longitude"], v["latitude"])), v["id"]))
+        assert {e["source_node"] for e in deps_into(edges, consumer, "power_supply")} == {nearest["id"]}
+    assert "Access node Capitol Hill (simulated) and Cell site Five Points rooftop (simulated) reach the core only through" not in text
+    assert "Access node Capitol Hill and Cell site Five Points rooftop reach the core only through 56 Marietta" in text
+    assert "every tie is rated below the load of the feeders it joins" in text
+    assert "isolates at most 2 junction(s)" in text
+
+
+def test_named_simulated_assets_are_labelled_simulated(nodes) -> None:
+    for n in nodes.values():
+        if "(simulated)" in n["name"] or n["system"] in ("power", "water", "underground"):
+            assert n["provenance"]["category"] == "simulated", n["id"]
+    for n in nodes.values():
+        if n["system"] == "facility" or n["type"] == "transit_station" or n["id"] == "TEL-IX-56MARIETTA":
+            assert n["properties"].get("modelled_figures") is True, n["id"]
+
+
 def test_telecom_design(nodes, edges) -> None:
     t = {k: v for k, v in nodes.items() if v["system"] == "telecom"}
     cores = [k for k, v in t.items() if v["type"] == "internet_exchange"]

@@ -135,8 +135,7 @@
     {
       "id": "PEACHTREECENTER-COMPLEX", "name": "Peachtree Center", "kind": "commercial",
       "lat": 33.7603, "lon": -84.3862,
-      "osm_match": {"tags": {}, "name": "Peachtree Center"},
-      "provenance": {"category": "estimated", "source": "General public knowledge", "confidence": 0.5, "notes": "Representative point for a multi-tower office/hotel complex; approximate, not surveyed."}
+      "provenance": {"category": "estimated", "source": "General public knowledge", "confidence": 0.5, "notes": "Representative point for a multi-tower office/hotel complex; approximate, not surveyed. Deliberately not matched to OpenStreetMap (the ingestion keeps no office buildings, and the name collides with the MARTA station)."}
     },
     {
       "id": "56MARIETTA", "name": "56 Marietta Street", "kind": "internet_exchange",

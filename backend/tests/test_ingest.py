@@ -182,20 +182,88 @@ def test_generate_with_osm_fixture(tmp_path: Path) -> None:
     nodes = {n["id"]: n for n in network["nodes"]}
     roads = [e for e in network["edges"] if e["connection_type"] == "road_segment"]
     assert roads and all(e["provenance"]["category"] == "publicly_mapped" for e in roads)
-    # mapped features position modelled assets; their role/topology stays simulated (stated in notes)
-    ds = nodes["PWR-DS-FIVEPOINTS"]["provenance"]
-    assert ds["category"] == "publicly_mapped" and ds["source_url"].endswith("/node/3001")
-    assert "SIMULATED" in ds["notes"]
-    assert nodes["PWR-TS-SOUTH"]["provenance"]["source_url"].endswith("/way/3002")
-    assert nodes["WTR-TNK-NORTH"]["provenance"]["category"] == "publicly_mapped"
+    # simulated assets snapped to a mapped feature stay SIMULATED: only their location comes from OSM
+    for nid, ref in (("PWR-DS-FIVEPOINTS", "node/3001"), ("PWR-TS-SOUTH", "way/3002"), ("WTR-TNK-NORTH", "node/3003"), ("TEL-CO-PEACHTREE", "node/3004")):
+        n = nodes[nid]
+        assert n["provenance"]["category"] == "simulated" and n["provenance"]["confidence"] <= 0.2, nid
+        assert n["provenance"]["source_url"].endswith(ref) and "LOCATION ONLY" in n["provenance"]["notes"]
+        assert n["properties"]["location_source"] == f"OpenStreetMap {ref}"
+    assert nodes["PWR-DS-CIVIC"]["provenance"]["category"] == "simulated" and "location_source" not in nodes["PWR-DS-CIVIC"]["properties"]
+    # real places matched to OSM may be PUBLICLY_MAPPED, but their figures stay flagged as modelled
+    assert nodes["FAC-GRADY"]["provenance"]["category"] == "publicly_mapped"
     assert nodes["FAC-GRADY"]["provenance"]["source_url"].endswith("/node/3005")
+    assert nodes["FAC-GRADY"]["properties"]["modelled_figures"] is True
     assert nodes["TRN-STN-FIVEPOINTS"]["provenance"]["source_url"].endswith("/node/3006")
-    assert nodes["PWR-DS-CIVIC"]["provenance"]["category"] == "simulated"
     deps = [e for e in network["edges"] if e["relation"] == "dependency"]
     assert all(e["provenance"]["category"] == "simulated" for e in deps)
-    osm_ds = next(d for d in network["datasets"] if d["id"] == "osm-overpass")
-    assert osm_ds["inspected"] is True and osm_ds["feature_count"] > 0 and osm_ds["retrieved_at"] == "2026-01-01T00:00:00Z"
-    assert not any(d["id"] == "authored-streets" for d in network["datasets"])
+    # the text describes this build honestly
+    assert "ESTIMATED" not in network["description"].split(";")[0] and "PUBLICLY_MAPPED" in network["description"]
+    assert network["assumptions"][0].startswith("Every utility asset") and "2 of 22 landmark positions" in network["assumptions"][1]
+    ds = {d["id"]: d for d in network["datasets"]}
+    assert ds["osm-overpass"]["inspected"] is True and ds["osm-overpass"]["retrieved_at"] == "2026-01-01T00:00:00Z"
+    assert ds["osm-overpass"]["feature_count"] == 8 + 2 + 4
+    assert "2 of 22 landmark positions were replaced" in ds["authored-landmarks"]["notes"]
+    assert "4 of these simulated assets take only their location" in ds["deeptrace-generator"]["notes"]
+    assert "authored-streets" not in ds
+
+
+def _fixture_variant(tmp_path: Path, drop: set[int] = frozenset(), add: list[dict] | None = None) -> Path:
+    data = json.loads(FIXTURE.read_text())
+    data["elements"] = [e for e in data["elements"] if e["id"] not in drop] + list(add or [])
+    path = tmp_path / "overpass_variant.json"
+    path.write_text(json.dumps(data))
+    return path
+
+
+def test_landmark_note_only_when_landmarks_matched(tmp_path: Path) -> None:
+    cache = _fixture_variant(tmp_path, drop={3005, 3006, 3009})
+    network, _, _, warnings = generate_region(REGIONS_DIR / REGION, out_dir=tmp_path / "out", use_osm=True, osm_cache=cache, mirror_dir=None)
+    ds = {d["id"]: d for d in network["datasets"]}
+    assert "replaced by matched OpenStreetMap" not in ds["authored-landmarks"]["notes"]
+    assert "0 of 22 landmark positions are OSM-matched" in network["assumptions"][1]
+    assert any("GRADY" in w and "not matched" in w for w in warnings)
+
+
+def test_office_complex_never_snaps_to_the_station(tmp_path: Path) -> None:
+    stations = [
+        {"type": "node", "id": 9001, "lat": 33.7593, "lon": -84.3876, "tags": {"railway": "station", "name": "Peachtree Center"}},
+        {"type": "node", "id": 9002, "lat": 33.7596, "lon": -84.3874, "tags": {"public_transport": "station", "name": "Peachtree Center"}},
+    ]
+    cache = _fixture_variant(tmp_path, add=stations)
+    network, _, _, _ = generate_region(REGIONS_DIR / REGION, out_dir=tmp_path / "out", use_osm=True, osm_cache=cache, mirror_dir=None)
+    nodes = {n["id"]: n for n in network["nodes"]}
+    assert nodes["FAC-PEACHTREECENTER"]["provenance"]["category"] == "estimated"
+    assert nodes["TRN-STN-PEACHTREECENTER"]["provenance"]["category"] == "publicly_mapped"
+
+
+def test_query_and_classifier_cover_every_landmark_match() -> None:
+    from app.ingest.normalize import classify_point
+    from app.networks.generate import LANDMARK_OSM_KINDS
+
+    landmarks = json.loads((REGIONS_DIR / REGION / "landmarks.json").read_text())["landmarks"]
+    q = overpass.build_query(load_region(REGION).bbox, landmarks=landmarks)
+    for lm in landmarks:
+        spec = lm.get("osm_match")
+        if not spec:
+            continue
+        filters = [f'["{k}"="{v}"]' for k, v in (spec.get("tags") or {}).items()]
+        clause = next(
+            (line for line in q.splitlines() if overpass._name_pattern(spec["name"]) in line and all(f in line for f in filters)),
+            None,
+        )
+        assert clause is not None, lm["id"]
+        kind = classify_point({**(spec.get("tags") or {}), "name": spec["name"]})
+        assert kind in LANDMARK_OSM_KINDS[lm["kind"]], (lm["id"], kind)
+    assert 'nwr["building"="yes"](' not in q, "never ask for every building"
+
+
+def test_water_candidates_need_water_evidence() -> None:
+    from app.ingest.normalize import classify_point
+
+    assert classify_point({"man_made": "storage_tank"}) == "storage_tank_other"
+    assert classify_point({"man_made": "storage_tank", "content": "water"}) == "storage_tank"
+    assert classify_point({"man_made": "pumping_station", "pumping_station": "sewage"}) == "pumping_station_other"
+    assert classify_point({"man_made": "pumping_station", "substance": "water"}) == "pumping_station"
 
 
 def test_generate_with_osm_requires_cache(tmp_path: Path) -> None:
@@ -311,3 +379,31 @@ def test_dry_run_does_not_write(tmp_path: Path) -> None:
     assert "pump_station" in planned["models"]
     assert not (tmp_path / "m").exists() and not (tmp_path / "c.md").exists()
     assert not any("/files/" in u for u in seen)
+
+
+# --------------------------------------------------------------------------- non-JSON responses
+
+
+def _html_transport() -> httpx.MockTransport:
+    return httpx.MockTransport(lambda request: httpx.Response(200, text="<html>captive portal</html>", headers={"content-type": "text/html"}))
+
+
+def test_overpass_non_json_fails_cleanly(tmp_path: Path, monkeypatch, capsys) -> None:
+    out = tmp_path / "x.json"
+    with httpx.Client(transport=_html_transport()) as client, pytest.raises(RuntimeError, match="non-JSON"):
+        overpass.ingest_region(REGION, client=client, out_path=out, force=True)
+    assert not out.exists()
+    real_client = httpx.Client
+    monkeypatch.setattr(overpass.httpx, "Client", lambda *a, **kw: real_client(transport=_html_transport()))
+    monkeypatch.setattr(overpass, "cache_path", lambda region_id: tmp_path / f"{region_id}.json")
+    assert overpass.main(["--force"]) == 1
+    assert "non-JSON" in capsys.readouterr().err
+
+
+def test_assets_non_json_fails_cleanly(tmp_path: Path, monkeypatch, capsys) -> None:
+    with httpx.Client(transport=_html_transport()) as client, pytest.raises(assets.AssetError, match="non-JSON"):
+        assets.fetch_models(["pump_station"], models_dir=tmp_path / "m", credits_path=tmp_path / "c.md", client=client, log=lambda *_: None)
+    real_client = httpx.Client
+    monkeypatch.setattr(assets.httpx, "Client", lambda *a, **kw: real_client(transport=_html_transport()))
+    assert assets.main(["--dry-run"]) == 1
+    assert "non-JSON" in capsys.readouterr().err
