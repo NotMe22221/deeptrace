@@ -272,6 +272,46 @@ def test_water_design(nodes, edges) -> None:
     assert deps_into(edges, pump["id"], "power_supply") and deps_into(edges, pump["id"], "control_link")
 
 
+def test_water_valve_segments_are_small(nodes, edges) -> None:
+    """Every main between junctions has an isolation valve, so a break isolates ~1 junction (+ its zone)."""
+    boundary_types = {"valve", "supply_source", "pump_station", "storage_tank", "service_zone"}
+    pipes = [e for e in edges.values() if e["infrastructure_type"] == "water" and e["relation"] == "physical"]
+    g = nx.Graph()
+    g.add_edges_from((e["source_node"], e["target_node"]) for e in pipes)
+    junctions = [n for n in g if nodes[n]["type"] == "junction"]
+    interior = g.subgraph(n for n in g if nodes[n]["type"] not in boundary_types)
+    sizes = [len(c) for c in nx.connected_components(interior)]
+    assert sum(sizes) == len(junctions) and max(sizes) <= 2, sizes
+    dual = [n for n in nodes.values() if n["type"] == "service_zone" and n["properties"].get("service_connections", 1) >= 2]
+    assert 1 <= len(dual) <= 3
+    for z in dual:
+        feeds = [e for e in pipes if e["target_node"] == z["id"]]
+        assert len({e["source_node"] for e in feeds}) >= 2
+
+
+def test_ts_south_loss_overloads_alternate_line(nodes, edges) -> None:
+    """F-TS-SOUTH: Five Points' only other supply is an alternate line that cannot carry it (> 120% -> trip)."""
+    lines = [e for e in edges.values() if e["connection_type"] == "transmission_line" and "PWR-DS-FIVEPOINTS" in (e["source_node"], e["target_node"])]
+    primary = [e for e in lines if e["properties"]["role"] == "primary"]
+    alternate = [e for e in lines if e["properties"]["role"] == "alternate"]
+    assert {e["source_node"] for e in primary} == {"PWR-TS-SOUTH"} and len(alternate) == 1
+    assert nodes["PWR-DS-FIVEPOINTS"]["demand"] > 1.2 * alternate[0]["capacity"]
+
+
+def test_carrier_hotel_has_single_homed_dependants(nodes, edges) -> None:
+    """D-TELECOM-56MARIETTA: some sites reach the core only through 56 Marietta, one serving critical facilities."""
+    fibre = [e for e in edges.values() if e["connection_type"] == "fiber_link"]
+    homes: dict[str, set[str]] = defaultdict(set)
+    for e in fibre:
+        for a, b in ((e["source_node"], e["target_node"]), (e["target_node"], e["source_node"])):
+            if nodes[a]["type"] in ("cell_site", "access_node"):
+                homes[a].add(b)
+    only_56 = [k for k, v in homes.items() if v == {"TEL-IX-56MARIETTA"}]
+    assert 2 <= len(only_56) <= 3
+    served = {e["target_node"] for e in edges.values() if e["connection_type"] == "telecom_link" and e["source_node"] in only_56}
+    assert any(nodes[f]["critical"] for f in served)
+
+
 def test_telecom_design(nodes, edges) -> None:
     t = {k: v for k, v in nodes.items() if v["system"] == "telecom"}
     cores = [k for k, v in t.items() if v["type"] == "internet_exchange"]

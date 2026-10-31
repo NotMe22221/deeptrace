@@ -48,7 +48,7 @@
       "scenario_type": "water_rupture",
       "failed_nodes": [],
       "failed_edges": [
-        "WTR-MAIN-0019"
+        "WTR-MAIN-0023"
       ],
       "horizon_hours": 4.0,
       "enable_restoration": true,
@@ -60,7 +60,7 @@
     "id": "D-TELECOM-56MARIETTA",
     "name": "56 Marietta St carrier hotel outage",
     "scenario_type": "telecom_outage",
-    "description": "The core interconnection facility at 56 Marietta St (real building; modelled connections simulated) goes dark. Dual-homed rings fail over to the east core; single-homed sites may not.",
+    "description": "The core interconnection facility at 56 Marietta St (real building; modelled connections simulated) goes dark. The dual-homed fibre rings fail over to the east core, but the Capitol Hill access node and the Five Points rooftop cell are backhauled only into 56 Marietta: City Hall and the Fulton County Courthouse lose communications.",
     "scenario": {
       "scenario_id": "D-TELECOM-56MARIETTA",
       "name": "56 Marietta St carrier hotel outage",
@@ -102,12 +102,12 @@
   },
   {
     "id": "F-TS-SOUTH",
-    "name": "Loss of TS-South bulk supply",
+    "name": "Loss of TS-South bulk supply (overload cascade)",
     "scenario_type": "power_failure",
-    "description": "The TS-South 115 kV bulk supply point (simulated) is lost. Its substations shift onto alternate transmission lines that were never sized to carry their full load.",
+    "description": "The TS-South 115 kV bulk supply point (simulated) is lost. DS-2 Five Points shifts onto its alternate line from TS-West, which was never rated for the full load: it runs above its 120% emergency limit, trips in the next round, and Five Points blacks out - a true overload cascade.",
     "scenario": {
       "scenario_id": "F-TS-SOUTH",
-      "name": "Loss of TS-South bulk supply",
+      "name": "Loss of TS-South bulk supply (overload cascade)",
       "scenario_type": "power_failure",
       "failed_nodes": [
         "PWR-TS-SOUTH"

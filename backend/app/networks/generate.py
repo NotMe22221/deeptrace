@@ -943,13 +943,17 @@ class NetworkBuilder:
                 description=f"Aggregated customer demand area, {z['pressure_zone']}-pressure zone; {z['population']:,} people (modelled).",
                 properties={"population": int(z["population"]), "pressure_zone": z["pressure_zone"], "population_basis": "modelled daytime population"},
             )  # fmt: skip
+            connects = [z["connect"]] if isinstance(z["connect"], str) else list(z["connect"])
+            if len(connects) > 1:
+                self.nodes[z["id"]]["properties"]["service_connections"] = len(connects)
             cap = float(min(300, max(80, round(float(z["demand_lps"]) * 2.5 / 10) * 10)))
-            self.add_routed_edge(
-                edge_id("distribution_main"), z["connect"], z["id"], "water", "distribution_main",
-                capacity=cap, capacity_unit="L/s", depth=1.5,
-                name=f"Service mains {self.short(z['connect'])} → {z['name']} (simulated)",
-                properties={"pressure_zone": z["pressure_zone"], "purpose": "zone service connection"},
-            )  # fmt: skip
+            for junction in connects:
+                self.add_routed_edge(
+                    edge_id("distribution_main"), junction, z["id"], "water", "distribution_main",
+                    capacity=cap, capacity_unit="L/s", depth=1.5,
+                    name=f"Service mains {self.short(junction)} → {z['name']} (simulated)",
+                    properties={"pressure_zone": z["pressure_zone"], "purpose": "zone service connection"},
+                )  # fmt: skip
 
     def short(self, node_id: str) -> str:
         name = self.nodes[node_id]["name"]
@@ -1189,9 +1193,14 @@ class NetworkBuilder:
         tel_providers = sorted(by_type["fiber_hub"] + by_type["access_node"] + by_type["central_office"])
         tconsumers = set(dd.get("telecom_consumers", []))
         redundant = set(dd.get("telecom_redundant_consumers", []))
+        toverrides = dd.get("telecom_overrides", {})
         for consumer in sorted(n for n, v in self.nodes.items() if v["type"] in tconsumers):
             n = self.nodes[consumer]
             service = "train control & signalling" if n["type"] == "transit_station" else "voice & data"
+            if consumer in toverrides:
+                for provider in toverrides[consumer]:
+                    self.add_dependency("DEP-TEL-", provider, consumer, "telecom", "telecom_link", service)
+                continue
             first = self.nearest(self.pos(consumer), tel_providers)
             self.add_dependency("DEP-TEL-", first, consumer, "telecom", "telecom_link", service)
             if n["type"] in redundant:
@@ -1287,14 +1296,17 @@ class NetworkBuilder:
             "radial 12.47 kV feeders (head switch, then network transformer vaults). Normally-open tie switches join feeders of "
             "different substations and are rated below full feeder load, so restoration can be partial.",
             "Tie switches are operated remotely over a SCADA control link; if that link is down, a crew closes them manually "
-            "after properties.manual_switch_hours.",
+            "after properties.manual_switch_hours. Alternate (standby) transmission lines are rated below the full load of "
+            "the substation they back up, so losing a primary supply can overload and trip them.",
             "Substation load = rating x properties.load_factor (55-70%); vault loads are split deterministically from stable "
             "hashes; population_served is about 1,000 people per MW of load (modelled daytime population).",
-            "Water: two transmission-main entries feed a looped low-pressure grid with isolation valves; a booster pump (needs "
-            "grid power) feeds the high-pressure zone, backed by an elevated tank; normally-closed boundary valves separate the "
-            "zones and are treated as closed unless opened.",
+            "Water: two transmission-main entries feed a looped low-pressure grid with an isolation valve on each main between "
+            "junctions (a break isolates roughly one junction and its zone); the Grady and Georgia State zones have a second "
+            "service connection. A booster pump (needs grid power) feeds the high-pressure zone, backed by an elevated tank; "
+            "normally-closed boundary valves separate the zones and are treated as closed unless opened.",
             "Telecom: dual cores (the 56 Marietta St carrier hotel, whose modelled links are simulated, and a simulated east "
-            "data centre), west and east fibre rings, a single-homed spur and a mix of single- and dual-homed cell sites; "
+            "data centre), west and east fibre rings, a single-homed spur and a mix of single- and dual-homed sites; the "
+            "Capitol Hill access node and the Five Points rooftop cell are backhauled only into 56 Marietta. "
             "properties.backup_hours is battery/generator autonomy.",
             "Transport: most surface intersections are signalised and need grid power (a few primary-street signals have short "
             "UPS backup); one-way flags are recorded in properties.oneway but road edges are modelled as undirected; MARTA "
@@ -1445,6 +1457,13 @@ def dumps_network(network: dict[str, Any]) -> str:
     return "\n".join(parts) + "\n"
 
 
+def write_atomic(path: Path, text: str) -> None:
+    """Write a complete file then rename it into place (readers never see a partial file)."""
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(text)
+    tmp.replace(path)
+
+
 def dumps_pretty(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, indent=2) + "\n"
 
@@ -1499,13 +1518,13 @@ def generate_region(
     out = out_dir or region_dir
     out.mkdir(parents=True, exist_ok=True)
     text = dumps_network(network)
-    (out / "network.json").write_text(text)
-    (out / "scenarios.json").write_text(dumps_pretty(presets))
+    write_atomic(out / "network.json", text)
+    write_atomic(out / "scenarios.json", dumps_pretty(presets))
     if demo is not None:
-        (out / "demo.json").write_text(dumps_pretty(demo))
+        write_atomic(out / "demo.json", dumps_pretty(demo))
     if mirror_dir is not None:
         mirror_dir.mkdir(parents=True, exist_ok=True)
-        (mirror_dir / "network.json").write_text(text)
+        write_atomic(mirror_dir / "network.json", text)
     return network, presets, demo, list(dict.fromkeys(builder.warnings))
 
 
