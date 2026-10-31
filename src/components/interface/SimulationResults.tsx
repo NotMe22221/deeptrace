@@ -1,7 +1,7 @@
 "use client";
 import { AlertTriangle, ChevronDown, Pause, Play, RotateCcw, Route, SkipBack, SkipForward } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
-import { useStore } from "@/lib/store";
+import { isSnapshotResult, useStore } from "@/lib/store";
 import { fmtCompact, fmtMeters, fmtNum, fmtPct, fmtSeconds } from "@/lib/format";
 import { LAYER_ORDER, NODE_STATE_STYLES, SYSTEM_STYLES, typeLabel } from "@/lib/systems";
 import { world } from "@/engine/worldBridge";
@@ -730,7 +730,6 @@ function AltPathRow({ p }: { p: AlternativePath }) {
 }
 
 export function ResultDetails({ result }: { result: SimulationResult }) {
-  const dataMode = useStore((s) => s.dataMode);
   return (
     <div className="space-y-3">
       <Collapsible title="Affected components" count={result.impact_metrics.total_nodes_affected}>
@@ -762,7 +761,8 @@ export function ResultDetails({ result }: { result: SimulationResult }) {
         <dt>Engine</dt>
         <dd className="text-ink-300">
           v{result.engine_version}
-          {dataMode === "snapshot" && " · precomputed (offline snapshot)"}
+          {/* where this result came from, not the current mode (a failover can flip that) */}
+          {isSnapshotResult(result) && " · precomputed (offline snapshot)"}
         </dd>
         <dt>Compute</dt>
         <dd className="text-ink-300">{fmtNum(result.computation_ms, 0)} ms</dd>
