@@ -396,6 +396,12 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
   let viewSeq = 0;
   /** Slot k holds an analyst answer's write (question + 0.5) for a question asked before request `seq`. */
   const olderAnswerWrite = (k: "A" | "B", seq: number) => slotWriteSeq[k] % 1 !== 0 && slotWriteSeq[k] < seq;
+  /** Slot k still holds the scenario the stored comparison compared on that side (it is not stale there). */
+  const showsComparedScenario = (k: "A" | "B") => {
+    const { comparison: c, slots } = get();
+    const cur = slots[k];
+    return !!c && !!cur && sameScenario(cur.scenario, (k === "A" ? c.scenario_a : c.scenario_b).scenario);
+  };
   /** Runs still in flight, so an analyst answer can tell whether a pending run still matters. */
   const liveRuns = new Map<number, { slot: SimSlot; alive: () => boolean }>();
   /**
@@ -1025,7 +1031,12 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
             seq < Math.max(displaySeq, viewSeq),
           );
           tookView = r.tookView;
-          return { ...r.patch, compareStatus: "idle" as const };
+          // The shown result moved to another scenario (it followed a slot this comparison took back
+          // from an older answer, or one another comparison filled): highlights, the analyst's too,
+          // described the result it replaced. (A run taking the map clears them the same way.)
+          const nr = r.patch.result;
+          const replaced = !!nr && !!s.result && nr !== s.result && !sameScenario(nr.scenario, s.result.scenario);
+          return { ...r.patch, ...(replaced ? { highlight: null } : {}), compareStatus: "idle" as const };
         });
         comparisonSeq = seq;
         if (tookView) displaySeq = seq;
@@ -1260,8 +1271,10 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
             // leave the diff, unless something started after asking already took the map (the trace
             // is still stored: the inspector and the A/B chips show it).
             const s0 = get();
-            const leave = s0.compareView === "diff" && !!s0.comparison && mayShow();
-            if (leave) viewSeq = Math.max(viewSeq, at); // comparisons started before asking land without their diff
+            const show = mayShow();
+            const leave = show && s0.compareView === "diff" && !!s0.comparison;
+            // the trace is on the map either way: comparisons started before asking land without their diff
+            if (show) viewSeq = Math.max(viewSeq, at);
             set((s) => ({
               trace: a.trace,
               traceVisible: true,
@@ -1274,9 +1287,10 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
             const r = a.result;
             const k = a.slot === "A" || a.slot === "B" ? a.slot : null;
             const show = mayShow();
-            // a slot written by something you started after asking keeps it, and so does a slot a
-            // comparison started after asking has already put on screen
-            const fill = k !== null && slotWriteSeq[k] <= at && comparisonSeq <= at;
+            // A slot written by something you started after asking keeps it, and so does a slot that
+            // still shows what a comparison started after asking compared (an older run that the
+            // comparison merely kept there is not that comparison's, and the answer may replace it).
+            const fill = k !== null && slotWriteSeq[k] <= at && !(comparisonSeq > at && showsComparedScenario(k));
             if (!show && !fill) break;
             if (show) displaySeq = at; // earlier runs and comparisons no longer take the map when they land
             if (k && fill) {

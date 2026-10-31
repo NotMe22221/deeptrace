@@ -556,6 +556,62 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
   st = { afterAnswer: r8e, final: await S(() => { const s = window.__deeptraceStore.getState(); return { view: s.compareView, vis: s.traceVisible, status: s.compareStatus }; }) };
   check('R8 an older Compare does not take the diff back over the answer\'s trace', r8e.view !== 'diff' && r8e.vis && st.final.view !== 'diff' && st.final.vis && st.final.status === 'idle', st);
 
+  // R9: an answer's trace shown with no diff on screen is not hidden by a Compare started before asking
+  await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+  await S(async () => { await window.__deeptraceStore.getState().selectNode('PWR-DS-FIVEPOINTS', { fly: false }); });
+  delays['/api/compare'] = 5000;
+  await S(() => { window.__pc = window.__deeptraceStore.getState().runComparison(); });
+  await sleep(200);
+  await S(() => window.__deeptraceStore.getState().sendAnalystMessage('Trace the connections of this component'));
+  const r9a = await S(() => { const s = window.__deeptraceStore.getState(); return { view: s.compareView, vis: s.traceVisible }; });
+  await S(() => window.__pc);
+  st = { afterAnswer: r9a, final: await S(() => { const s = window.__deeptraceStore.getState(); return { view: s.compareView, vis: s.traceVisible, cmp: !!s.comparison, status: s.compareStatus }; }) };
+  check('R9 an older Compare does not hide the answer\'s trace (no diff on screen)', r9a.vis && st.final.view !== 'diff' && st.final.vis && st.final.cmp && st.final.status === 'idle', st);
+
+  // R9: a Compare that takes a slot back from an older answer also clears that answer's highlight
+  await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+  chatReply = sse([
+    { type: 'status', mode: 'llm', model: 'scripted' },
+    { type: 'ui_action', action: { kind: 'show_simulation', result: rCw, slot: 'A', node_ids: [], edge_ids: [] } },
+    { type: 'ui_action', action: { kind: 'highlight', node_ids: rCw.affected_nodes.map((n) => n.node_id), edge_ids: [], label: 'Affected components', tone: 'critical' } },
+    { type: 'message', text: 'ok' }, { type: 'done', tool_calls: 1, mode: 'llm' },
+  ]);
+  delays['/api/analyst/chat'] = 2500; delays['/api/compare'] = 6000;
+  await S(() => { window.__pq = window.__deeptraceStore.getState().sendAnalystMessage('Put the Decatur main break in slot A'); });
+  await sleep(300);
+  await S(() => { window.__pc = window.__deeptraceStore.getState().runComparison(); });
+  await S(() => window.__pq);
+  const r9b = await S(() => window.__deeptraceStore.getState().highlight?.label ?? null);
+  await S(() => window.__pc);
+  st = { hlAfterAnswer: r9b, ...(await S(() => { const s = window.__deeptraceStore.getState(); return { view: s.compareView, slotA: s.slots.A?.scenario_id, result: s.result?.scenario_id, hl: s.highlight?.label ?? null }; })) };
+  check('R9 a Compare that takes back the answer\'s slot clears its highlight', r9b === 'Affected components' && st.view === 'diff' && st.slotA === 'A-DS-FIVEPOINTS' && st.result === 'A-DS-FIVEPOINTS' && st.hl === null, st);
+
+  // R9: a Compare started after asking that only KEPT an older run in slot A does not block the answer's slot write
+  const rTel = await S(async () => { const s = window.__deeptraceStore.getState(); const sc = s.presets.find((x) => x.id === 'D-TELECOM-56MARIETTA').scenario;
+    return (await fetch('http://localhost:8000/api/simulate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(sc) })).json(); });
+  const telReply = sse([
+    { type: 'status', mode: 'llm', model: 'scripted' },
+    { type: 'ui_action', action: { kind: 'show_simulation', result: rTel, slot: 'A', node_ids: [], edge_ids: [] } },
+    { type: 'message', text: 'ok' }, { type: 'done', tool_calls: 1, mode: 'llm' },
+  ]);
+  for (const [preset, label] of [['C-WATER-MAIN-DECATUR', 'other scenario'], ['A-DS-FIVEPOINTS', 'same scenario']]) {
+    await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+    chatReply = telReply;
+    delays['/api/simulate'] = 1500; delays['/api/compare'] = 3000; delays['/api/analyst/chat'] = 6000;
+    await S((id) => { const s = window.__deeptraceStore.getState(); window.__pr = s.runSimulation(s.presets.find((x) => x.id === id).scenario, 'A'); }, preset);
+    await sleep(150);
+    await S(() => { window.__pq = window.__deeptraceStore.getState().sendAnalystMessage('Put the Marietta telecom failure in slot A'); });
+    await sleep(200);
+    await S(() => { window.__pc = window.__deeptraceStore.getState().runComparison(); });
+    await S(() => Promise.all([window.__pr, window.__pc, window.__pq]));
+    st = await snap();
+    if (label === 'other scenario')
+      check('R9 an older run kept by a newer Compare does not block the answer\'s slot write', st.slotA === 'D-TELECOM-56MARIETTA', st);
+    else
+      check('R9 ...but a slot showing what the newer Compare compared keeps it', st.slotA === 'A-DS-FIVEPOINTS' && st.view === 'diff' && st.cmpA === 'A-DS-FIVEPOINTS', st);
+  }
+  chatReply = null;
+
   // R2: a live result keeps its provenance after a failover (not relabelled "precomputed")
   await reset();
   st = await S(async () => { const s = window.__deeptraceStore.getState(); const r = await s.runSimulation({ failed_nodes: ['PWR-DS-FIVEPOINTS'], failed_edges: [], horizon_hours: 6, enable_restoration: true });
