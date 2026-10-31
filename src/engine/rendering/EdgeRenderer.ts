@@ -70,6 +70,8 @@ export class EdgeRenderer {
     this.arcs.removeAll();
     this.entries = [];
     this.byId.clear();
+    this.display = null;
+    this.animated = [];
     // sort so polylines that usually share a style are consecutive (better draw-call merging)
     const order = [...geom.edges].sort((a, b) => (a.cls + a.system).localeCompare(b.cls + b.system));
     for (const g of order) {
@@ -133,6 +135,7 @@ export class EdgeRenderer {
     this.animated = [];
     for (const e of this.entries) {
       const v = model.edges[e.g.idx];
+      if (!v) continue;
       e.vis = v;
       this.style(e, v, time);
       if (v.visible && (v.pulse !== "none" || e.flashStart >= 0 || e.g.id === this.hovered)) this.animated.push(e);
@@ -176,10 +179,12 @@ export class EdgeRenderer {
       if (!show) return;
       const traceDep = v.trace === "dep" || v.trace === "up" || v.trace === "down";
       // logical dependency: dotted marching arc (provider -> dependent), never a solid line
-      setColor(e.mainMat.uniforms.color, rgb, Math.min(1, v.alpha * pulseA * (traceDep ? 1 : 0.8)));
-      setParams(e.mainMat, traceDep ? 0.7 : 0.35, core * 0.6, 1, traceDep ? 46 : 18);
-      setDash(e.mainMat, traceDep ? 12 : 9, traceDep ? 0.42 : 0.32);
-      const w = (traceDep ? 4.2 : 3.0) * v.widthMul * pulseW;
+      // logical links recede in Deep Mode where the physical layers are the subject
+      const arcA = traceDep ? 1 : 0.62 * (1 - 0.4 * deep);
+      setColor(e.mainMat.uniforms.color, rgb, Math.min(1, v.alpha * pulseA * arcA));
+      setParams(e.mainMat, traceDep ? 0.7 : 0.2, core * 0.6, 1, traceDep ? 46 : 16);
+      setDash(e.mainMat, traceDep ? 12 : 8, traceDep ? 0.42 : 0.3);
+      const w = (traceDep ? 4.2 : 2.4) * v.widthMul * pulseW;
       if (e.main.width !== w) e.main.width = w;
       return;
     }
@@ -190,10 +195,11 @@ export class EdgeRenderer {
       e.main.show = show;
       if (!show) return;
       const road = g.system === "transport" && !/rail/.test(g.edge.connection_type);
-      setColor(e.mainMat.uniforms.color, rgb, Math.min(1, v.alpha * pulseA * (road && !v.impacted && !emph ? 0.62 : 1)));
-      setParams(e.mainMat, road ? 0.75 : 1, core, v.dashed ? 1 : 0, 0);
+      const calm = road && !v.impacted && !emph;
+      setColor(e.mainMat.uniforms.color, rgb, Math.min(1, v.alpha * pulseA * (calm ? 0.42 : 1)));
+      setParams(e.mainMat, calm ? 0.35 : 1, core, v.dashed ? 1 : 0, 0);
       setDash(e.mainMat, 13, 0.52);
-      const w = base * v.widthMul * pulseW;
+      const w = (calm ? base * 0.75 : base) * v.widthMul * pulseW;
       if (e.main.width !== w) e.main.width = w;
       return;
     }

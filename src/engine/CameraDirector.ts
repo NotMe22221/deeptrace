@@ -149,7 +149,7 @@ export class CameraDirector {
   }
 
   /** Deep view framing (exposed for tuning). Heights are fractions of the displayed max depth. */
-  deepView = { headingDeg: 22, distK: 0.82, camBelowK: 0.1, camAboveM: 0, targetK: 0.5 };
+  deepView = { headingDeg: 24, distK: 0.5, camBelowK: 0, camAboveK: 0.04, targetK: 0.85 };
 
   /** Oblique cross-section vantage just under the surface, looking across the layered district. */
   flyToDeepView(opts?: { duration?: number }) {
@@ -169,7 +169,7 @@ export class CameraDirector {
     const camX = cx - Math.sin(heading) * dist;
     const camY = cy - Math.cos(heading) * dist;
     const [lon, lat] = f.toLonLat(camX, camY);
-    const camH = f.height - maxDepth * t.camBelowK + t.camAboveM;
+    const camH = f.height - maxDepth * t.camBelowK + span * t.camAboveK;
     // aim below the district centre so every stratum sits in frame
     const targetH = f.height - maxDepth * t.targetK;
     const pitch = Math.atan2(targetH - camH, dist);

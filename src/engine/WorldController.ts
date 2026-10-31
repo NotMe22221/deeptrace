@@ -113,6 +113,7 @@ export class WorldController {
   private deepRaw = 0;
   deepT = 0;
   private deepTarget = 0;
+  private deepAnim: { from: number; to: number; t0: number; dur: number } | null = null;
   private dirty = { display: true, positions: true, particles: true, trace: true };
   private lastFrame = performance.now() / 1000;
   private lastDeclutter = 0;
@@ -241,8 +242,8 @@ export class WorldController {
     if (scene.skyAtmosphere) {
       scene.skyAtmosphere.perFragmentAtmosphere = true;
       scene.skyAtmosphere.hueShift = 0.0;
-      scene.skyAtmosphere.saturationShift = -0.1;
-      scene.skyAtmosphere.brightnessShift = -0.3;
+      scene.skyAtmosphere.saturationShift = 0.05;
+      scene.skyAtmosphere.brightnessShift = -0.58;
     }
     // dusk: the atmosphere is lit by the real sun at a fixed evening time (blue hour over the city)
     const atmo = scene.atmosphere;
@@ -261,7 +262,7 @@ export class WorldController {
     ssc.maximumZoomDistance = 2.5e7;
     ssc.enableCollisionDetection = true;
     // a fixed evening for anything that still reads the clock
-    this.viewer.clock.currentTime = C.JulianDate.fromIso8601("2026-10-31T23:02:00Z");
+    this.viewer.clock.currentTime = C.JulianDate.fromIso8601("2026-10-31T23:22:00Z");
     this.viewer.clock.shouldAnimate = false;
 
     // saturation-gated bloom + vignette / grade
@@ -275,7 +276,7 @@ export class WorldController {
       const compose = new C.PostProcessStage({
         name: `dt_compose_${C.createGuid()}`,
         fragmentShader: COMPOSE_FS,
-        uniforms: { bloomTexture: brightBlur.name, intensity: 0.9, vignette: 0.36 },
+        uniforms: { bloomTexture: brightBlur.name, intensity: 0.8, vignette: 0.36 },
       });
       this.bloomStage = scene.postProcessStages.add(
         new C.PostProcessStageComposite({ name: `dt_bloom_${C.createGuid()}`, stages: [brightBlur, compose], inputPreviousStageTexture: false }),
@@ -580,6 +581,7 @@ export class WorldController {
     const ground = this.terrainMode === "terrain" ? (network.region.ground_elevation_m ?? 0) : 0;
     const geom = new NetworkGeometry(C, network, ground);
     this.geom = geom;
+    this.display = null;
     const st = useStore.getState();
     geom.update({ depthScale: st.depthScale, deepT: this.deepT }, true);
     this.edges.build(geom);
@@ -687,14 +689,23 @@ export class WorldController {
       }
       const st = useStore.getState();
 
-      // ---- deep transition
+      // ---- deep transition (wall-clock based so it takes ~1.8 s at any frame rate)
       let deepChanged = false;
-      if (this.deepRaw !== this.deepTarget) {
-        const step = dt / DEEP_DURATION;
-        this.deepRaw = this.deepTarget > this.deepRaw ? Math.min(this.deepTarget, this.deepRaw + step) : Math.max(this.deepTarget, this.deepRaw - step);
+      if (this.deepRaw !== this.deepTarget || this.deepAnim) {
+        if (!this.deepAnim || this.deepAnim.to !== this.deepTarget) {
+          const span = Math.abs(this.deepTarget - this.deepRaw);
+          this.deepAnim = { from: this.deepRaw, to: this.deepTarget, t0: now, dur: DEEP_DURATION * Math.max(0.15, span) };
+        }
+        const a = this.deepAnim;
+        const k = clamp((now - a.t0) / a.dur, 0, 1);
+        this.deepRaw = lerp(a.from, a.to, k);
+        if (k >= 1) {
+          this.deepRaw = a.to;
+          this.deepAnim = null;
+          this.dirty.particles = true;
+        }
         this.deepT = easeInOutCubic(this.deepRaw);
         deepChanged = true;
-        if (this.deepRaw === this.deepTarget) this.dirty.particles = true;
       }
       let positionsChanged = false;
       if (deepChanged || this.dirty.positions) {

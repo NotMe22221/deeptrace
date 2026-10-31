@@ -141,6 +141,7 @@ export class NodeRenderer {
     this.drops.removeAll();
     this.entries = [];
     this.byId.clear();
+    this.display = null;
     for (const g of geom.nodes) {
       const n = g.node;
       const tier = iconTier(n.type);
@@ -198,7 +199,7 @@ export class NodeRenderer {
       let dropMat: Cesium.Material | null = null;
       if (g.underground) {
         dropMat = createMaterial(C, "line", setColor(this.tmpColor, [0.6, 0.7, 0.85], 0.4), [0, 0, 1, 0]);
-        drop = this.drops.add({ positions: [g.base, g.pos], width: 1.5, material: dropMat, show: false });
+        drop = this.drops.add({ positions: [g.base, g.pos], width: 1.25, material: dropMat, show: false });
       }
       const e: NodeEntry = {
         g,
@@ -334,6 +335,7 @@ export class NodeRenderer {
     const t = performance.now() / 1000;
     for (const e of this.entries) {
       const v = model.nodes[e.g.idx];
+      if (!v) continue;
       e.vis = v;
       this.styleIcon(e, v, t);
     }
@@ -389,10 +391,12 @@ export class NodeRenderer {
       e.labelPriority = (e.tier === "major" ? 100 : 30) + (e.g.node.critical ? 60 : 0) + (v.impacted ? 200 : 0) + v.emphasis * 300 + (this.selected === e.g.id ? 2000 : 0);
     }
     if (e.drop && e.dropMat) {
-      const dshow = show && deep > 0.02;
+      // depth reading aids: always for major subsurface assets, otherwise only when they matter
+      const major = e.tier === "major" || e.g.node.type === "utility_vault";
+      const dshow = show && deep > 0.02 && (major || v.emphasis > 0 || v.impacted || this.hovered === e.g.id);
       e.drop.show = dshow;
       if (dshow) {
-        setColor(e.dropMat.uniforms.color, v.impacted ? v.rgb : [0.62, 0.72, 0.86], 0.42 * deep * v.alpha);
+        setColor(e.dropMat.uniforms.color, v.impacted ? v.rgb : [0.62, 0.72, 0.86], (major ? 0.42 : 0.3) * deep * v.alpha);
         setParams(e.dropMat, 0, 0, 1, 0);
         setDash(e.dropMat, 5, 0.45);
       }

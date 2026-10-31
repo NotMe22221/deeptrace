@@ -90,7 +90,10 @@ export class ParticleSystem {
         const pp = sys?.particle;
         if (!pp || pp.speed <= 0 || pp.spacing <= 0) continue;
         const ghost = e.cls === "buried" ? (1 - deepT) * (v.trace !== "none" ? 0.2 : 1) : 0;
-        const count = Math.max(1, Math.min(40, Math.round((e.length / pp.spacing) * (0.45 + 0.9 * v.flow.utilization))));
+        // roads are the most numerous edges: sparser, smaller traffic so utilities stay legible
+        const road = e.edge.infrastructure_type === "transport" && !/rail/.test(e.edge.connection_type);
+        const spacing = pp.spacing * (road ? 2.4 : 1);
+        const count = Math.max(1, Math.min(40, Math.round((e.length / spacing) * (0.45 + 0.9 * v.flow.utilization))));
         if (e.length < 12) continue;
         total += count;
         wants.push({
@@ -99,9 +102,9 @@ export class ParticleSystem {
           dir: v.flow.dir,
           twoWay: v.flow.twoWay,
           speed: pp.speed * v.flow.speedMul * (0.85 + 0.3 * v.flow.utilization),
-          size: pp.size * v.flow.sizeMul * lerp(1, 0.72, ghost),
+          size: pp.size * v.flow.sizeMul * lerp(1, 0.72, ghost) * (road ? 0.78 : 1),
           rgb: v.flow.rgb,
-          alpha: v.flow.alpha * Math.min(1, v.alpha + 0.1) * lerp(1, 0.5, ghost),
+          alpha: v.flow.alpha * Math.min(1, v.alpha + 0.1) * lerp(1, 0.5, ghost) * (road ? 0.7 : 1),
           packet: e.edge.infrastructure_type === "telecom",
         });
       }

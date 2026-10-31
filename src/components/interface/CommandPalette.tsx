@@ -65,6 +65,9 @@ function fuzzy(query: string, text: string): number {
   return score - t.length * 0.3;
 }
 
+/** Adds a field weight to a match score, keeping non-matches (< 0) as non-matches. */
+const bonus = (score: number, w: number) => (score < 0 ? -1 : Math.max(0.1, score + w));
+
 function useCommands(): Command[] {
   const layers = useStore((s) => s.layers);
   const presets = useStore((s) => s.presets);
@@ -189,17 +192,17 @@ function PaletteDialog() {
     const nodeHits: Item[] = [];
     for (const n of nodes) {
       const s = Math.max(
-        fuzzy(query, n.name) + 40,
-        fuzzy(query, n.id) + 20,
+        bonus(fuzzy(query, n.name), 40),
+        bonus(fuzzy(query, n.id), 20),
         fuzzy(query, typeLabel(n.type)),
-        fuzzy(query, SYSTEM_STYLES[n.system]?.label ?? n.system) - 40,
+        bonus(fuzzy(query, SYSTEM_STYLES[n.system]?.label ?? n.system), -40),
       );
       if (s > 0) nodeHits.push({ kind: "node", node: n, score: s });
     }
     nodeHits.sort((a, b) => b.score - a.score);
     const cmdHits: Item[] = [];
     for (const c of commands) {
-      const s = Math.max(fuzzy(query, c.label) + 30, fuzzy(query, c.keywords));
+      const s = Math.max(bonus(fuzzy(query, c.label), 30), fuzzy(query, c.keywords));
       if (s > 0) cmdHits.push({ kind: "cmd", cmd: c, score: s });
     }
     cmdHits.sort((a, b) => b.score - a.score);

@@ -92,6 +92,8 @@ const TONES: Record<string, RGB> = {
 };
 const DIFF = { a: hexToRgb(DIFF_HEX.a), b: hexToRgb(DIFF_HEX.b), both: hexToRgb(DIFF_HEX.both) };
 const ALT_GREEN = hexToRgb("#4ade80");
+/** minor assets: dependency arcs into them stay quiet until focused */
+const MINOR_TYPES = new Set(["intersection", "junction", "valve", "access_node", "switch"]);
 
 /** Step lookups for a result (cached per result object). */
 interface ResultIndex {
@@ -305,7 +307,8 @@ export function computeDisplay(geom: NetworkGeometry, s: DisplayInput): DisplayM
     const impacted = style.impacted;
     const sysRgb = systemRgb(g.system);
     let rgb: RGB = impacted ? edgeStateRgb(state) : sysRgb;
-    let alpha = dep ? 0.55 : g.cls === "corridor" ? 0.5 : 0.92;
+    const minorArc = dep && (MINOR_TYPES.has(geom.nodes[g.dst].node.type) || MINOR_TYPES.has(geom.nodes[g.src].node.type));
+    let alpha = dep ? (minorArc ? 0.2 : 0.5) : g.cls === "corridor" ? 0.5 : 0.92;
     let widthMul = 1;
     let core = 0;
     let dashed = state === "normally_open";
