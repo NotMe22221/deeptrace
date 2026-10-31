@@ -222,20 +222,18 @@ export interface DeeptraceState {
 }
 
 /**
- * An analyst answer is ordered at the moment its question was sent: runs and comparisons you
- * started before asking never overwrite what the answer shows, and the answer never overwrites
- * anything you started after asking. Captured by sendAnalystMessage and advanced by the answer's
- * own writes (they are part of the answer, not newer than it).
+ * An analyst answer is ordered at the moment its question was sent, on the same timeline as runs
+ * and comparisons (its actions sit just after the question). Nothing you started before asking
+ * replaces what the answer shows when it lands later. The answer is held back only by something
+ * you started after asking that has already landed (the map, the comparison, or that slot); one
+ * still in flight replaces the answer when it lands, and one that failed or was cancelled never
+ * counts. Captured by sendAnalystMessage.
  */
 export interface AnalystTurn {
-  /** simSeq when the question was sent: runs up to here are older than the answer. */
-  simSeq: number;
-  /** compareSeq when the question was sent. */
-  compareSeq: number;
+  /** The request sequence number when the question was sent. */
+  seq: number;
   /** The slots the analyst was given (its comparisons were computed from these). */
   slots: { A: SimulationResult | null; B: SimulationResult | null };
-  /** slotSeq markers this answer wrote while a newer run of yours owned the display. */
-  slotMarks: { A?: number; B?: number };
 }
 
 // ---------------------------------------------------------------------------
@@ -371,11 +369,28 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
    * (A demo step's own runs are dropped by its guard when the step is superseded or exited.)
    */
   let simEpoch = 0;
-  /** Latest simulation request; only it may set the displayed `result` and `simStatus`. */
+  /**
+   * One timeline for runs, comparisons and analyst questions: every request takes the next number
+   * (an analyst answer's actions are ordered at its question's number + 0.5).
+   */
+  let reqSeq = 0;
+  /** Newest run requested: owns `simStatus`, and only it may put its result on the map. */
   let simSeq = 0;
-  /** Latest request per slot, so an older run cannot overwrite a newer run's slot. */
+  /** Newest request that may write each slot (a run, or an analyst answer's slot write). */
   const slotSeq: Record<"A" | "B", number> = { A: 0, B: 0 };
+  /** Request number of what each slot holds now. */
+  const slotWriteSeq: Record<"A" | "B", number> = { A: 0, B: 0 };
+  /** Newest comparison requested: owns `compareStatus` and is the only one that may land. */
   let compareSeq = 0;
+  /** Request number of the comparison stored now. */
+  let comparisonSeq = 0;
+  /**
+   * Request number of what the map shows (a run's result, or a comparison's A/B diff). Something
+   * requested earlier never takes the map back when it lands later.
+   */
+  let displaySeq = 0;
+  /** Runs still in flight, so an analyst answer can tell whether a pending run still matters. */
+  const liveRuns = new Map<number, { slot: SimSlot; alive: () => boolean }>();
   /**
    * The caller's guard of the latest simulation / comparison (demo steps pass theirs). A run whose
    * guard turned false is dropped when it lands; settleCancelledRuns clears its spinner right away.
@@ -403,6 +418,20 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       for (const k of keys) layers[k] = true;
       return { layers };
     });
+  };
+
+  /**
+   * After an analyst answer took the map: if no run still in flight can put its result on the map
+   * or fill its slot, its spinner goes away (its result would be dropped when it lands).
+   */
+  const settleRunsBehindAnswer = () => {
+    if (get().simStatus !== "running") return;
+    for (const [q, e] of liveRuns) {
+      if (!e.alive()) continue;
+      if (q === simSeq && q > displaySeq) return; // will still take the map
+      if ((e.slot === "A" || e.slot === "B") && slotSeq[e.slot] === q) return; // will still fill its slot
+    }
+    set({ simStatus: "idle" });
   };
 
   /** A demo step was superseded or exited: its simulate / compare requests no longer show a spinner. */
@@ -578,7 +607,9 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
     s: DeeptraceState,
     c: ScenarioComparison,
     keep: { A: boolean; B: boolean } = { A: false, B: false },
-  ): Partial<DeeptraceState> {
+    /** Something requested later than this comparison owns the map: store it without its diff view. */
+    keepView = false,
+  ): { patch: Partial<DeeptraceState>; tookView: boolean } {
     const compared = { A: c.scenario_a, B: c.scenario_b };
     const pick = (k: "A" | "B") => {
       const cur = s.slots[k];
@@ -595,20 +626,29 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
     });
     const result = s.result && s.result === s.slots.A ? A : s.result && s.result === s.slots.B ? B : s.result;
     const moved = result !== s.result && result !== null;
+    // don't swap the map from a newer run to the diff of an older comparison
+    const tookView = !superseded && !keepView;
     return {
-      comparison: c,
-      // don't swap the map from a newer run to the diff of an older comparison
-      compareView: superseded ? s.compareView : "diff",
-      slots: { A, B },
-      result,
-      panels: { ...s.panels, comparison: true },
-      ...(moved
-        ? {
-            // the displayed result changed: its playback range and any user highlight are stale
-            highlight: dropUserHighlight(s.highlight),
-            playback: { step: maxStepOf(result), maxStep: maxStepOf(result), playing: false, runId: s.playback.runId + 1 },
-          }
-        : {}),
+      tookView,
+      patch: {
+        comparison: c,
+        compareView: tookView ? "diff" : s.compareView,
+        slots: { A, B },
+        result,
+        panels: { ...s.panels, comparison: true },
+        ...(moved
+          ? {
+              // the displayed result changed: its playback range and any user highlight are stale
+              highlight: dropUserHighlight(s.highlight),
+              playback: {
+                step: maxStepOf(result),
+                maxStep: maxStepOf(result),
+                playing: false,
+                runId: s.playback.runId + 1,
+              },
+            }
+          : {}),
+      },
     };
   }
 
@@ -858,9 +898,10 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       }
       const isCurrent = opts?.isCurrent;
       const epoch = simEpoch;
-      const seq = ++simSeq;
+      const seq = (simSeq = ++reqSeq);
       latestSimGuard = isCurrent;
       if (slot === "A" || slot === "B") slotSeq[slot] = seq;
+      liveRuns.set(seq, { slot, alive: () => epoch === simEpoch && (!isCurrent || isCurrent()) });
       set({ simStatus: "running", simError: null });
       /** The world was restored / cleared, or the caller (a demo step) was superseded or exited. */
       const cancelled = () => {
@@ -874,12 +915,21 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       try {
         const result = await simulate(input);
         if (cancelled()) return null;
-        const latest = seq === simSeq; // only the newest run may change what is displayed
+        const latest = seq === simSeq; // the newest run requested owns simStatus
+        // ...and takes the map, unless something requested after it (a comparison, an analyst
+        // answer to a later question) already did
+        const display = latest && seq > displaySeq;
         const ownsSlot = (slot === "A" || slot === "B") && slotSeq[slot] === seq;
-        if (!latest && !ownsSlot) return null;
+        if (!display && !ownsSlot) {
+          if (latest && get().simStatus === "running") set({ simStatus: "idle" });
+          return null;
+        }
+        if (display) displaySeq = seq;
+        if (ownsSlot) slotWriteSeq[slot as "A" | "B"] = seq;
         set((s) => ({
           slots: ownsSlot ? { ...s.slots, [slot]: result } : s.slots,
-          ...(latest
+          ...(latest && !display ? { simStatus: "idle" as const } : {}),
+          ...(display
             ? {
                 result,
                 simStatus: "idle" as const,
@@ -903,6 +953,8 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
           set({ simError: `Scenario ${slot} failed: ${message}` });
         }
         return null;
+      } finally {
+        liveRuns.delete(seq);
       }
     },
     setPlaybackStep: (step) =>
@@ -929,7 +981,7 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       }
       const isCurrent = opts?.isCurrent;
       const epoch = simEpoch;
-      const seq = ++compareSeq;
+      const seq = (compareSeq = ++reqSeq);
       latestCompareGuard = isCurrent;
       // A slot holding another object when the comparison lands was filled by a newer run (a
       // re-run, one already in flight at Compare, or an analyst show_simulation) and belongs to it.
@@ -949,13 +1001,20 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       try {
         const comparison = await compare(A, B);
         if (stale()) return null;
-        set((s) => ({
-          ...adoptComparison(s, comparison, {
-            A: newerSlot(startSlots.A, s.slots.A),
-            B: newerSlot(startSlots.B, s.slots.B),
-          }),
-          compareStatus: "idle",
-        }));
+        let tookView = false;
+        set((s) => {
+          const r = adoptComparison(
+            s,
+            comparison,
+            { A: newerSlot(startSlots.A, s.slots.A), B: newerSlot(startSlots.B, s.slots.B) },
+            // something requested after this Compare (a run, an analyst answer) already took the map
+            seq < displaySeq,
+          );
+          tookView = r.tookView;
+          return { ...r.patch, compareStatus: "idle" as const };
+        });
+        comparisonSeq = seq;
+        if (tookView) displaySeq = seq;
         return comparison;
       } catch (e) {
         if (stale()) return null;
@@ -1026,7 +1085,7 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       const trimmed = text.trim();
       if (!trimmed || get().analystPending) return;
       const s0 = get();
-      const turn: AnalystTurn = { simSeq, compareSeq, slots: { ...s0.slots }, slotMarks: {} };
+      const turn: AnalystTurn = { seq: reqSeq, slots: { ...s0.slots } };
       const history = s0.messages
         .filter((m) => !m.pending && !m.error && m.content)
         .slice(-10)
@@ -1150,7 +1209,11 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       set((s) => ({ messages: [], highlight: s.highlight?.source === "ai" ? null : s.highlight }));
     },
     applyUIAction: (a, turn) => {
-      const t: AnalystTurn = turn ?? { simSeq, compareSeq, slots: { ...get().slots }, slotMarks: {} };
+      const t: AnalystTurn = turn ?? { seq: reqSeq, slots: { ...get().slots } };
+      /** Where this answer sits on the request timeline: after its question, before anything later. */
+      const at = t.seq + 0.5;
+      /** Nothing started after the question has taken the map yet (one still in flight replaces this when it lands). */
+      const mayShow = () => displaySeq <= at;
       switch (a.kind) {
         case "select_node":
           if (a.node_id) void get().selectNode(a.node_id, { fly: false });
@@ -1160,6 +1223,8 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
           else if (a.node_ids.length) world().flyToNodes(a.node_ids);
           break;
         case "highlight":
+          // a highlight describes what this answer shows; a newer result on the map is not that
+          if (!mayShow()) break;
           set({
             highlight: {
               node_ids: a.node_ids,
@@ -1171,6 +1236,7 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
           });
           break;
         case "clear_highlights":
+          if (!mayShow()) break;
           set({ highlight: null });
           break;
         case "show_trace":
@@ -1188,19 +1254,15 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
           if (a.result) {
             const r = a.result;
             const k = a.slot === "A" || a.slot === "B" ? a.slot : null;
-            // A run you started after asking is newer than this answer: it keeps the display (shown
-            // or still coming) and, for its slot, the slot.
-            const show = simSeq <= t.simSeq;
-            const fill = k !== null && !(slotSeq[k] > t.simSeq && slotSeq[k] !== t.slotMarks[k]);
+            const show = mayShow();
+            // a slot written by something you started after asking keeps it
+            const fill = k !== null && slotWriteSeq[k] <= at;
             if (!show && !fill) break;
-            if (show) {
-              // supersede every run still in flight (all started before the question)
-              t.simSeq = ++simSeq;
-              latestSimGuard = undefined;
-            }
+            if (show) displaySeq = at; // earlier runs and comparisons no longer take the map when they land
             if (k && fill) {
-              // older runs for this slot must not overwrite it when they land
-              slotSeq[k] = show ? simSeq : (t.slotMarks[k] = t.simSeq + 0.5);
+              // earlier runs for this slot no longer overwrite it; a later one still in flight does
+              if (slotSeq[k] <= t.seq) slotSeq[k] = at;
+              slotWriteSeq[k] = at;
               t.slots[k] = r; // the answer's own write is not newer than its later comparisons
             }
             set((s) => ({
@@ -1208,7 +1270,6 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
               ...(show
                 ? {
                     result: r,
-                    simStatus: s.simStatus === "running" ? ("idle" as const) : s.simStatus,
                     compareView: null,
                     // keep analyst highlights (this same turn may have just set one); user ones are stale
                     highlight: dropUserHighlight(s.highlight),
@@ -1216,21 +1277,42 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
                   }
                 : {}),
             }));
+            if (show) settleRunsBehindAnswer();
           }
           break;
         case "show_comparison":
           if (a.comparison) {
             const c = a.comparison;
-            // A comparison you started after asking is newer than this answer: it is (or will be) shown.
-            if (compareSeq > t.compareSeq) break;
-            // Supersede comparisons still in flight (all started before the question).
-            t.compareSeq = ++compareSeq;
-            latestCompareGuard = undefined;
-            set((s) => ({
-              // slots changed since the analyst was given them belong to the newer write
-              ...adoptComparison(s, c, { A: newerSlot(t.slots.A, s.slots.A), B: newerSlot(t.slots.B, s.slots.B) }),
-              compareStatus: s.compareStatus === "running" ? ("idle" as const) : s.compareStatus,
-            }));
+            // a comparison you started after asking has already landed: it stays
+            if (comparisonSeq > at) break;
+            // Comparisons started before asking and still in flight are dropped when they land (a
+            // later one still in flight replaces this answer's comparison when it lands).
+            const supersede = compareSeq <= t.seq;
+            if (supersede) {
+              compareSeq = at;
+              latestCompareGuard = undefined;
+            }
+            let tookView = false;
+            set((s) => {
+              const r = adoptComparison(
+                s,
+                c,
+                // slots changed since the analyst was given them belong to the newer write
+                { A: newerSlot(t.slots.A, s.slots.A), B: newerSlot(t.slots.B, s.slots.B) },
+                // something started after asking already took the map: store this without its diff view
+                !mayShow(),
+              );
+              tookView = r.tookView;
+              return {
+                ...r.patch,
+                compareStatus: supersede && s.compareStatus === "running" ? ("idle" as const) : s.compareStatus,
+              };
+            });
+            comparisonSeq = at;
+            if (tookView) {
+              displaySeq = at;
+              settleRunsBehindAnswer();
+            }
           }
           break;
       }
