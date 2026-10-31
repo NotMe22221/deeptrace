@@ -31,14 +31,15 @@ export function HighlightChip() {
           key="highlight-chip"
           ref={rootRef}
           role="status"
-          // focus target after "show" (which unmounts): not the destructive Clear button, so Space
-          // still plays / pauses and a repeated Enter does nothing
-          tabIndex={-1}
+          // made focusable only while it is the keyboard focus target after "show" (see below)
+          onBlur={(e) => {
+            if (e.target === e.currentTarget) e.currentTarget.removeAttribute("tabindex");
+          }}
           initial={{ opacity: 0, y: -4 }}
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: -4 }}
           transition={{ duration: 0.15 }}
-          className="dt-panel pointer-events-auto flex h-8 max-w-full items-center gap-2 pr-1 pl-3 outline-none focus-visible:ring-1 focus-visible:ring-sky-300/50"
+          className="dt-panel pointer-events-auto flex h-8 max-w-full items-center gap-2 pr-1 pl-3"
           style={{ borderColor: `${color}55`, borderRadius: 999 }}
         >
           <span className="size-2 shrink-0 rounded-full" style={{ background: color, boxShadow: `0 0 8px ${color}` }} />
@@ -50,9 +51,17 @@ export function HighlightChip() {
             <button
               type="button"
               onClick={(e) => {
-                const hadFocus = document.activeElement === e.currentTarget;
-                leaveDiff(); // this button unmounts on the next render: keep keyboard focus in the chip
-                if (hadFocus) rootRef.current?.focus();
+                // This button unmounts on the next render. A keyboard user (click with detail 0)
+                // keeps focus in the chip, on the chip itself rather than the destructive Clear
+                // button, so Space still plays and a repeated Enter does nothing. A mouse click lets
+                // focus fall to the page as before, so no focus ring appears on later shortcut keys.
+                const keyboard = document.activeElement === e.currentTarget && e.detail === 0;
+                leaveDiff();
+                const root = rootRef.current;
+                if (keyboard && root) {
+                  root.tabIndex = -1;
+                  root.focus();
+                }
               }}
               title="The A/B diff view does not draw highlights. Show this highlight on the map instead."
               className="shrink-0 rounded-full px-1.5 text-[10.5px] whitespace-nowrap text-sky-300 hover:bg-white/[0.08]"

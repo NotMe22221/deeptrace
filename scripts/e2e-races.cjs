@@ -277,8 +277,14 @@ async function routes(page) {
   await showBtn2.waitFor({ timeout: 30000 }); await showBtn2.click();
   await sleep(200); await page.keyboard.press(' ');
   await sleep(200);
-  st = await S(() => { const s = window.__deeptraceStore.getState(); return { hl: !!s.highlight, playing: s.playback.playing, view: s.compareView }; });
-  check('R4 click "show", then Space plays instead of clearing the highlight', st.hl && st.playing && st.view !== 'diff', st);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); const a = document.activeElement; return { hl: !!s.highlight, playing: s.playback.playing, view: s.compareView, focus: a?.tagName, ring: !!a && a !== document.body && a.matches(':focus-visible') }; });
+  check('R4 click "show", then Space plays instead of clearing the highlight (no focus ring)', st.hl && st.playing && st.view !== 'diff' && !st.ring, st);
+
+  // R5: a mouse click on the chip's label does not focus it (no ring after the next shortcut key)
+  await page.locator('[role=status]', { hasText: 'Highlight:' }).first().click();
+  await page.keyboard.press('ArrowRight');
+  st = await S(() => { const a = document.activeElement; return { focus: a?.tagName, ring: !!a && a !== document.body && a.matches(':focus-visible') }; });
+  check('R5 clicking the highlight label leaves no focus ring', st.focus === 'BODY' && !st.ring, st);
 
   // R4: an analyst comparison answering an earlier question does not count as a newer slot run
   await reset();
