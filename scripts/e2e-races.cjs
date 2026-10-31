@@ -265,8 +265,36 @@ async function routes(page) {
   const showBtn = page.locator('button', { hasText: 'hidden in A/B diff' }).first();
   await showBtn.waitFor({ timeout: 30000 }); await showBtn.focus(); await page.keyboard.press('Enter');
   await sleep(300);
-  st = await S(() => ({ view: window.__deeptraceStore.getState().compareView, focus: document.activeElement?.getAttribute('aria-label') ?? document.activeElement?.tagName }));
-  check('R3 highlight chip "show" leaves the diff and keeps focus in the chip', st.view !== 'diff' && st.focus === 'Clear highlight', st);
+  st = await S(() => ({ view: window.__deeptraceStore.getState().compareView, focus: document.activeElement?.getAttribute('role') ?? document.activeElement?.tagName, hl: !!window.__deeptraceStore.getState().highlight }));
+  check('R3 highlight chip "show" leaves the diff and keeps focus in the chip', st.view !== 'diff' && st.focus === 'status' && st.hl, st);
+  await page.keyboard.press('Tab');
+  st = await S(() => document.activeElement?.getAttribute('aria-label'));
+  check('R4 Tab from the chip reaches its Clear button', st === 'Clear highlight', { focus: st });
+
+  // R4: a mouse click on "show" then Space plays the cascade (focus is not left on Clear)
+  await S(() => { const s = window.__deeptraceStore.getState(); s.setCompareView('diff'); s.setPlaying(false); s.setHighlight({ node_ids: ['PWR-DS-FIVEPOINTS'], edge_ids: [], label: 'Focus test', tone: 'info', source: 'ai' }); });
+  const showBtn2 = page.locator('button', { hasText: 'hidden in A/B diff' }).first();
+  await showBtn2.waitFor({ timeout: 30000 }); await showBtn2.click();
+  await sleep(200); await page.keyboard.press(' ');
+  await sleep(200);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { hl: !!s.highlight, playing: s.playback.playing, view: s.compareView }; });
+  check('R4 click "show", then Space plays instead of clearing the highlight', st.hl && st.playing && st.view !== 'diff', st);
+
+  // R4: an analyst comparison answering an earlier question does not count as a newer slot run
+  await reset();
+  await S(async () => { const s = window.__deeptraceStore.getState(); const P = (id) => s.presets.find((x) => x.id === id).scenario;
+    await s.runSimulation(P('C-WATER-MAIN-DECATUR'), 'A'); await window.__deeptraceStore.getState().runSimulation(P('B-EDGEWOOD-DUCTBANK'), 'B'); });
+  delays['/api/analyst/chat'] = 3000;
+  await S(() => { window.__pq = window.__deeptraceStore.getState().sendAnalystMessage('Compare scenario A and B'); });
+  await sleep(200);
+  await S(async () => { const s = window.__deeptraceStore.getState(); await s.runSimulation(s.presets.find((x) => x.id === 'A-DS-FIVEPOINTS').scenario, 'A'); });
+  delays['/api/compare'] = 6000;
+  await S(() => { window.__pc = window.__deeptraceStore.getState().runComparison(); });
+  await S(() => window.__pq);
+  const analystCmp = await S(() => window.__deeptraceStore.getState().comparison?.scenario_a.scenario_id ?? null);
+  await S(() => window.__pc);
+  st = { analystCmp, ...(await S(() => { const s = window.__deeptraceStore.getState(); return { slotA: s.slots.A?.scenario_id, result: s.result?.scenario_id, cmpA: s.comparison?.scenario_a.scenario_id, view: s.compareView }; })) };
+  check('R4 the user\'s Compare takes back slots an earlier analyst comparison filled', st.analystCmp === 'C-WATER-MAIN-DECATUR' && st.slotA === 'A-DS-FIVEPOINTS' && st.result === 'A-DS-FIVEPOINTS' && st.cmpA === 'A-DS-FIVEPOINTS' && st.view === 'diff', st);
 
   // R2: a live result keeps its provenance after a failover (not relabelled "precomputed")
   await reset();

@@ -543,6 +543,9 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
    * while the comparison ran: it belongs to that write and is kept as it is (the comparison panel
    * then shows "Slots changed since this comparison" instead of the older run coming back).
    */
+  /** Slot objects a comparison put there (the user's or an analyst show_comparison): not a newer run. */
+  const comparisonFilled = new WeakSet<SimulationResult>();
+
   function adoptComparison(
     s: DeeptraceState,
     c: ScenarioComparison,
@@ -555,6 +558,8 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
     };
     const A = pick("A");
     const B = pick("B");
+    if (A !== s.slots.A) comparisonFilled.add(A);
+    if (B !== s.slots.B) comparisonFilled.add(B);
     // a kept slot that now holds another scenario means a newer run owns the map
     const superseded = (["A", "B"] as const).some((k) => {
       const cur = s.slots[k];
@@ -898,10 +903,14 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       const epoch = simEpoch;
       const seq = ++compareSeq;
       latestCompareGuard = isCurrent;
-      // A slot holding another object when the comparison lands was filled by a newer write (a
-      // re-run, one already in flight at Compare, or the analyst) and belongs to it. Failed or
-      // cancelled re-runs leave the slot untouched and do not count.
+      // A slot holding another object when the comparison lands was filled by a newer run (a
+      // re-run, one already in flight at Compare, or an analyst show_simulation) and belongs to it.
+      // Failed or cancelled re-runs leave the slot untouched and do not count, and neither does a
+      // slot another comparison filled (e.g. an analyst answer to an earlier question): this
+      // comparison replaces `comparison`, so it takes those slots back too.
       const startSlots = get().slots;
+      const newer = (k: "A" | "B", cur: SimulationResult | null) =>
+        cur !== startSlots[k] && !(cur && comparisonFilled.has(cur));
       set({ compareStatus: "running", simError: null });
       const stale = () => {
         if (seq !== compareSeq) return true; // a newer comparison owns compareStatus
@@ -915,7 +924,7 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
         const comparison = await compare(A, B);
         if (stale()) return null;
         set((s) => ({
-          ...adoptComparison(s, comparison, { A: s.slots.A !== startSlots.A, B: s.slots.B !== startSlots.B }),
+          ...adoptComparison(s, comparison, { A: newer("A", s.slots.A), B: newer("B", s.slots.B) }),
           compareStatus: "idle",
         }));
         return comparison;
