@@ -485,6 +485,77 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
   check('R7 control: the scripted answer shows its simulation and highlight', st.result === 'A-DS-FIVEPOINTS' && st.hl === 'Affected components', st);
   chatReply = null;
 
+  // R8: a Compare started after asking replaces the answer's slot write when it lands
+  await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+  const rCw = await S(async () => { const s = window.__deeptraceStore.getState(); const sc = s.presets.find((x) => x.id === 'C-WATER-MAIN-DECATUR').scenario;
+    return (await fetch('http://localhost:8000/api/simulate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(sc) })).json(); });
+  chatReply = sse([
+    { type: 'status', mode: 'llm', model: 'scripted' },
+    { type: 'ui_action', action: { kind: 'show_simulation', result: rCw, slot: 'A', node_ids: [], edge_ids: [] } },
+    { type: 'message', text: 'ok' }, { type: 'done', tool_calls: 1, mode: 'llm' },
+  ]);
+  delays['/api/analyst/chat'] = 2500; delays['/api/compare'] = 6000;
+  await S(() => { window.__pq = window.__deeptraceStore.getState().sendAnalystMessage('Put the Decatur main break in slot A'); });
+  await sleep(300);
+  await S(() => { window.__pc = window.__deeptraceStore.getState().runComparison(); });
+  await S(() => window.__pq);
+  const r8a = await snap();
+  await S(() => window.__pc);
+  st = { afterAnswer: r8a, final: await snap() };
+  check('R8 a Compare started after asking replaces the answer\'s slot write when it lands', r8a.slotA === 'C-WATER-MAIN-DECATUR' && st.final.view === 'diff' && st.final.slotA === 'A-DS-FIVEPOINTS' && st.final.cmpA === 'A-DS-FIVEPOINTS' && st.final.compareStatus === 'idle', st);
+
+  // R8: ...and once such a Compare has landed, the answer no longer writes into its slots
+  await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+  chatReply = sse([
+    { type: 'status', mode: 'llm', model: 'scripted' },
+    { type: 'ui_action', action: { kind: 'show_simulation', result: rCw, slot: 'A', node_ids: [], edge_ids: [] } },
+    { type: 'message', text: 'ok' }, { type: 'done', tool_calls: 1, mode: 'llm' },
+  ]);
+  delays['/api/analyst/chat'] = 3000;
+  await S(() => { window.__pq = window.__deeptraceStore.getState().sendAnalystMessage('Put the Decatur main break in slot A'); });
+  await sleep(300);
+  await S(() => window.__deeptraceStore.getState().runComparison());
+  await S(() => window.__pq);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); const m = s.messages[s.messages.length - 1]; return { view: s.compareView, slotA: s.slots.A?.scenario_id, cmpA: s.comparison?.scenario_a.scenario_id, scripted: m?.model === 'scripted' }; });
+  check('R8 an answer does not write into the slots of a Compare started after asking', st.scripted && st.view === 'diff' && st.slotA === 'A-DS-FIVEPOINTS' && st.cmpA === 'A-DS-FIVEPOINTS', st);
+  chatReply = null;
+
+  // R8: a slot run started before asking that lands before the answer does not hold back its diff
+  await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+  delays['/api/simulate'] = 1500; delays['/api/analyst/chat'] = 4000;
+  await S(() => { const s = window.__deeptraceStore.getState(); window.__pr = s.runSimulation(s.presets.find((x) => x.id === 'C-WATER-MAIN-DECATUR').scenario, 'A'); });
+  await sleep(200);
+  await S(() => { window.__pq = window.__deeptraceStore.getState().sendAnalystMessage('Compare scenario A and B'); });
+  await S(() => window.__pr);
+  const r8c = await snap();
+  await S(() => window.__pq);
+  st = { runLanded: r8c, final: await snap() };
+  check('R8 an older slot run landing first does not hold back the answer\'s diff', r8c.slotA === 'C-WATER-MAIN-DECATUR' && st.final.view === 'diff' && st.final.cmpA === 'A-DS-FIVEPOINTS' && st.final.slotA === 'C-WATER-MAIN-DECATUR', st);
+
+  // R8: the answer's trace does not take the map from a Compare started after asking...
+  await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+  await S(async () => { await window.__deeptraceStore.getState().selectNode('PWR-DS-FIVEPOINTS', { fly: false }); });
+  delays['/api/analyst/chat'] = 3000;
+  await S(() => { window.__pq = window.__deeptraceStore.getState().sendAnalystMessage('Trace the connections of this component'); });
+  await sleep(300);
+  await S(() => window.__deeptraceStore.getState().runComparison());
+  await S(() => window.__pq);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { view: s.compareView, trace: s.trace?.node_id ?? null, cmpA: s.comparison?.scenario_a.scenario_id ?? null }; });
+  check('R8 an answer\'s trace does not take the map from a newer Compare', st.view === 'diff' && st.trace === 'PWR-DS-FIVEPOINTS' && st.cmpA === 'A-DS-FIVEPOINTS', st);
+
+  // R8: ...and a Compare started before asking does not take the diff back over the answer's trace
+  await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+  await S(() => window.__deeptraceStore.getState().runComparison());
+  await S(async () => { await window.__deeptraceStore.getState().selectNode('PWR-DS-FIVEPOINTS', { fly: false }); });
+  delays['/api/compare'] = 5000;
+  await S(() => { window.__pc = window.__deeptraceStore.getState().runComparison(); });
+  await sleep(200);
+  await S(() => window.__deeptraceStore.getState().sendAnalystMessage('Trace the connections of this component'));
+  const r8e = await S(() => { const s = window.__deeptraceStore.getState(); return { view: s.compareView, vis: s.traceVisible }; });
+  await S(() => window.__pc);
+  st = { afterAnswer: r8e, final: await S(() => { const s = window.__deeptraceStore.getState(); return { view: s.compareView, vis: s.traceVisible, status: s.compareStatus }; }) };
+  check('R8 an older Compare does not take the diff back over the answer\'s trace', r8e.view !== 'diff' && r8e.vis && st.final.view !== 'diff' && st.final.vis && st.final.status === 'idle', st);
+
   // R2: a live result keeps its provenance after a failover (not relabelled "precomputed")
   await reset();
   st = await S(async () => { const s = window.__deeptraceStore.getState(); const r = await s.runSimulation({ failed_nodes: ['PWR-DS-FIVEPOINTS'], failed_edges: [], horizon_hours: 6, enable_restoration: true });

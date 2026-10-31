@@ -302,7 +302,7 @@ and an analyst answer counts as asked when its question was sent. Nothing starte
 takes the map back from the answer when it lands later (an older slot run still fills its slot,
 and the analyst's comparison then shows "Slots changed since this comparison"). The answer is
 held back only by something started after asking that has already landed: the map, the
-comparison or that slot, including the answer's highlights. A newer request still in flight
+comparison or that slot, including the answer's highlights and traces. A newer request still in flight
 replaces the answer when it lands, and one that failed or was cancelled never counts. A streaming analyst answer can be stopped at any time, and the
 backend sends SSE heartbeats so a stalled connection is detected (90 s without data) rather
 than hanging.

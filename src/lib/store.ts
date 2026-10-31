@@ -389,6 +389,13 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
    * requested earlier never takes the map back when it lands later.
    */
   let displaySeq = 0;
+  /**
+   * Request number of the analyst answer whose trace last moved the map off the A/B diff. A
+   * comparison requested before it lands without taking the diff back over the trace.
+   */
+  let viewSeq = 0;
+  /** Slot k holds an analyst answer's write (question + 0.5) for a question asked before request `seq`. */
+  const olderAnswerWrite = (k: "A" | "B", seq: number) => slotWriteSeq[k] % 1 !== 0 && slotWriteSeq[k] < seq;
   /** Runs still in flight, so an analyst answer can tell whether a pending run still matters. */
   const liveRuns = new Map<number, { slot: SimSlot; alive: () => boolean }>();
   /**
@@ -609,6 +616,8 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
     keep: { A: boolean; B: boolean } = { A: false, B: false },
     /** Something requested later than this comparison owns the map: store it without its diff view. */
     keepView = false,
+    /** Kept slots whose newer write also keeps the map off this diff (default: every kept slot). */
+    holdView: { A: boolean; B: boolean } = keep,
   ): { patch: Partial<DeeptraceState>; tookView: boolean } {
     const compared = { A: c.scenario_a, B: c.scenario_b };
     const pick = (k: "A" | "B") => {
@@ -622,7 +631,7 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
     // a kept slot that now holds another scenario means a newer run owns the map
     const superseded = (["A", "B"] as const).some((k) => {
       const cur = s.slots[k];
-      return keep[k] && !!cur && !sameScenario(cur.scenario, compared[k].scenario);
+      return keep[k] && holdView[k] && !!cur && !sameScenario(cur.scenario, compared[k].scenario);
     });
     const result = s.result && s.result === s.slots.A ? A : s.result && s.result === s.slots.B ? B : s.result;
     const moved = result !== s.result && result !== null;
@@ -984,7 +993,8 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       const seq = (compareSeq = ++reqSeq);
       latestCompareGuard = isCurrent;
       // A slot holding another object when the comparison lands was filled by a newer run (a
-      // re-run, one already in flight at Compare, or an analyst show_simulation) and belongs to it.
+      // re-run, one already in flight at Compare, or an analyst answer to a question asked after
+      // this Compare) and belongs to it.
       // Failed or cancelled re-runs leave the slot untouched and do not count, and neither does a
       // slot another comparison filled (e.g. an analyst answer to an earlier question): this
       // comparison replaces `comparison`, so it takes those slots back too.
@@ -1006,9 +1016,13 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
           const r = adoptComparison(
             s,
             comparison,
-            { A: newerSlot(startSlots.A, s.slots.A), B: newerSlot(startSlots.B, s.slots.B) },
-            // something requested after this Compare (a run, an analyst answer) already took the map
-            seq < displaySeq,
+            {
+              // an analyst answer to a question asked before this Compare is older than it: replaced
+              A: newerSlot(startSlots.A, s.slots.A) && !olderAnswerWrite("A", seq),
+              B: newerSlot(startSlots.B, s.slots.B) && !olderAnswerWrite("B", seq),
+            },
+            // something requested after this Compare (a run, an analyst answer or its trace) already took the map
+            seq < Math.max(displaySeq, viewSeq),
           );
           tookView = r.tookView;
           return { ...r.patch, compareStatus: "idle" as const };
@@ -1242,11 +1256,16 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
         case "show_trace":
           if (a.trace) {
             traceSeq++;
-            // the analyst is showing a component's connections: the diff view would hide them
+            // The analyst is showing a component's connections and the diff view would hide them, so
+            // leave the diff, unless something started after asking already took the map (the trace
+            // is still stored: the inspector and the A/B chips show it).
+            const s0 = get();
+            const leave = s0.compareView === "diff" && !!s0.comparison && mayShow();
+            if (leave) viewSeq = Math.max(viewSeq, at); // comparisons started before asking land without their diff
             set((s) => ({
               trace: a.trace,
               traceVisible: true,
-              ...(s.compareView === "diff" && s.comparison ? { compareView: viewOutsideDiff(s) } : {}),
+              ...(leave ? { compareView: viewOutsideDiff(s) } : {}),
             }));
           }
           break;
@@ -1255,8 +1274,9 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
             const r = a.result;
             const k = a.slot === "A" || a.slot === "B" ? a.slot : null;
             const show = mayShow();
-            // a slot written by something you started after asking keeps it
-            const fill = k !== null && slotWriteSeq[k] <= at;
+            // a slot written by something you started after asking keeps it, and so does a slot a
+            // comparison started after asking has already put on screen
+            const fill = k !== null && slotWriteSeq[k] <= at && comparisonSeq <= at;
             if (!show && !fill) break;
             if (show) displaySeq = at; // earlier runs and comparisons no longer take the map when they land
             if (k && fill) {
@@ -1301,6 +1321,9 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
                 { A: newerSlot(t.slots.A, s.slots.A), B: newerSlot(t.slots.B, s.slots.B) },
                 // something started after asking already took the map: store this without its diff view
                 !mayShow(),
+                // ...and only a slot written by something started after asking keeps the map off this
+                // diff (an older run that landed in between keeps its slot as data; the diff shows stale)
+                { A: slotWriteSeq.A > at, B: slotWriteSeq.B > at },
               );
               tookView = r.tookView;
               return {
