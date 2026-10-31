@@ -207,7 +207,11 @@ export interface DeeptraceState {
   /** Abort the analyst answer that is streaming (keeps what has arrived so far). */
   stopAnalyst: () => void;
   clearChat: () => void;
-  applyUIAction: (a: UIAction) => void;
+  /**
+   * Apply an analyst UI action. `turn` orders it at the moment its question was sent (see
+   * AnalystTurn); without one it is treated as asked just now.
+   */
+  applyUIAction: (a: UIAction, turn?: AnalystTurn) => void;
 
   startDemo: () => void;
   exitDemo: () => void;
@@ -215,6 +219,23 @@ export interface DeeptraceState {
   demoGoto: (step: number) => Promise<void>;
   demoNext: () => Promise<void>;
   demoPrev: () => Promise<void>;
+}
+
+/**
+ * An analyst answer is ordered at the moment its question was sent: runs and comparisons you
+ * started before asking never overwrite what the answer shows, and the answer never overwrites
+ * anything you started after asking. Captured by sendAnalystMessage and advanced by the answer's
+ * own writes (they are part of the answer, not newer than it).
+ */
+export interface AnalystTurn {
+  /** simSeq when the question was sent: runs up to here are older than the answer. */
+  simSeq: number;
+  /** compareSeq when the question was sent. */
+  compareSeq: number;
+  /** The slots the analyst was given (its comparisons were computed from these). */
+  slots: { A: SimulationResult | null; B: SimulationResult | null };
+  /** slotSeq markers this answer wrote while a newer run of yours owned the display. */
+  slotMarks: { A?: number; B?: number };
 }
 
 // ---------------------------------------------------------------------------
@@ -545,6 +566,13 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
    */
   /** Slot objects a comparison put there (the user's or an analyst show_comparison): not a newer run. */
   const comparisonFilled = new WeakSet<SimulationResult>();
+  /**
+   * The slot now holds a newer write than `base` (the slot when a comparison's data was taken): a
+   * run or an analyst show_simulation. Failed or cancelled runs leave the slot untouched, and a slot
+   * another comparison filled does not count (the new comparison replaces it anyway).
+   */
+  const newerSlot = (base: SimulationResult | null, cur: SimulationResult | null) =>
+    cur !== base && !(cur && comparisonFilled.has(cur));
 
   function adoptComparison(
     s: DeeptraceState,
@@ -909,8 +937,6 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       // slot another comparison filled (e.g. an analyst answer to an earlier question): this
       // comparison replaces `comparison`, so it takes those slots back too.
       const startSlots = get().slots;
-      const newer = (k: "A" | "B", cur: SimulationResult | null) =>
-        cur !== startSlots[k] && !(cur && comparisonFilled.has(cur));
       set({ compareStatus: "running", simError: null });
       const stale = () => {
         if (seq !== compareSeq) return true; // a newer comparison owns compareStatus
@@ -924,7 +950,10 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
         const comparison = await compare(A, B);
         if (stale()) return null;
         set((s) => ({
-          ...adoptComparison(s, comparison, { A: newer("A", s.slots.A), B: newer("B", s.slots.B) }),
+          ...adoptComparison(s, comparison, {
+            A: newerSlot(startSlots.A, s.slots.A),
+            B: newerSlot(startSlots.B, s.slots.B),
+          }),
           compareStatus: "idle",
         }));
         return comparison;
@@ -997,6 +1026,7 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       const trimmed = text.trim();
       if (!trimmed || get().analystPending) return;
       const s0 = get();
+      const turn: AnalystTurn = { simSeq, compareSeq, slots: { ...s0.slots }, slotMarks: {} };
       const history = s0.messages
         .filter((m) => !m.pending && !m.error && m.content)
         .slice(-10)
@@ -1034,7 +1064,7 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
             }));
             break;
           case "ui_action":
-            get().applyUIAction(ev.action);
+            get().applyUIAction(ev.action, turn);
             break;
           case "message":
             patchMessage(asst.id, (m) => ({ ...m, content: ev.text }));
@@ -1119,7 +1149,8 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       // highlights the analyst applied are explained only by the conversation being cleared
       set((s) => ({ messages: [], highlight: s.highlight?.source === "ai" ? null : s.highlight }));
     },
-    applyUIAction: (a) => {
+    applyUIAction: (a, turn) => {
+      const t: AnalystTurn = turn ?? { simSeq, compareSeq, slots: { ...get().slots }, slotMarks: {} };
       switch (a.kind) {
         case "select_node":
           if (a.node_id) void get().selectNode(a.node_id, { fly: false });
@@ -1156,21 +1187,50 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
         case "show_simulation":
           if (a.result) {
             const r = a.result;
-            const slot = a.slot ?? "active";
+            const k = a.slot === "A" || a.slot === "B" ? a.slot : null;
+            // A run you started after asking is newer than this answer: it keeps the display (shown
+            // or still coming) and, for its slot, the slot.
+            const show = simSeq <= t.simSeq;
+            const fill = k !== null && !(slotSeq[k] > t.simSeq && slotSeq[k] !== t.slotMarks[k]);
+            if (!show && !fill) break;
+            if (show) {
+              // supersede every run still in flight (all started before the question)
+              t.simSeq = ++simSeq;
+              latestSimGuard = undefined;
+            }
+            if (k && fill) {
+              // older runs for this slot must not overwrite it when they land
+              slotSeq[k] = show ? simSeq : (t.slotMarks[k] = t.simSeq + 0.5);
+              t.slots[k] = r; // the answer's own write is not newer than its later comparisons
+            }
             set((s) => ({
-              result: r,
-              compareView: null,
-              // keep analyst highlights (this same turn may have just set one); user ones are stale
-              highlight: dropUserHighlight(s.highlight),
-              slots: slot === "A" ? { ...s.slots, A: r } : slot === "B" ? { ...s.slots, B: r } : s.slots,
-              playback: { step: 0, maxStep: maxStepOf(r), playing: true, runId: s.playback.runId + 1 },
+              ...(k && fill ? { slots: { ...s.slots, [k]: r } } : {}),
+              ...(show
+                ? {
+                    result: r,
+                    simStatus: s.simStatus === "running" ? ("idle" as const) : s.simStatus,
+                    compareView: null,
+                    // keep analyst highlights (this same turn may have just set one); user ones are stale
+                    highlight: dropUserHighlight(s.highlight),
+                    playback: { step: 0, maxStep: maxStepOf(r), playing: true, runId: s.playback.runId + 1 },
+                  }
+                : {}),
             }));
           }
           break;
         case "show_comparison":
           if (a.comparison) {
             const c = a.comparison;
-            set((s) => adoptComparison(s, c));
+            // A comparison you started after asking is newer than this answer: it is (or will be) shown.
+            if (compareSeq > t.compareSeq) break;
+            // Supersede comparisons still in flight (all started before the question).
+            t.compareSeq = ++compareSeq;
+            latestCompareGuard = undefined;
+            set((s) => ({
+              // slots changed since the analyst was given them belong to the newer write
+              ...adoptComparison(s, c, { A: newerSlot(t.slots.A, s.slots.A), B: newerSlot(t.slots.B, s.slots.B) }),
+              compareStatus: s.compareStatus === "running" ? ("idle" as const) : s.compareStatus,
+            }));
           }
           break;
       }

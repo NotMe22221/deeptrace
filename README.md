@@ -297,7 +297,10 @@ Every async step is cancellable: **Exit demo**, **Reset demo** and **Restore wor
 step, simulation, trace or analyst answer in flight, so a slow response can never re-apply
 state the presenter just cleared; exiting mid-reveal turns every layer back on. Steps can be
 reached in any order (step chips, ← →): a step that is about scenario A, such as the analyst
-question, puts A on screen first. A streaming analyst answer can be stopped at any time, and the
+question, puts A on screen first. Analyst answers are ordered by when the question was sent:
+a run or comparison started before asking never replaces what the answer shows, and the
+answer never replaces a run, slot or comparison started after asking (a comparison it computed
+from slots that have changed since shows "Slots changed since this comparison"). A streaming analyst answer can be stopped at any time, and the
 backend sends SSE heartbeats so a stalled connection is detected (90 s without data) rather
 than hanging.
 
