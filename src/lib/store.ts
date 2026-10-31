@@ -184,12 +184,21 @@ export interface DeeptraceState {
   toggleDraftEdge: (id: string) => void;
   clearDraft: () => void;
   loadPreset: (presetId: string) => void;
-  runSimulation: (scenario?: ScenarioInput, slot?: SimSlot) => Promise<SimulationResult | null>;
+  /** `opts.isCurrent`: the caller's guard (demo steps); once false, the response is dropped. */
+  runSimulation: (
+    scenario?: ScenarioInput,
+    slot?: SimSlot,
+    opts?: { isCurrent?: () => boolean },
+  ) => Promise<SimulationResult | null>;
   setPlaybackStep: (step: number) => void;
   setPlaying: (playing: boolean) => void;
   replayCascade: () => void;
   showSlot: (slot: "A" | "B") => void;
-  runComparison: (a?: ScenarioInput, b?: ScenarioInput) => Promise<ScenarioComparison | null>;
+  runComparison: (
+    a?: ScenarioInput,
+    b?: ScenarioInput,
+    opts?: { isCurrent?: () => boolean },
+  ) => Promise<ScenarioComparison | null>;
   setCompareView: (v: "A" | "B" | "diff" | null) => void;
   clearSimulation: () => void;
   restoreWorld: () => void;
@@ -306,6 +315,13 @@ function localTrace(index: NetworkIndex, nodeId: string): TraceResult & { neighb
 /** An engine request that never reached the engine (network failure / timeout, no HTTP status). */
 const engineUnreachable = (e: unknown) => e instanceof ApiError && e.status === undefined;
 
+/**
+ * Results answered from the offline snapshot, by identity. A result's "precomputed" label follows
+ * where it came from, not the current dataMode, which a mid-session failover or recovery can flip.
+ */
+const snapshotResults = new WeakSet<SimulationResult>();
+export const isSnapshotResult = (r: SimulationResult) => snapshotResults.has(r);
+
 // ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
@@ -316,21 +332,52 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
   // response when the token moved on, so a slow response can never resurrect state that a
   // newer action (or Restore world / Reset demo) already replaced.
   // -------------------------------------------------------------------------
-  /** Bumped by restoreWorld / clearSimulation: in-flight simulate/compare results are dropped. */
+  /**
+   * Bumped by restoreWorld / clearSimulation: in-flight simulate/compare results are dropped.
+   * (A demo step's own runs are dropped by its guard when the step is superseded or exited.)
+   */
   let simEpoch = 0;
   /** Latest simulation request; only it may set the displayed `result` and `simStatus`. */
   let simSeq = 0;
   /** Latest request per slot, so an older run cannot overwrite a newer run's slot. */
   const slotSeq: Record<"A" | "B", number> = { A: 0, B: 0 };
   let compareSeq = 0;
+  /**
+   * The caller's guard of the latest simulation / comparison (demo steps pass theirs). A run whose
+   * guard turned false is dropped when it lands; settleCancelledRuns clears its spinner right away.
+   */
+  let latestSimGuard: (() => boolean) | undefined;
+  let latestCompareGuard: (() => boolean) | undefined;
   /** Bumped by every showTrace / hideTrace / deselect / restore. */
   let traceSeq = 0;
   /** Bumped by every demoGoto and by start/reset/exit/restore: a superseded step stops at its next await. */
   let demoRun = 0;
+  /** Layers the running reveal_layers demo step switched off and has not switched back on yet. */
+  let pendingReveal: LayerKey[] = [];
   /** The analyst request currently streaming. */
   let analystCtrl: AbortController | null = null;
   /** Polls /api/health after a mid-session failover so the app returns to live mode when the engine is back. */
   let recoveryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Turns the layers an interrupted reveal_layers step had not revealed yet back on (synchronously). */
+  const finishPendingReveal = () => {
+    if (!pendingReveal.length) return;
+    const keys = pendingReveal;
+    pendingReveal = [];
+    set((s) => {
+      const layers = { ...s.layers };
+      for (const k of keys) layers[k] = true;
+      return { layers };
+    });
+  };
+
+  /** A demo step was superseded or exited: its simulate / compare requests no longer show a spinner. */
+  const settleCancelledRuns = () =>
+    set((s) => ({
+      simStatus: s.simStatus === "running" && latestSimGuard && !latestSimGuard() ? "idle" : s.simStatus,
+      compareStatus:
+        s.compareStatus === "running" && latestCompareGuard && !latestCompareGuard() ? "idle" : s.compareStatus,
+    }));
 
   const scheduleRecovery = () => {
     if (recoveryTimer) return;
@@ -376,7 +423,10 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
     const snapshot = get().snapshot;
     if (snapshot) {
       const r = snapshotSimulate(snapshot, scenario);
-      if (r) return r;
+      if (r) {
+        snapshotResults.add(r);
+        return r;
+      }
     }
     throw new ApiError(
       "This scenario was not precomputed in the offline snapshot. Start the DEEPTRACE engine (backend) to run arbitrary scenarios.",
@@ -394,7 +444,11 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
     const snapshot = get().snapshot;
     if (snapshot) {
       const c = snapshotCompare(snapshot, a, b);
-      if (c) return c;
+      if (c) {
+        snapshotResults.add(c.scenario_a);
+        snapshotResults.add(c.scenario_b);
+        return c;
+      }
     }
     throw new ApiError("This comparison was not precomputed in the offline snapshot. Start the backend engine.");
   }
@@ -472,13 +526,34 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
   /**
    * State for a new comparison. Slot objects the UI already holds are kept when they are the
    * compared scenarios, and `result` follows its slot, so the displayed result stays identifiable
-   * as A or B (the A/B chips compare by identity).
+   * as A or B (the A/B chips compare by identity). A slot in `keep` was re-run after Compare was
+   * clicked: it belongs to that newer run and is kept as it is (the comparison panel then shows
+   * "Slots changed since this comparison" instead of the older run coming back).
    */
-  function adoptComparison(s: DeeptraceState, c: ScenarioComparison): Partial<DeeptraceState> {
-    const A = s.slots.A && sameScenario(s.slots.A.scenario, c.scenario_a.scenario) ? s.slots.A : c.scenario_a;
-    const B = s.slots.B && sameScenario(s.slots.B.scenario, c.scenario_b.scenario) ? s.slots.B : c.scenario_b;
+  function adoptComparison(
+    s: DeeptraceState,
+    c: ScenarioComparison,
+    keep: { A: boolean; B: boolean } = { A: false, B: false },
+  ): Partial<DeeptraceState> {
+    const A = keep.A || (s.slots.A && sameScenario(s.slots.A.scenario, c.scenario_a.scenario)) ? s.slots.A : c.scenario_a;
+    const B = keep.B || (s.slots.B && sameScenario(s.slots.B.scenario, c.scenario_b.scenario)) ? s.slots.B : c.scenario_b;
     const result = s.result && s.result === s.slots.A ? A : s.result && s.result === s.slots.B ? B : s.result;
-    return { comparison: c, compareView: "diff", slots: { A, B }, result, panels: { ...s.panels, comparison: true } };
+    const moved = result !== s.result && result !== null;
+    return {
+      comparison: c,
+      // don't swap the map from a newer run to the diff of an older comparison
+      compareView: keep.A || keep.B ? s.compareView : "diff",
+      slots: { A, B },
+      result,
+      panels: { ...s.panels, comparison: true },
+      ...(moved
+        ? {
+            // the displayed result changed: its playback range and any user highlight are stale
+            highlight: dropUserHighlight(s.highlight),
+            playback: { step: maxStepOf(result), maxStep: maxStepOf(result), playing: false, runId: s.playback.runId + 1 },
+          }
+        : {}),
+    };
   }
 
   /** Resolves once `pred()` holds (re-checked on every store update). */
@@ -719,19 +794,30 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       const p = get().presets.find((x) => x.id === presetId);
       if (p) set({ draft: { ...p.scenario } });
     },
-    runSimulation: async (scenario, slot = "active") => {
+    runSimulation: async (scenario, slot = "active", opts) => {
       const input = scenario ?? get().draft;
       if (!input.failed_nodes.length && !input.failed_edges.length) {
         set({ simError: "Select at least one component or connection to fail.", simStatus: "error" });
         return null;
       }
+      const isCurrent = opts?.isCurrent;
       const epoch = simEpoch;
       const seq = ++simSeq;
+      latestSimGuard = isCurrent;
       if (slot === "A" || slot === "B") slotSeq[slot] = seq;
       set({ simStatus: "running", simError: null });
+      /** The world was restored / cleared, or the caller (a demo step) was superseded or exited. */
+      const cancelled = () => {
+        if (epoch !== simEpoch) return true;
+        if (isCurrent && !isCurrent()) {
+          if (seq === simSeq && get().simStatus === "running") set({ simStatus: "idle" });
+          return true;
+        }
+        return false;
+      };
       try {
         const result = await simulate(input);
-        if (epoch !== simEpoch) return null; // the world was restored / cleared while this ran
+        if (cancelled()) return null;
         const latest = seq === simSeq; // only the newest run may change what is displayed
         const ownsSlot = (slot === "A" || slot === "B") && slotSeq[slot] === seq;
         if (!latest && !ownsSlot) return null;
@@ -751,8 +837,15 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
         }));
         return result;
       } catch (e) {
-        if (epoch !== simEpoch || seq !== simSeq) return null;
-        set({ simStatus: "error", simError: (e as Error).message });
+        if (cancelled()) return null;
+        const message = (e as Error).message;
+        if (seq === simSeq) {
+          set({ simStatus: "error", simError: message });
+        } else if ((slot === "A" || slot === "B") && slotSeq[slot] === seq) {
+          // A newer run owns simStatus / result, but this slot was not filled: say so, so a later
+          // Compare is not silently run against the slot's previous scenario.
+          set({ simError: `Scenario ${slot} failed: ${message}` });
+        }
         return null;
       }
     },
@@ -771,23 +864,37 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
         playback: { step: maxStepOf(r), maxStep: maxStepOf(r), playing: false, runId: s.playback.runId + 1 },
       }));
     },
-    runComparison: async (a, b) => {
+    runComparison: async (a, b, opts) => {
       const A = a ?? get().slots.A?.scenario;
       const B = b ?? get().slots.B?.scenario;
       if (!A || !B) {
         set({ simError: "Run two scenarios (A and B) before comparing.", compareStatus: "error" });
         return null;
       }
+      const isCurrent = opts?.isCurrent;
       const epoch = simEpoch;
       const seq = ++compareSeq;
+      latestCompareGuard = isCurrent;
+      // a slot re-run while this comparison is in flight belongs to that newer run
+      const seqA = slotSeq.A;
+      const seqB = slotSeq.B;
       set({ compareStatus: "running", simError: null });
+      const stale = () => {
+        if (seq !== compareSeq) return true; // a newer comparison owns compareStatus
+        if (epoch !== simEpoch || (isCurrent && !isCurrent())) {
+          if (get().compareStatus === "running") set({ compareStatus: "idle" });
+          return true;
+        }
+        return false;
+      };
       try {
         const comparison = await compare(A, B);
-        if (epoch !== simEpoch || seq !== compareSeq) return null;
-        set((s) => ({ ...adoptComparison(s, comparison), compareStatus: "idle" }));
+        if (stale()) return null;
+        const keep = { A: slotSeq.A !== seqA, B: slotSeq.B !== seqB };
+        set((s) => ({ ...adoptComparison(s, comparison, keep), compareStatus: "idle" }));
         return comparison;
       } catch (e) {
-        if (epoch !== simEpoch || seq !== compareSeq) return null;
+        if (stale()) return null;
         set({ compareStatus: "error", simError: (e as Error).message });
         return null;
       }
@@ -806,10 +913,11 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       } else set({ compareView: v });
     },
     clearSimulation: () => {
-      simEpoch++;
+      simEpoch++; // in-flight simulations and comparisons are dropped when they land
       set((s) => ({
         result: null,
         simStatus: "idle",
+        compareStatus: "idle",
         simError: null,
         compareView: null,
         playback: { step: 0, maxStep: 0, playing: false, runId: s.playback.runId + 1 },
@@ -820,6 +928,7 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       simEpoch++;
       traceSeq++;
       demoRun++;
+      pendingReveal = []; // layers are reset to their defaults below
       cancelAnalyst("Stopped: the world was restored.");
       set((s) => ({
         result: null,
@@ -912,6 +1021,15 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       const replay = async (events: AnalystEvent[]) => {
         for (const ev of events) {
           if (stale()) return;
+          if (ev.type === "ui_action") {
+            // recorded answers carry precomputed engine outputs
+            const a = ev.action;
+            if (a.kind === "show_simulation" && a.result) snapshotResults.add(a.result);
+            if (a.kind === "show_comparison" && a.comparison) {
+              snapshotResults.add(a.comparison.scenario_a);
+              snapshotResults.add(a.comparison.scenario_b);
+            }
+          }
           onEvent(ev);
           if (ev.type === "tool_result") await sleep(220);
         }
@@ -1025,7 +1143,9 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       void get().demoGoto(0);
     },
     exitDemo: () => {
-      demoRun++; // the step that is running stops at its next await
+      demoRun++; // the running step stops at its next await, and its simulate / compare is dropped
+      finishPendingReveal();
+      settleCancelledRuns();
       set({ demo: { active: false, step: 0, busy: false } });
     },
     resetDemo: () => get().startDemo(),
@@ -1035,6 +1155,10 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       const run = ++demoRun;
       /** False once another step started or the demo was exited / reset / restored. */
       const current = () => run === demoRun;
+      // the step being replaced is cancelled: finish its layer reveal, clear its spinners
+      finishPendingReveal();
+      settleCancelledRuns();
+      const guard = { isCurrent: current };
       const i = Math.max(0, Math.min(stepIndex, script.steps.length - 1));
       const step = script.steps[i];
       set({ demo: { active: true, step: i, busy: true } });
@@ -1054,11 +1178,13 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
             break;
           case "reveal_layers": {
             if (!get().deepMode) get().setDeepMode(true, { fly: true });
-            get().setAllLayers(false);
             const order: LayerKey[] = ["underground", "water", "power", "telecom", "transport", "facility"];
+            get().setAllLayers(false);
+            pendingReveal = [...order];
             for (const k of order) {
               await sleep(550);
-              if (!current()) return;
+              if (!current()) return; // exit / the next step already turned pendingReveal back on
+              pendingReveal = pendingReveal.filter((x) => x !== k);
               get().setLayer(k, true);
             }
             break;
@@ -1077,12 +1203,17 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
             if (presetA) {
               set({ draft: { ...presetA.scenario } });
               const existing = get().slots.A;
-              if (step.action === "cascade" && existing) {
-                set({ result: existing, compareView: null });
-                get().replayCascade();
+              if (step.action === "cascade" && existing && sameScenario(existing.scenario, presetA.scenario)) {
+                // replay scenario A's cascade from the start (playback follows the result shown)
+                set((s) => ({
+                  result: existing,
+                  compareView: null,
+                  highlight: existing === s.result ? s.highlight : dropUserHighlight(s.highlight),
+                  playback: { step: 0, maxStep: maxStepOf(existing), playing: true, runId: s.playback.runId + 1 },
+                }));
               } else {
                 get().hideTrace();
-                await get().runSimulation(presetA.scenario, "A");
+                await get().runSimulation(presetA.scenario, "A", guard);
                 if (!current()) return;
               }
               const r = get().result;
@@ -1095,6 +1226,18 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
           case "ask_ai": {
             set((s) => ({ panels: { ...s.panels, analyst: true } }));
             if (!step.question) break;
+            // The scripted question is about scenario A (and the offline replay was recorded for A
+            // only). Reached by Prev (after simulate_b) or a step chip, put A on screen first.
+            const shown = get().result;
+            if (presetA && !(shown && sameScenario(shown.scenario, presetA.scenario))) {
+              const existing = get().slots.A;
+              if (existing && sameScenario(existing.scenario, presetA.scenario)) get().showSlot("A");
+              else {
+                get().hideTrace();
+                await get().runSimulation(presetA.scenario, "A", guard);
+                if (!current()) return;
+              }
+            }
             // sendAnalystMessage ignores calls while another answer is streaming: wait for it
             // instead of silently skipping the scripted question.
             await waitUntil(() => !get().analystPending || !current());
@@ -1105,18 +1248,18 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
           case "simulate_b":
             if (presetB) {
               set({ draft: { ...presetB.scenario } });
-              await get().runSimulation(presetB.scenario, "B");
+              await get().runSimulation(presetB.scenario, "B", guard);
               if (!current()) return;
               const r = get().result;
               if (r) world().flyToNodes(r.affected_nodes.map((a) => a.node_id));
             }
             break;
           case "compare":
-            if (!get().slots.A && presetA) await get().runSimulation(presetA.scenario, "A");
+            if (!get().slots.A && presetA) await get().runSimulation(presetA.scenario, "A", guard);
             if (!current()) return;
-            if (!get().slots.B && presetB) await get().runSimulation(presetB.scenario, "B");
+            if (!get().slots.B && presetB) await get().runSimulation(presetB.scenario, "B", guard);
             if (!current()) return;
-            await get().runComparison();
+            await get().runComparison(undefined, undefined, guard);
             break;
         }
       } finally {

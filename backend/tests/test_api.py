@@ -227,6 +227,72 @@ def test_sse_sends_heartbeats_while_the_analyst_is_silent() -> None:
     assert "model exploded" in text and '"type": "done"' in text
 
 
+def test_sse_coalesces_answer_snapshots_for_a_reader_that_stops_reading() -> None:
+    """A stalled client must not make the server queue every cumulative `message` snapshot."""
+    import asyncio
+
+    from app.api.routes import _sse
+
+    produced: list[int] = []
+    closed_in: list[object] = []
+
+    async def answer():
+        try:
+            yield {"type": "status", "mode": "llm"}
+            for i in range(1, 41):
+                produced.append(i)
+                yield {"type": "message", "text": "x" * i}
+                if i == 20:
+                    yield {"type": "tool_call", "id": "t1", "name": "simulate", "input": {}}
+                await asyncio.sleep(0.002)
+            yield {"type": "done", "tool_calls": 1, "mode": "llm"}
+        finally:
+            closed_in.append(asyncio.current_task())
+
+    async def run():
+        gen = _sse(answer(), heartbeat_s=5)
+        first = await gen.__anext__()  # the client reads one event, then stops reading
+        await asyncio.sleep(0.3)  # the producer finishes meanwhile
+        assert produced[-1] == 40
+        rest = [chunk async for chunk in gen]
+        await gen.aclose()
+        return [first, *rest]
+
+    events = [json.loads(c[5:]) for c in asyncio.run(run()) if c.startswith(b"data:")]
+    kinds = [e["type"] for e in events]
+    # order is kept, the latest snapshot is delivered, and at most one snapshot per gap was held
+    assert kinds == ["status", "message", "tool_call", "message", "done"], kinds
+    assert events[-2]["text"] == "x" * 40
+    assert len(closed_in) == 1
+
+
+def test_sse_closes_the_generator_in_its_own_task_when_the_client_leaves() -> None:
+    import asyncio
+
+    from app.api.routes import _sse
+
+    state: dict[str, object] = {}
+
+    async def answer():
+        state["task"] = asyncio.current_task()
+        try:
+            while True:
+                yield {"type": "message", "text": "partial"}
+                await asyncio.sleep(0.01)
+        finally:
+            state["closed_in"] = asyncio.current_task()
+
+    async def run():
+        gen = _sse(answer(), heartbeat_s=5)
+        await gen.__anext__()
+        await asyncio.sleep(0.05)
+        await gen.aclose()  # client disconnected
+        await asyncio.sleep(0.05)
+
+    asyncio.run(run())
+    assert state.get("closed_in") is state["task"]
+
+
 def test_spof_set_matches_node_details() -> None:
     from app.simulation import get_engine
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import threading
 from collections.abc import AsyncIterator, Callable
@@ -165,32 +166,54 @@ def _sse_data(ev: dict[str, Any]) -> bytes:
     return f"data: {json.dumps(ev, ensure_ascii=False, default=str)}\n\n".encode()
 
 
+def _is_snapshot(item: Any) -> bool:
+    """`message` events carry the whole answer so far (each one replaces the previous one)."""
+    return isinstance(item, dict) and item.get("type") == "message"
+
+
 async def _sse(events: AsyncIterator[dict[str, Any]], heartbeat_s: float = SSE_HEARTBEAT_S) -> AsyncIterator[bytes]:
     """Serialise analyst events as SSE, with a `: ping` comment whenever nothing was sent for
     `heartbeat_s` (e.g. while the model is thinking) so clients and proxies can tell a slow answer
-    from a stalled connection. The event generator runs in a single pump task, so async context
-    managers inside it (the Anthropic stream) are entered and exited in the same task."""
-    queue: asyncio.Queue[Any] = asyncio.Queue()
+    from a stalled connection.
+
+    The event generator runs in a single pump task, so async context managers inside it (the
+    Anthropic stream) are entered and exited in the same task. The pump awaits nothing but the
+    generator, so a cancel (client gone) always lands inside it and closes it there. A `message`
+    snapshot the client has not taken yet is replaced by the next one instead of queued, so a client
+    that stops reading costs one snapshot of memory (plus the tool events, bounded by the tool
+    rounds), not every snapshot of the run."""
+    pending: collections.deque[Any] = collections.deque()
+    ready = asyncio.Event()
+
+    def push(item: Any) -> None:
+        if _is_snapshot(item) and pending and _is_snapshot(pending[-1]):
+            pending[-1] = item
+        else:
+            pending.append(item)
+        ready.set()
 
     async def pump() -> None:
         try:
             async for ev in events:
-                queue.put_nowait(ev)
+                push(ev)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — surfaced to the client below
-            queue.put_nowait(exc)
+            push(exc)
         finally:
-            queue.put_nowait(_STREAM_END)
+            push(_STREAM_END)
 
     task = asyncio.create_task(pump())
     try:
         while True:
-            try:
-                item = await asyncio.wait_for(queue.get(), timeout=heartbeat_s)
-            except asyncio.TimeoutError:
-                yield b": ping\n\n"
-                continue
+            if not pending:
+                ready.clear()
+                try:
+                    await asyncio.wait_for(ready.wait(), timeout=heartbeat_s)
+                except asyncio.TimeoutError:
+                    yield b": ping\n\n"
+                    continue
+            item = pending.popleft()
             if item is _STREAM_END:
                 break
             if isinstance(item, Exception):
