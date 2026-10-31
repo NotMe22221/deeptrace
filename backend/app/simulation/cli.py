@@ -17,6 +17,8 @@ import json
 import sys
 import time
 
+from pydantic import ValidationError
+
 from app.models.schemas import ScenarioInput, SimulationResult
 
 
@@ -125,7 +127,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.rounds is not None:
             upd["max_cascade_rounds"] = args.rounds
         if upd:
-            sc = sc.model_copy(update=upd)
+            try:  # validate overrides with the same rules as the API (model_copy would skip them)
+                sc = ScenarioInput.model_validate({**sc.model_dump(), **upd})
+            except ValidationError as exc:
+                print(f"invalid scenario override: {exc}", file=sys.stderr)
+                return 2
         r = engine.simulate(sc)
         if args.json:
             print(r.model_dump_json(indent=1))

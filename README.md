@@ -17,6 +17,12 @@ mitigations.
 > and the simulation is a simplified, explainable model, not a validated engineering
 > prediction.
 
+**At a glance (Atlanta demo region):**
+
+- **Network:** 350 nodes and 649 connections across power, water, internet, transport, underground corridors and 12 critical facilities, with 204 cross-system dependencies.
+- **Scenarios:** 6 deterministic preset scenarios, including a genuine overload-trip cascade.
+- **Engine speed:** a typical scenario simulates in 2–20 ms, and the full N-1 criticality ranking takes about 2 s.
+
 ---
 
 ## 1. The problem
@@ -125,9 +131,27 @@ make snapshot         # refresh the offline snapshot
 
 ### Changing the region
 
-Create `backend/datasets/regions/<id>/region.json` (bbox, centre, default camera, ground
-elevation), add `landmarks.json` / `streets.json` (or run the OSM ingestion), run
-`python -m app.networks.generate --region <id>` and set `DEEPTRACE_REGION=<id>`.
+Each region is one folder `backend/datasets/regions/<id>/`:
+
+| File | Contents |
+|---|---|
+| `region.json` | id, name, city, bbox `(south, west, north, east)`, centre `(lat, lon)`, `default_camera`, `ground_elevation_m`, timezone |
+| `streets.json` | authored street centrelines (`[lon, lat]` coords, class, lanes, oneway, speed) with per-feature provenance. Optional when building with `--use-osm` |
+| `landmarks.json` | real named places (`kind`, `lat`/`lon`, an `osm_match` spec, provenance) and rail lines (station order, approximate alignment, depths) |
+| `design.json` | the **simulated** infrastructure design: substations, lines (primary/alternate), feeders and ties; water sources, pump, tank, pipes with valves, zones; telecom cores, hubs, links, sites; corridors; facility profiles; dependency overrides; scenarios and the demo script. Anchors are written as street intersections (`"at": "Street A & Street B"`), so the same design works on OSM roads |
+
+Then:
+
+```bash
+export DEEPTRACE_REGION=<id>                                  # or pass --region <id>
+cd backend
+.venv/bin/python -m app.ingest.overpass --region <id>         # optional: cache OSM (needs network access)
+.venv/bin/python -m app.networks.generate --region <id> [--use-osm]   # writes network/scenarios/demo + public mirror; exits 1 if a sanity check fails
+.venv/bin/python -m app.scripts.export_snapshot               # refresh the offline snapshot
+```
+
+`backend/app/networks/checks.py` validates any region (ids, geometry, provenance rules);
+`backend/tests/test_dataset.py` contains Atlanta-specific expectations.
 
 ## 5. Simulation methodology
 
@@ -171,11 +195,29 @@ Every affected element records the round in which it was first affected, a sever
 cause in plain language and the ids that caused it.
 
 **Metrics**: the result reports unserved MW and L/s, disconnected endpoints, change in
-travel time, closed stations, affected critical facilities, modelled population, a
-redundancy score (the share of initially lost demand recovered by alternative paths) and a
-composite **severity index (0–100)**. The severity formula is documented in
-`backend/app/simulation/` and returned in every result's `assumptions`. **N-1
-criticality** fails every component on its own and ranks the components by severity.
+travel time, closed stations, affected critical facilities, modelled population and a
+**redundancy score**. The redundancy score is the share of initially cut demand that
+meshing, tie switching, rerouting, storage or detours recover; demand of directly failed
+elements counts as lost. The composite **severity index (0–100)** is:
+
+```
+severity = 100 × ( 0.20·√x_power + 0.15·√x_water + 0.15·√x_telecom
+                 + 0.15·√x_transport + 0.25·√x_facilities + 0.10·√x_population )
+```
+
+| Term | Definition |
+|---|---|
+| `x_power` | unserved MW / baseline MW |
+| `x_water` | unserved L/s / baseline L/s |
+| `x_telecom` | (endpoints without service + 0.3 × congested endpoints) / endpoints |
+| `x_transport` | min(1, travel-time increase / 100 + share of unreachable O-D pairs + 0.5 × share of closed stations) |
+| `x_facilities` | Σ impact / critical facilities, where impact is 1 for outage or inaccessible, 0.5 for degraded and 0.25 for on backup or delayed |
+| `x_population` | affected / modelled population |
+
+Every share is clipped to [0, 1]. The square roots make the first losses count; the weights
+sum to 1. The formula is in `backend/app/simulation/report.py` and is restated in every
+result's `assumptions`. **N-1 criticality** fails every component on its own and ranks the
+components by severity.
 
 **Determinism**: there is no randomness. The scenario id is a hash of the scenario
 inputs, and identical inputs give identical outputs, apart from the timestamp and
@@ -210,15 +252,25 @@ npx next dev -p 3000
 |---|---|
 | `NEXT_PUBLIC_CESIUM_ION_TOKEN` | Dark CARTO basemap, full network, simulation and analyst; no streamed 3D buildings or terrain (a notice explains how to enable them) |
 | `ANTHROPIC_API_KEY` | The deterministic offline analyst (labelled) |
-| The backend | Offline snapshot mode: the network, presets, demo scenarios, comparison and single-component failures precomputed by the engine (labelled OFFLINE SNAPSHOT) |
+| The backend | Offline snapshot mode from the committed `public/demo/snapshot.json`: the network, all presets, the demo comparison, traces, single failures of major assets and the recorded demo answer, all precomputed by the engine (labelled OFFLINE SNAPSHOT). Regenerate it with `make snapshot` after changing data or engine. |
 
-Tests: `make test` (pytest suite + TypeScript typecheck). API docs: http://localhost:8000/docs.
+**Tests**: `make test` runs the pytest suite (engine, cascades, metrics, dataset checks,
+ingestion with mocked HTTP, API, analyst loop with a fake Claude client) and the
+TypeScript typecheck. The end-to-end demo check (needs Playwright and both servers)
+plays all ten demo steps headlessly, screenshots each one and fails on page errors:
+
+```bash
+node scripts/e2e-demo.cjs --out e2e-shots            # live backend
+node scripts/e2e-demo.cjs --out e2e-shots --offline  # backend blocked → snapshot fallback
+```
+
+API docs: http://localhost:8000/docs.
 
 ### Deployment
 
 * **Frontend**: `npm run build && npm start` (or any Next.js host). Set `NEXT_PUBLIC_*` variables at build time and restrict the Cesium token to your domain.
 * **Backend**: `uvicorn app.main:app --host 0.0.0.0 --port 8000` behind HTTPS. Set `DEEPTRACE_CORS_ORIGINS` to the frontend origin and keep `ANTHROPIC_API_KEY` server-side only.
-* **Static-only demo**: the frontend alone serves the offline snapshot (`make snapshot` before building).
+* **Static-only demo**: the frontend alone serves the committed offline snapshot (re-run `make snapshot` before building if data or engine changed).
 
 ## 8. Reproducing the demo
 

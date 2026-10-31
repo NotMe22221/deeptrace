@@ -54,7 +54,7 @@ function ScenarioHeader({ slot, r, index }: { slot: "A" | "B"; r: SimulationResu
         >
           {Math.round(r.impact_metrics.severity_index)}
         </span>
-        <span className="text-[10px] text-ink-400">severity · {r.affected_nodes.length} affected</span>
+        <span className="text-[10px] text-ink-400">severity · {r.impact_metrics.total_nodes_affected} affected</span>
       </div>
     </div>
   );

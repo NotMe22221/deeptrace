@@ -377,7 +377,7 @@ function DraftBuilder() {
       </div>
       {dataMode === "snapshot" && (
         <p className="mt-1.5 text-[10px] leading-snug text-ink-400">
-          Offline snapshot: presets and single-component failures (4 h, restoration on) are precomputed.
+          Offline snapshot: presets and single failures of major assets (substations, vaults, water sources, pumps, tanks, telecom cores and hubs, stations, gateways, utility vaults; 4 h, restoration on) are precomputed. Other components and connection failures need the live engine.
         </p>
       )}
       <div className="mt-2.5 flex items-center gap-1">

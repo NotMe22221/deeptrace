@@ -54,7 +54,8 @@ def test_compare(mini_engine: SimulationEngine) -> None:
     cmp = mini_engine.compare(a, b)
     keys = [m.key for m in cmp.metrics]
     assert keys[0] == "severity_index" and "redundancy_score" in keys and "alternative_paths" in keys
-    assert next(m for m in cmp.metrics if m.key == "alternative_paths").higher_is_worse is False
+    # forced restoration / reroute actions grow with the disruption
+    assert next(m for m in cmp.metrics if m.key == "alternative_paths").higher_is_worse is True
     sev = cmp.metrics[0]
     assert sev.a > sev.b and sev.worse == "a" and sev.delta == round(sev.b - sev.a, 4)
     red = next(m for m in cmp.metrics if m.key == "redundancy_score")

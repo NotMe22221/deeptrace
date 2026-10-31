@@ -218,16 +218,20 @@ class TelecomModel:
                 continue
             if n in disconnected:
                 br = broken_at.get(n)
-                why = f"; its primary route was broken where {broken_text(br)}" if br else ""
                 if br and not inp.reroute and n in paths:
-                    why += " and automatic rerouting is disabled for this scenario"
-                node_out[n] = NodeOutcome(
-                    "disconnected",
-                    f"{g.label(n)} disconnected: no operational fibre path to any core "
-                    f"(internet exchange / data centre){why}.",
-                    (br,) if br else (),
-                    0.0,
-                )
+                    # a path exists, but rerouting is switched off for this scenario
+                    cause = (
+                        f"{g.label(n)} disconnected: its primary route was broken where {broken_text(br)}; an "
+                        f"alternative fibre path to {g.label(paths[n][0])} exists but automatic rerouting is "
+                        f"disabled for this scenario."
+                    )
+                else:
+                    why = f"; its primary route was broken where {broken_text(br)}" if br else ""
+                    cause = (
+                        f"{g.label(n)} disconnected: no operational fibre path to any core "
+                        f"(internet exchange / data centre){why}."
+                    )
+                node_out[n] = NodeOutcome("disconnected", cause, (br,) if br else (), 0.0)
                 continue
             out: NodeOutcome | None = None
             if n in inp.backup:
@@ -315,7 +319,12 @@ class TelecomModel:
                     "interrupted", f"No service: endpoint {g.label(bad[0])} out of service ({why})"
                 )
             elif u in disconnected and v in disconnected:
-                edge_out[e] = EdgeOutcome("interrupted", "No service: fibre section cut off from every core")
+                if u in paths or v in paths:  # only when rerouting is disabled
+                    edge_out[e] = EdgeOutcome(
+                        "interrupted", "No service: primary routes broken and automatic rerouting disabled"
+                    )
+                else:
+                    edge_out[e] = EdgeOutcome("interrupted", "No service: fibre section cut off from every core")
             elif e in overloaded:
                 edge_out[e] = EdgeOutcome(
                     "overloaded", f"Carries {fmt_num(load[e], 2)} Gbps = {overloaded[e] * 100:.0f}% of capacity"
@@ -325,7 +334,9 @@ class TelecomModel:
 
         connected = frozenset(n for n in routes if n not in removed)
         ep_connected = sum(1 for n in self.endpoints if n in connected)
-        initially_lost = sum(1 for n in self.endpoints if n in broken_at)
+        # endpoints whose route broke, plus endpoints taken out themselves (failed or without power)
+        direct = sum(1 for n in self.endpoints if n in removed and base is not None and n in base.routes)
+        initially_lost = sum(1 for n in self.endpoints if n in broken_at) + direct
         recovered = sum(1 for n in self.endpoints if n in broken_at and n in connected)
         alternatives.sort(key=lambda a: a.id)
         return TelecomResult(

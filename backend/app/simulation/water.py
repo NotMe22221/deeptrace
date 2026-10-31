@@ -751,6 +751,7 @@ class WaterModel:
         bad_set = set(removed_n) | set(removed_e) | set(unpowered)
         for z in self.zones:
             if z in fn:
+                initially_lost += self.demand[z]  # failed zone: its demand is cut and cannot be recovered
                 continue
             elems = prim.get(z, set())
             up = set(self.base_up.get(z, [])) if hasattr(self, "base_up") else set()

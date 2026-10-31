@@ -48,9 +48,11 @@ METRICS: list[tuple[str, str, str, Callable[[SimulationResult], float], bool]] =
         True,
     ),
     ("redundancy_score", "Redundancy score", "share", lambda r: r.impact_metrics.redundancy_score, False),
-    # restoration / reroute / detour options exercised: a resilience measure, like redundancy
-    ("alternative_paths", "Alternative paths available", "paths", lambda r: len(r.alternative_paths), False),
+    # tie closures, fibre reroutes, detours and valve options the scenario forced: grows with the
+    # disruption (0 at baseline). Shown for context only, never cited as a reason in the verdict.
+    ("alternative_paths", "Restoration / reroute actions", "paths", lambda r: len(r.alternative_paths), True),
 ]
+INFORMATIONAL = frozenset({"alternative_paths"})
 
 
 def _fmt(v: float, unit: str) -> str:
@@ -115,9 +117,11 @@ def compare_results(a: SimulationResult, b: SimulationResult) -> ScenarioCompari
         reasons: list[str] = [f"severity {max(sev.a, sev.b):.1f} vs {min(sev.a, sev.b):.1f}/100"]
         ranked = []
         for m in metrics:
-            if m.key == "severity_index" or m.worse != w:
+            if m.key == "severity_index" or m.key in INFORMATIONAL or m.worse != w:
                 continue
             hi, lo = (m.a, m.b) if w == "a" else (m.b, m.a)
+            if _fmt(hi, m.unit) == _fmt(lo, m.unit):
+                continue  # difference below display precision: citing it would read "X vs X"
             rel = abs(hi - lo) / max(abs(hi), abs(lo), 1e-9)
             ranked.append((rel, m.key, m, hi, lo))
         ranked.sort(key=lambda x: (-x[0], x[1]))
@@ -134,7 +138,8 @@ def compare_results(a: SimulationResult, b: SimulationResult) -> ScenarioCompari
         f"A = {name_a} ({failed(a)}, severity {sev.a:.1f}); "
         f"B = {name_b} ({failed(b)}, severity {sev.b:.1f}). "
         f"{len(both)} affected nodes are common to both, {len(only_a)} only in A and {len(only_b)} only in B. "
-        f"Redundancy recovered {red.a * 100:.0f}% of the cut service in A and {red.b * 100:.0f}% in B. {verdict}"
+        f"Redundancy score {red.a * 100:.0f}% (A) vs {red.b * 100:.0f}% (B) — share of initially cut service "
+        f"recovered; 100% also when nothing was cut. {verdict}"
     )
     return ScenarioComparison(
         scenario_a=a,

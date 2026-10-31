@@ -13,7 +13,8 @@ Round structure
   cross-system propagation, and so on. Substations loaded above the 120 % emergency
   limit trip and are failed in the next round (true cascading).
 * The loop stops when neither conditions nor trips change, or after
-  ``scenario.max_cascade_rounds`` rounds (the result then says it was truncated).
+  ``scenario.max_cascade_rounds`` rounds. The result says it was truncated only when a
+  further round would still change some node or edge outcome.
 
 Dependency rule
 ---------------
@@ -179,12 +180,15 @@ class CascadeEngine:
         first_round: dict[str, int] = {n: 0 for n in failed_n}
         edge_first: dict[str, int] = {e: 0 for e in failed_e}
         prev_nodes: dict[str, tuple[str, bool]] = {n: (o.state, o.info) for n, o in view.nodes.items()}
-        prev_edges: dict[str, str] = {e: o.state for e, o in view.edges.items()}
+        # compare against the nominal state: idle normally-open ties / boundary valves are not changes
+        base_edges = {e: o.state for e, o in self.baseline.view.edges.items()} if self.baseline is not None else {}
+        prev_edges: dict[str, str] = dict(base_edges)
+        prev_edges.update({e: o.state for e, o in view.edges.items()})
         rounds: list[RoundRecord] = [
             RoundRecord(
                 0,
                 {n: ("operational", "failed", False) for n in sorted(failed_n)},
-                {e: ("operational", "failed") for e in sorted(failed_e)},
+                {e: (base_edges.get(e, "operational"), "failed") for e in sorted(failed_e)},
                 [],
                 [],
             )
@@ -234,7 +238,12 @@ class CascadeEngine:
             if not new_trips and not changed:
                 break
             if r == sc.max_cascade_rounds:
-                truncated = True
+                # truncated only if one more round would actually change an outcome
+                if new_trips:
+                    truncated = True
+                else:
+                    nxt = self._evaluate(failed_n, failed_e, cc, tripped, trip_text, merged, sc)
+                    truncated = nxt.nodes != view.nodes or nxt.edges != view.edges
                 break
             for s, frac in new_trips:
                 tripped[s] = (r, frac)

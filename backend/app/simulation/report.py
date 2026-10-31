@@ -29,9 +29,11 @@ lose several services.
 
 Redundancy score = Σ_s recovered_s / Σ_s initially-lost_s, each normalised by the
 system's baseline (power MW, water L/s, telecom endpoints, transport O-D pairs), where
-"initially lost" is demand whose baseline supply path/route was broken and
-"recovered" is the part still served at the horizon thanks to meshing, tie switching,
-rerouting, storage or detours. 1.0 when nothing was cut.
+"initially lost" is demand whose baseline supply path/route was broken (including the
+demand of directly failed vaults, zones, endpoints and gateways, which is never
+recovered) and "recovered" is the part still served at the horizon thanks to meshing,
+tie switching, rerouting, storage or detours. The score is 1.0 when nothing was cut; the
+summary only quotes it when some service was actually cut.
 """
 
 from __future__ import annotations
@@ -159,6 +161,26 @@ class Report:
         est = max(parts["power"], parts["water"], parts["telecom"]) + parts["facility"]
         return int(round(est)), parts
 
+    def redundancy(self, oc: CascadeOutcome) -> tuple[float, float]:
+        """(redundancy score, share of service initially cut). Directly failed demand counts as cut."""
+        base = self.ce.baseline.view if self.ce.baseline is not None else oc.view
+        v = oc.view
+        p, w, t, tr = v.power, v.water, v.telecom, v.transport
+        bp, bw, bt = base.power, base.water, base.telecom
+        assert p and w and t and tr and bp and bw and bt
+        lost_share = rec_share = 0.0
+        for lost, rec, total in (
+            (p.initially_lost, p.recovered, bp.served_load),
+            (w.initially_lost, w.recovered, bw.served_total),
+            (t.initially_lost, t.recovered, float(bt.endpoints_total)),
+            (tr.initially_lost, tr.recovered, float(tr.od_pairs_total)),
+        ):
+            if total > EPS and lost > EPS:
+                lost_share += lost / total
+                rec_share += rec / total
+        score = 1.0 if lost_share <= EPS else max(0.0, min(1.0, rec_share / lost_share))
+        return score, lost_share
+
     def impact(self, oc: CascadeOutcome, affected: dict[str, NodeOutcome] | None = None) -> ImpactMetrics:
         ce, g = self.ce, self.ce.g
         if affected is None:
@@ -185,18 +207,7 @@ class Report:
         crit = sorted(n for n in real if g.is_critical_facility(n))
         pop, _ = self.population(real)
 
-        # redundancy
-        lost_share = rec_share = 0.0
-        for lost, rec, total in (
-            (p.initially_lost, p.recovered, p_base),
-            (w.initially_lost, w.recovered, w_base),
-            (t.initially_lost, t.recovered, float(bt.endpoints_total)),
-            (tr.initially_lost, tr.recovered, float(tr.od_pairs_total)),
-        ):
-            if total > EPS and lost > EPS:
-                lost_share += lost / total
-                rec_share += rec / total
-        redundancy = 1.0 if lost_share <= EPS else max(0.0, min(1.0, rec_share / lost_share))
+        redundancy, _cut = self.redundancy(oc)
 
         # severity
         def share(a: float, b: float) -> float:
@@ -240,7 +251,7 @@ class Report:
             power_load_unserved_mw=round(mw_unserved, 3),
             water_demand_unserved_lps=round(lps_unserved, 3),
             telecom_nodes_disconnected=len(tel_lost),
-            transport_travel_time_increase_pct=round(tr.travel_time_increase_pct, 2),
+            transport_travel_time_increase_pct=round(tr.travel_time_increase_pct, 4),
             transit_stations_closed=len(stations_closed),
             redundancy_score=round(redundancy, 4),
             severity_index=severity,
@@ -649,8 +660,13 @@ class Report:
             parts.append(
                 f"{oc.scenario.name or 'Scenario'}: failure of {initiators} affects "
                 f"{plural(im.total_nodes_affected, 'node')} across {len(systems)} system{'s' if len(systems) != 1 else ''} "
-                f"({', '.join(systems)}) over {plural(max(0, n_steps - 1), 'cascade step')}; "
-                f"severity index {im.severity_index:.1f}/100."
+                f"({', '.join(systems)})"
+                + (
+                    f" over {plural(n_steps - 1, 'cascade step')}; "
+                    if n_steps > 1
+                    else " with no further propagation; "
+                )
+                + f"severity index {im.severity_index:.1f}/100."
             )
         if oc.common_cause:
             srcs = sorted(set(oc.common_cause.values()))
@@ -698,9 +714,10 @@ class Report:
         inacc = [d for d, a in tr.access.items() if a.status == "inaccessible"]
         delayed = [d for d, a in tr.access.items() if a.status == "delayed"]
         detour = [d for d, a in tr.access.items() if a.status == "detour"]
-        if abs(im.transport_travel_time_increase_pct) > 0.05 or im.transit_stations_closed or inacc or detour:
+        tt = tr.travel_time_increase_pct
+        if abs(tt) > 0.05 or im.transit_stations_closed or inacc or detour:
             parts.append(
-                f"Transport: O-D travel time {im.transport_travel_time_increase_pct:+.1f}%"
+                f"Transport: O-D travel time {tt:+.1f}%"
                 + (
                     f", {plural(im.transit_stations_closed, 'transit station')} closed"
                     if im.transit_stations_closed
@@ -725,10 +742,14 @@ class Report:
             )
         else:
             parts.append("No critical facility is affected.")
-        parts.append(
-            f"Estimated population affected: {im.population_affected_estimate:,}. Redundancy recovered "
-            f"{im.redundancy_score * 100:.0f}% of the service initially cut."
-        )
+        pop_txt = f"Estimated population affected: {im.population_affected_estimate:,}."
+        _score, cut = self.redundancy(oc)
+        if cut > EPS:  # only meaningful when some service was actually cut
+            pop_txt += (
+                f" Redundancy (meshing, tie switching, rerouting, storage, detours) recovered "
+                f"{im.redundancy_score * 100:.0f}% of the service initially cut."
+            )
+        parts.append(pop_txt)
         if oc.truncated:
             parts.append(f"Cascade truncated after {oc.scenario.max_cascade_rounds} rounds.")
         return " ".join(parts)

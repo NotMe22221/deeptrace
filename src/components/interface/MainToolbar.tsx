@@ -99,7 +99,7 @@ function useStatus() {
             short: "Snapshot",
             tone: "warn",
             detail: snapshot
-              ? `Engine offline — using precomputed results exported by engine v${snapshot.engine_version}. Only preset and single-component scenarios are available.`
+              ? `Engine offline — using precomputed results exported by engine v${snapshot.engine_version}. Only presets and single failures of major assets are available; other scenarios need the live engine.`
               : "Engine offline and no precomputed results — exploring the network only. Start the backend to simulate.",
           }
         : dataMode === "loading"

@@ -440,7 +440,7 @@ export interface DemoSnapshot {
   comparisons: Record<string, ScenarioComparison>;
   /** keyed by node id (demo-relevant nodes only) */
   traces: Record<string, TraceResult>;
-  /** keyed by node id: single-node failure results for every node (lets the UI simulate offline) */
+  /** keyed by node id: single-node failure results for major-asset node types only (see SINGLE_FAILURE_TYPES in backend/app/scripts/export_snapshot.py) */
   single_failures?: Record<string, SimulationResult>;
   /**
    * "delta_from_baseline": single_failures store only node/edge state + flow entries that differ

@@ -471,7 +471,10 @@ function NodeInspector({ node, index }: { node: InfrastructureNode; index: Netwo
   const propEntries = Object.entries(node.properties ?? {}).filter(
     ([, v]) => v !== null && v !== undefined && v !== "",
   );
-  const modelled = node.provenance.category === "simulated" || node.provenance.category === "estimated";
+  const modelled =
+    node.provenance.category === "simulated" ||
+    node.provenance.category === "estimated" ||
+    node.properties.modelled_figures === true;
 
   const onTrace = async () => {
     if (tracingThis) return hideTrace();

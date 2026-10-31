@@ -309,6 +309,8 @@ class TransportModel:
             return f"{g.label(x)} failed"
 
         def first_blocked(p: list[str], ep: list[str]) -> str | None:
+            if p and p[0] in fn:
+                return p[0]
             for b, e in zip(p[1:], ep):
                 if e in fe:
                     return e

@@ -58,6 +58,8 @@ class Tracer:
             self.water_in.setdefault(b, []).append((a, e))
         self.water_graph = nx.Graph()
         for e in ce.water.pipes:
+            if e in ce.water.nc_pipes:  # closed in normal operation
+                continue
             ed = g.edges[e]
             w = g.edge_length(e)
             if (
@@ -172,7 +174,10 @@ class Tracer:
                     )  # type: ignore[arg-type]
                     phys.add(e)
                     q.append((c, d + 1))
-            source_paths, pe = self._paths_to(self.power_graph, n, ce.power.sources)
+            # a source has no supply path of its own (never point it at another source)
+            source_paths, pe = (
+                ([], set()) if n in ce.power.sources else self._paths_to(self.power_graph, n, ce.power.sources)
+            )
             phys |= pe
         elif system == "water":
             for arcs, store in ((self.water_in, up), (self.water_out, down)):
@@ -192,14 +197,19 @@ class Tracer:
                             TraceHop(node_id=v, via_edge_id=e, depth=d + 1, relation="physical", system=g.node_sys[v]),
                         )  # type: ignore[arg-type]
                         q.append((v, d + 1))
-            source_paths, pe = self._paths_to(self.water_graph, n, ce.water.supplies + ce.water.tanks)
+            # normally-closed boundary valves carry nothing: route around them (unless tracing the valve)
+            wg = self.water_graph.subgraph([x for x in self.water_graph if x not in ce.water.nc_valves or x == n])
+            if n in ce.water.supplies:
+                source_paths, pe = [], set()
+            else:
+                source_paths, pe = self._paths_to(wg, n, ce.water.supplies + ce.water.tanks)
             phys |= pe
             if not up and source_paths:
                 p = source_paths[0]
                 for i, (a, b) in enumerate(zip(p, p[1:]), start=1):
                     if i > max_depth:
                         break
-                    e = self.water_graph[a][b]["eid"]
+                    e = wg[a][b]["eid"]
                     self._add(
                         up, TraceHop(node_id=b, via_edge_id=e, depth=i, relation="physical", system=g.node_sys[b])
                     )  # type: ignore[arg-type]
@@ -232,7 +242,7 @@ class Tracer:
             no_transit = self.tel_graph.subgraph(
                 [x for x in self.tel_graph if x not in ce.telecom.endpoint_set or x == n]
             )
-            source_paths, pe = self._paths_to(no_transit, n, ce.telecom.cores)
+            source_paths, pe = ([], set()) if n in ce.telecom.cores else self._paths_to(no_transit, n, ce.telecom.cores)
             phys |= pe
         elif system == "transport":
             p = self.road_paths.get(n)
@@ -266,7 +276,9 @@ class Tracer:
                         down, TraceHop(node_id=m, via_edge_id=e, depth=1, relation="physical", system="transport")
                     )  # type: ignore[arg-type]
                     phys.add(e)
-            source_paths, pe = self._paths_to(self.road_graph, n, ce.transport.gateways)
+            source_paths, pe = (
+                ([], set()) if n in ce.transport.gateways else self._paths_to(self.road_graph, n, ce.transport.gateways)
+            )
             phys |= pe
         elif system == "underground":
             q = deque([(n, 0)])
@@ -382,7 +394,17 @@ class Tracer:
                 summary=summary,
             )
         bits = [f"{g.label(n)} ({system} {g.node_type[n].replace('_', ' ')})"]
-        if source_paths:
+        source_role = {
+            "power": ce.power.sources,
+            "water": ce.water.supplies,
+            "telecom": ce.telecom.cores,
+            "transport": ce.transport.gateways,
+        }
+        if n in source_role.get(system, []):
+            bits.append(
+                "is a district gateway (traffic origin)" if system == "transport" else f"is a {system} source / core"
+            )
+        elif source_paths:
             bits.append(
                 f"draws service through {plural(len(upl), 'upstream element')}; nearest source "
                 f"{g.label(source_paths[0][-1])}"

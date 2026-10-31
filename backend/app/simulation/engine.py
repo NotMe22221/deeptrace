@@ -37,6 +37,7 @@ from app.simulation.report import Report
 from app.simulation.trace import Tracer
 
 ENGINE_VERSION = "1.0.0"
+MAX_ID_SUGGESTIONS = 5  # fuzzy "did you mean" suggestions are computed for this many unknown ids only
 
 
 def scenario_hash(sc: ScenarioInput) -> str:
@@ -74,21 +75,39 @@ class SimulationEngine:
 
     # ------------------------------------------------------------- validation
     def _unknown(self, ids: list[str], pool: dict, kind: str, other: dict, other_kind: str) -> list[str]:
-        msgs = []
-        for x in ids:
+        """Messages for ids not in ``pool``. Cost stays bounded for huge inputs: membership
+        checks are O(1) and the (slow) fuzzy suggestions run for the first few ids only."""
+        msgs: list[str] = []
+        unknown = wrong_kind = 0
+        for x in dict.fromkeys(ids):
             if x in pool:
                 continue
             if x in other:
-                msgs.append(f"'{x}' is an {other_kind} id — list it under failed_{other_kind}s")
+                wrong_kind += 1
+                if wrong_kind <= MAX_ID_SUGGESTIONS:
+                    msgs.append(f"'{x}' is an {other_kind} id — list it under failed_{other_kind}s")
                 continue
-            close = difflib.get_close_matches(x, list(pool), n=3, cutoff=0.6)
-            msgs.append(f"unknown {kind} id '{x}'" + (f" (did you mean {', '.join(close)}?)" if close else ""))
+            unknown += 1
+            if unknown <= MAX_ID_SUGGESTIONS:
+                close = difflib.get_close_matches(str(x)[:128], pool.keys(), n=3, cutoff=0.6)
+                msgs.append(
+                    f"unknown {kind} id '{str(x)[:128]}'" + (f" (did you mean {', '.join(close)}?)" if close else "")
+                )
+        if unknown > MAX_ID_SUGGESTIONS:
+            msgs.append(f"… and {unknown - MAX_ID_SUGGESTIONS} more unknown {kind} ids")
+        if wrong_kind > MAX_ID_SUGGESTIONS:
+            msgs.append(f"… and {wrong_kind - MAX_ID_SUGGESTIONS} more {other_kind} ids listed as {kind}s")
         return msgs
 
     def validate_scenario(self, scenario: ScenarioInput) -> None:
         g = self.graphs
         errs = self._unknown(list(scenario.failed_nodes), g.nodes, "node", g.edges, "edge")
         errs += self._unknown(list(scenario.failed_edges), g.edges, "edge", g.nodes, "node")
+        # guard against inputs that bypassed pydantic validation (e.g. model_copy)
+        if scenario.max_cascade_rounds < 1:
+            errs.append("max_cascade_rounds must be at least 1")
+        if not 0 <= scenario.horizon_hours <= 168:
+            errs.append("horizon_hours must be between 0 and 168")
         if errs:
             raise ValueError(f"Invalid scenario for network {self.network.id}: " + "; ".join(errs))
 

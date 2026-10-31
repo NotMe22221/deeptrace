@@ -496,8 +496,8 @@ class PowerModel:
                             else:
                                 if lost_scada:
                                     reason = (
-                                        f"tie {g.label(unit.id)} could not be closed: its SCADA control via "
-                                        f"{', '.join(g.label(p) for p in lost_scada)} is down and manual switching "
+                                        f"tie {g.label(unit.id)} could not be closed: its SCADA control link from "
+                                        f"{', '.join(g.label(p) for p in lost_scada)} is lost and manual switching "
                                         f"takes {fmt_num(unit.manual_hours)} h (> {fmt_num(inp.horizon)} h horizon)"
                                     )
                                 else:
@@ -720,7 +720,7 @@ class PowerModel:
                 else (
                     f"manual switching after {fmt_num(act.unit.manual_hours)} h"
                     + (
-                        f" — SCADA via {', '.join(g.label(p) for p in act.scada_providers)} is down"
+                        f" — SCADA control link from {', '.join(g.label(p) for p in act.scada_providers)} is lost"
                         if act.scada_providers
                         else ""
                     )
@@ -768,7 +768,10 @@ class PowerModel:
         recovered = 0.0
         if hasattr(self, "baseline"):
             for n, d in self.demand.items():
-                if n in fn or n not in self.base_chain:
+                if n not in self.base_chain:
+                    continue
+                if n in fn:
+                    initially_lost += d  # failed load point: cut and never recovered
                     continue
                 if self._culprit(n, fn, fe) is not None:
                     initially_lost += d
