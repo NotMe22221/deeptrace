@@ -280,9 +280,11 @@ class ScenarioInput(BaseModel):
     scenario_id: str | None = Field(default=None, description="Optional caller id; a deterministic hash is used if empty")
     name: str | None = None
     scenario_type: ScenarioType = "custom"
-    failed_nodes: list[str] = Field(default_factory=list)
-    failed_edges: list[str] = Field(default_factory=list)
-    horizon_hours: float = Field(default=4.0, ge=0.0, le=168.0, description="Hours after onset at which impacts are assessed")
+    failed_nodes: list[str] = Field(default_factory=list, max_length=200)
+    failed_edges: list[str] = Field(default_factory=list, max_length=200)
+    horizon_hours: float = Field(
+        default=4.0, ge=0.0, le=168.0, allow_inf_nan=False, description="Hours after onset at which impacts are assessed"
+    )
     enable_restoration: bool = Field(default=True, description="Allow automatic switching / rerouting / detours")
     max_cascade_rounds: int = Field(default=8, ge=1, le=20)
 
@@ -500,7 +502,7 @@ class PathResult(BaseModel):
 
 class ChatTurn(BaseModel):
     role: Literal["user", "assistant"]
-    content: str
+    content: str = Field(max_length=64_000)  # generous: assistant answers can be long and are resent as history
 
 
 class AnalystContext(BaseModel):
@@ -513,7 +515,7 @@ class AnalystContext(BaseModel):
 
 class AnalystRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
-    history: list[ChatTurn] = Field(default_factory=list)
+    history: list[ChatTurn] = Field(default_factory=list, max_length=40)
     context: AnalystContext = Field(default_factory=AnalystContext)
     force_offline: bool = False
 

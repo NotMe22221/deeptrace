@@ -142,3 +142,61 @@ def test_offline_analyst_intents(client, question: str, expected_tool: str) -> N
     assert expected_tool in calls, (question, calls)
     assert [e for e in events if e["type"] == "message"], "no answer produced"
     assert not [e for e in events if e["type"] == "error"]
+
+
+# --- regressions from the adversarial review (offline analyst target resolution & routing) ---
+
+
+def _offline(client, message: str, context: dict | None = None) -> tuple[list[tuple[str, dict]], str]:
+    r = client.post("/api/analyst/chat", json={"message": message, "context": context or {}, "force_offline": True})
+    events = _sse(r)
+    calls = [(e["name"], e["input"]) for e in events if e["type"] == "tool_call"]
+    text = [e for e in events if e["type"] == "message"][-1]["text"]
+    return calls, text
+
+
+def test_named_substation_resolves_to_substation_not_intersection(client) -> None:
+    calls, _ = _offline(client, "What happens if the Five Points substation fails?")
+    assert calls[0][0] == "run_failure_simulation" and calls[0][1]["failed_nodes"] == ["PWR-DS-FIVEPOINTS"]
+    calls, _ = _offline(client, "What depends on the Grady substation?")
+    assert calls[0][1]["node_id"] == "PWR-DS-GRADY"
+
+
+def test_edge_ids_are_simulated_as_edges_and_unknown_ids_are_not_guessed(client) -> None:
+    calls, _ = _offline(client, "What happens if UGD-DB-06 fails?")
+    assert calls[0][1]["failed_edges"] == ["UGD-DB-06"] and calls[0][1]["failed_nodes"] == []
+    calls, text = _offline(client, "What happens if XYZ-123 fails?")
+    assert calls == [] and "couldn't find `XYZ-123`" in text
+
+
+def test_named_component_overrides_loaded_scenario_unless_it_is_a_victim(client) -> None:
+    a = {"failed_nodes": ["PWR-DS-FIVEPOINTS"]}
+    calls, _ = _offline(client, "How could we mitigate a failure of PWR-TS-EAST?", {"active_scenario": a})
+    assert calls[0][1]["failed_nodes"] == ["PWR-TS-EAST"]
+    b = {"failed_edges": ["UGD-DB-06"]}
+    calls, _ = _offline(client, "Why did Grady Memorial Hospital lose communications?", {"active_scenario": b})
+    assert calls[0][1]["failed_edges"] == ["UGD-DB-06"]
+
+
+def test_provenance_and_system_scoped_metrics(client) -> None:
+    calls, text = _offline(client, "How much of the utility data is real versus simulated?")
+    assert calls == [("get_data_provenance", {})] and "Nothing is labelled verified" in text
+    calls, text = _offline(client, "What is the most important component in the water network?")
+    assert calls[0] == ("get_network_metrics", {"top_n": 8, "system": "water"}) and "water network" in text
+
+
+def test_affected_components_excludes_rerouted_info_rows(client) -> None:
+    from app.ai.tools import ToolContext, execute_tool
+    from app.models.schemas import AnalystContext
+    from app.simulation import get_engine
+
+    ctx = ToolContext(engine=get_engine(), context=AnalystContext())
+    ok, out = execute_tool(ctx, "get_affected_components", {"failed_nodes": ["TEL-IX-56MARIETTA"]})
+    r = get_engine().simulate(__import__("app.models.schemas", fromlist=["ScenarioInput"]).ScenarioInput(failed_nodes=["TEL-IX-56MARIETTA"]))
+    assert ok and out.payload["count"] == r.impact_metrics.total_nodes_affected
+
+
+def test_non_finite_and_oversized_inputs_are_422(client) -> None:
+    raw = '{"failed_nodes":["PWR-DS-FIVEPOINTS"],"horizon_hours":NaN}'
+    assert client.post("/api/simulate", content=raw, headers={"Content-Type": "application/json"}).status_code == 422
+    assert client.post("/api/simulate", json={"failed_nodes": ["X"] * 500}).status_code == 422

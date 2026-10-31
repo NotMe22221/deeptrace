@@ -16,8 +16,10 @@ PUBLIC_DEMO_DIR = REPO_ROOT / "public" / "demo"
 
 
 def _load_dotenv() -> None:
-    """Minimal .env loader (repo root .env then backend/.env); never overrides real env vars."""
-    for path in (REPO_ROOT / ".env", REPO_ROOT / ".env.local", BACKEND_DIR / ".env"):
+    """Minimal .env loader. Precedence (first wins): real environment variables >
+    repo-root .env.local > repo-root .env > backend/.env. Blank values (e.g. the
+    template line ``ANTHROPIC_API_KEY=``) are treated as unset."""
+    for path in (REPO_ROOT / ".env.local", REPO_ROOT / ".env", BACKEND_DIR / ".env"):
         if not path.exists():
             continue
         for raw in path.read_text().splitlines():
@@ -27,7 +29,7 @@ def _load_dotenv() -> None:
             key, _, value = line.partition("=")
             key = key.strip()
             value = value.strip().strip('"').strip("'")
-            if key and key not in os.environ:
+            if key and value and not os.environ.get(key):
                 os.environ[key] = value
 
 

@@ -84,7 +84,17 @@ async def run_llm(req: AnalystRequest, engine) -> AsyncIterator[dict[str, Any]]:
     client = anthropic.AsyncAnthropic()
     system = SYSTEM_PROMPT.replace("{network}", network_brief(engine.network))
 
-    messages: list[dict[str, Any]] = [{"role": t.role, "content": t.content} for t in req.history if t.content.strip()]
+    # Bound the replayed history (most recent turns, ~60k chars total) to cap input cost.
+    recent: list[dict[str, Any]] = []
+    budget = 60_000
+    for t in reversed(req.history[-12:]):
+        if not t.content.strip():
+            continue
+        if budget - len(t.content) < 0:
+            break
+        budget -= len(t.content)
+        recent.append({"role": t.role, "content": t.content})
+    messages: list[dict[str, Any]] = list(reversed(recent))
     # The API requires alternating roles starting with "user"; drop a leading assistant turn.
     while messages and messages[0]["role"] != "user":
         messages.pop(0)

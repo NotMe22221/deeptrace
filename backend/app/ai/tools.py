@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import copy
 import difflib
+import math
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -77,6 +79,14 @@ def _indices(net: InfrastructureNetwork) -> tuple[dict[str, InfrastructureNode],
 
 def _suggest(ident: str, pool: list[str]) -> list[str]:
     return difflib.get_close_matches(ident, pool, n=5, cutoff=0.45)
+
+
+def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    r = 6_371_000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = p2 - p1, math.radians(lon2 - lon1)
+    h = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(h))
 
 
 def require_node(ctx: ToolContext, node_id: str) -> InfrastructureNode:
@@ -181,12 +191,17 @@ def _run(ctx: ToolContext, scenario: ScenarioInput) -> SimulationResult:
 def summarize_result(ctx: ToolContext, r: SimulationResult, max_affected: int = 30) -> dict[str, Any]:
     nodes, _ = _indices(ctx.network)
     m = r.impact_metrics
-    affected = sorted(r.affected_nodes, key=lambda a: (SEVERITY_ORDER[a.severity], a.step, a.node_id))
+    affected = sorted(
+        (a for a in r.affected_nodes if a.severity != "info"), key=lambda a: (SEVERITY_ORDER[a.severity], a.step, a.node_id)
+    )
+    rerouted = [a.node_id for a in r.affected_nodes if a.severity == "info"]
     by_system: dict[str, dict[str, int]] = {}
     prov_counts: dict[str, int] = {}
     for a in r.affected_nodes:
         by_system.setdefault(a.system.value, {}).setdefault(a.state, 0)
         by_system[a.system.value][a.state] += 1
+        if a.severity == "info":  # same rule as ImpactMetrics.total_nodes_affected
+            continue
         n = nodes.get(a.node_id)
         if n is not None:
             prov_counts[n.provenance.category.value] = prov_counts.get(n.provenance.category.value, 0) + 1
@@ -245,6 +260,7 @@ def summarize_result(ctx: ToolContext, r: SimulationResult, max_affected: int = 
             for a in affected[:max_affected]
         ],
         "affected_components_truncated": max(0, len(affected) - max_affected),
+        "rerouted_or_informational_count": len(rerouted),
         "alternative_paths": [
             {
                 "id": p.id,
@@ -257,6 +273,7 @@ def summarize_result(ctx: ToolContext, r: SimulationResult, max_affected: int = 
             }
             for p in r.alternative_paths[:12]
         ],
+        "alternative_paths_total": len(r.alternative_paths),
         "interrupted_edges_count": len(r.interrupted_edges),
         "affected_provenance_counts": prov_counts,
         "assumptions": r.assumptions[:8],
@@ -281,17 +298,19 @@ def t_search_components(ctx: ToolContext, args: dict[str, Any]) -> ToolOutput:
             continue
         if ntype and n.type != ntype:
             continue
-        hay = f"{n.id} {n.name} {n.type} {n.system.value} {n.description or ''}".lower()
+        head = f"{n.id} {n.name} {n.type.replace('_', ' ')} {n.system.value}".lower()
+        desc = (n.description or "").lower()
         if not tokens:
             score = 1.0
         else:
-            hits = sum(1 for t in tokens if t in hay)
-            if hits == 0:
+            # A token in the id/name/type/system counts fully; one only in the description counts 0.4.
+            pts = sum(1.0 if t in head else 0.4 if t in desc else 0.0 for t in tokens)
+            if pts == 0:
                 continue
-            score = hits / len(tokens) + (0.5 if query in n.name.lower() else 0) + (1.0 if query == n.id.lower() else 0)
+            score = pts / len(tokens) + (0.25 if query in n.name.lower() else 0) + (1.0 if query == n.id.lower() else 0)
         scored.append((score, n))
     scored.sort(key=lambda x: (-x[0], x[1].id))
-    found = [node_ref(n) | {"critical": n.critical} for _, n in scored[:limit]]
+    found = [node_ref(n) | {"critical": n.critical, "score": round(sc, 3)} for sc, n in scored[:limit]]
     return ToolOutput(
         payload={"query": query, "matches": found, "total_matches": len(scored)},
         summary=f"{len(scored)} match(es) for “{query}”" + (f" — top: {found[0]['name']}" if found else ""),
@@ -419,6 +438,7 @@ def t_trace_network_path(ctx: ToolContext, args: dict[str, Any]) -> ToolOutput:
         "dependencies (cross-system providers)": hops(tr.dependencies),
         "dependents (cross-system consumers)": hops(tr.dependents, 40),
         "dependents_total": len(tr.dependents),
+        "dependents_by_system": dict(Counter(h.system.value for h in tr.dependents)),
         "source_paths": [[_name(ctx, i) for i in path] for path in tr.source_paths[:4]],
         "physical_edges": len(tr.physical_edge_ids),
         "dependency_edges": len(tr.dependency_edge_ids),
@@ -449,26 +469,29 @@ def t_get_affected_components(ctx: ToolContext, args: dict[str, Any]) -> ToolOut
     scenario = _scenario_from_args(ctx, args, ctx.context.active_scenario)
     result = _run(ctx, scenario)
     system = args.get("system")
-    min_sev = args.get("min_severity", "info")
+    min_sev = args.get("min_severity", "minor")
     limit = int(args.get("limit", 40))
-    rows = [
-        a
-        for a in result.affected_nodes
-        if (not system or a.system.value == system) and SEVERITY_ORDER[a.severity] <= SEVERITY_ORDER.get(min_sev, 3)
-    ]
+    in_sys = [a for a in result.affected_nodes if not system or a.system.value == system]
+    # Rows with severity "info" are rerouted/detoured elements that keep full service; they
+    # are not "affected" (same rule as ImpactMetrics.total_nodes_affected). Only list them
+    # when the caller explicitly asks for min_severity="info".
+    impacted = [a for a in in_sys if a.severity != "info" and SEVERITY_ORDER[a.severity] <= SEVERITY_ORDER.get(min_sev, 2)]
+    info = [a for a in in_sys if a.severity == "info"]
+    rows = impacted + (info if min_sev == "info" else [])
     rows.sort(key=lambda a: (SEVERITY_ORDER[a.severity], a.step, a.node_id))
     payload = {
         "scenario_id": result.scenario_id,
         "failed_nodes": result.failed_nodes,
         "failed_edges": result.failed_edges,
         "filter": {"system": system, "min_severity": min_sev},
-        "count": len(rows),
+        "count": len(impacted),
+        "rerouted_without_service_loss": len(info),
         "components": [
             {
                 "id": a.node_id,
                 "name": _name(ctx, a.node_id),
                 "system": a.system.value,
-                "state": a.state,
+                "state": a.state if a.severity != "info" else "rerouted (no service loss)",
                 "severity": a.severity,
                 "step": a.step,
                 "cause": a.cause,
@@ -479,15 +502,18 @@ def t_get_affected_components(ctx: ToolContext, args: dict[str, Any]) -> ToolOut
     }
     return ToolOutput(
         payload=payload,
-        summary=f"{len(rows)} affected component(s)" + (f" in {system}" if system else ""),
+        summary=f"{len(impacted)} affected component(s)" + (f" in {system}" if system else "")
+        + (f" · {len(info)} rerouted without loss" if info else ""),
         ui_actions=[
             UIAction(
                 kind="highlight",
-                node_ids=[a.node_id for a in rows[:limit]],
+                node_ids=[a.node_id for a in impacted[:limit]],
                 label="Affected components",
-                tone="critical" if any(a.severity == "critical" for a in rows) else "warning",
+                tone="critical" if any(a.severity == "critical" for a in impacted) else "warning",
             )
-        ],
+        ]
+        if impacted
+        else [],
     )
 
 
@@ -637,6 +663,8 @@ def _apply_modifications(
             if n is None:
                 raise ToolError(f"Unknown node '{target}' for backup_power")
             hours = float(mod.get("hours", 24))
+            if not math.isfinite(hours) or hours < 0:
+                raise ToolError("hours must be a finite, non-negative number")
             n.properties["backup_hours"] = hours
             n.properties["backup_power_hours"] = hours
             described.append(f"Add {hours:g} h of backup power at {n.name} ({n.id})")
@@ -646,6 +674,8 @@ def _apply_modifications(
             if n is None:
                 raise ToolError(f"Unknown node '{target}' for water_storage")
             hours = float(mod.get("hours", 24))
+            if not math.isfinite(hours) or hours < 0:
+                raise ToolError("hours must be a finite, non-negative number")
             n.properties["water_storage_hours"] = hours
             described.append(f"Provide {hours:g} h of on-site water storage at {n.name} ({n.id})")
             touched_nodes.append(n.id)
@@ -674,28 +704,48 @@ def _apply_modifications(
             b = nodes.get(str(mod.get("to_node_id")))
             if a is None or b is None:
                 raise ToolError("add_connection needs valid target_id and to_node_id")
+            if a.id == b.id:
+                raise ToolError("add_connection needs two different nodes")
             if a.system != b.system:
                 raise ToolError("add_connection must join two nodes of the same system")
-            template = next(
-                (e for e in net.edges if e.infrastructure_type == a.system and e.relation.value == "physical"), None
+            phys = [e for e in net.edges if e.infrastructure_type == a.system and e.relation.value == "physical"]
+            ends = {a.type, b.type}
+
+            def end_types(e: InfrastructureEdge) -> set[str]:
+                return {nodes[e.source_node].type, nodes[e.target_node].type} if e.source_node in nodes and e.target_node in nodes else set()
+
+            # Prefer an existing edge joining the same node types; never use a transmission line
+            # or tie as template for a local connection.
+            avoid = {"transmission_line", "tie_line", "water_main"}
+            template = next((e for e in phys if end_types(e) == ends and e.connection_type not in avoid), None) or next(
+                (e for e in phys if e.connection_type not in avoid), None
             )
             if template is None:
                 raise ToolError(f"No physical edge template for system {a.system.value}")
+            dist = _haversine_m(a.latitude, a.longitude, b.latitude, b.longitude) * 1.25  # street-routing factor
             new = template.model_copy(deep=True)
             new.id = f"MIT-{a.system.value[:3].upper()}-{i + 1:02d}"
             new.source_node, new.target_node = a.id, b.id
             new.geometry = [(a.longitude, a.latitude), (b.longitude, b.latitude)]
+            new.length_m = round(dist, 1)
             new.status = "operational"
             new.corridor_id = None
+            new.directed = False
             new.name = f"Proposed {template.connection_type.replace('_', ' ')} (mitigation)"
             if mod.get("capacity") is not None:
-                new.capacity = float(mod["capacity"])
-            new.properties = {"proposed": True}
-            new.provenance = new.provenance.model_copy(
-                update={"notes": "Hypothetical connection added by mitigation analysis"}
-            )
+                cap = float(mod["capacity"])
+                if not math.isfinite(cap) or cap <= 0:
+                    raise ToolError("capacity must be a positive number")
+                new.capacity = cap
+            keep = ("speed_kph", "lanes", "voltage_kv", "diameter_mm", "material", "role")
+            new.properties = {k: v for k, v in template.properties.items() if k in keep} | {"proposed": True}
+            if "speed_kph" in new.properties:
+                new.properties["travel_time_s"] = round(dist / (float(new.properties["speed_kph"]) / 3.6), 1)
+            new.provenance = new.provenance.model_copy(update={"notes": "Hypothetical connection added by mitigation analysis"})
             net.edges.append(new)
-            described.append(f"Add a new {template.connection_type.replace('_', ' ')} between {a.name} and {b.name}")
+            described.append(
+                f"Add a new {template.connection_type.replace('_', ' ')} (~{dist:,.0f} m) between {a.name} and {b.name}"
+            )
             touched_nodes += [a.id, b.id]
         elif kind == "separate_corridor":
             e = edges.get(str(target))

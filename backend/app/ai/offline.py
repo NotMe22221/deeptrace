@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from dataclasses import dataclass
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -75,37 +76,104 @@ _STOP = {
 }
 
 
-def resolve_target(s: _Session) -> str | None:
+ID_RE = re.compile(r"[A-Z][A-Z0-9]+(?:-[A-Z0-9]+)+")
+
+
+@dataclass
+class Target:
+    """What the question is about. ``explicit`` = named in the message (id or name),
+    as opposed to inferred from the current selection."""
+
+    node_id: str | None = None
+    edge_id: str | None = None
+    explicit: bool = False
+    unknown_id: str | None = None
+
+    @property
+    def found(self) -> bool:
+        return bool(self.node_id or self.edge_id)
+
+
+def _content_words(low: str) -> list[str]:
+    return [w for w in re.findall(r"[a-z0-9]+", low) if w not in _STOP and len(w) > 2]
+
+
+def explicit_target(s: _Session) -> Target:
+    """Ids or names mentioned in the message itself."""
     msg = s.req.message
-    nodes, _ = _indices(s.net)
-    # 1) explicit id in the message
-    for tok in re.findall(r"[A-Z][A-Z0-9]+(?:-[A-Z0-9]+)+", msg):
+    nodes, edges = _indices(s.net)
+    ids = ID_RE.findall(msg)
+    for tok in ids:
         if tok in nodes:
-            return tok
-    # 2) name match (longest name contained in message, case-insensitive)
+            return Target(node_id=tok, explicit=True)
+        if tok in edges:
+            return Target(edge_id=tok, explicit=True)
     low = msg.lower()
-    best = None
+    words = _content_words(low)
+    # Name candidates: accept directly only if name + type + system account for every
+    # content word ("Five Points substation" must not resolve to the Five Points intersection).
+    cands: list[tuple[int, int, str]] = []
     for n in s.net.nodes:
         core = re.sub(r"\(.*?\)", "", n.name).strip().lower()
-        if len(core) >= 5 and core in low and (best is None or len(core) > len(best[1])):
-            best = (n.id, core)
-    if best:
-        return best[0]
-    # 3) selected component (when the message refers to "this"/"it" or names nothing)
-    if s.req.context.selected_node_id and s.req.context.selected_node_id in nodes:
-        return s.req.context.selected_node_id
-    # 4) keyword search as a last resort
-    words = [w for w in re.findall(r"[a-z0-9]+", low) if w not in _STOP and len(w) > 2]
-    if words:
+        if len(core) >= 5 and core in low:
+            head = f"{core} {n.type.replace('_', ' ')} {n.system.value}"
+            cands.append((sum(1 for w in words if w in head), len(core), n.id))
+    cands.sort(key=lambda c: (-c[0], -c[1], c[2]))
+    if cands and cands[0][0] >= len(words):
+        return Target(node_id=cands[0][2], explicit=True)
+    if words and (cands or len(words) >= 1):
         ok, out = execute_tool(s.ctx, "search_components", {"query": " ".join(words), "limit": 1})
-        if ok and out.payload.get("matches"):
-            return out.payload["matches"][0]["id"]
-    return None
+        top = out.payload.get("matches", [])[:1] if ok else []
+        if top and top[0].get("score", 0) >= 0.99:
+            return Target(node_id=top[0]["id"], explicit=True)
+        if cands:
+            return Target(node_id=cands[0][2], explicit=True)
+    if ids:
+        return Target(unknown_id=ids[0], explicit=True)
+    return Target()
+
+
+def resolve_target(s: _Session, allow_search: bool = True) -> Target:
+    t = explicit_target(s)
+    if t.found or t.unknown_id:
+        return t
+    nodes, edges = _indices(s.net)
+    ctx = s.req.context
+    if ctx.selected_node_id and ctx.selected_node_id in nodes:
+        return Target(node_id=ctx.selected_node_id)
+    if ctx.selected_edge_id and ctx.selected_edge_id in edges:
+        return Target(edge_id=ctx.selected_edge_id)
+    if allow_search:
+        words = _content_words(s.req.message.lower())
+        if words:
+            ok, out = execute_tool(s.ctx, "search_components", {"query": " ".join(words), "limit": 1})
+            if ok and out.payload.get("matches"):
+                return Target(node_id=out.payload["matches"][0]["id"])
+    return Target()
+
+
+_SYSTEM_WORDS = {
+    "power": r"\b(power|electric\w*|grid|substation\w*)\b",
+    "water": r"\b(water|hydraul\w*|pipes?|mains?)\b",
+    "telecom": r"\b(telecom\w*|internet|fib(?:er|re)|broadband|network operators?)\b",
+    "transport": r"\b(transport\w*|roads?|traffic|transit|rail|marta)\b",
+    "underground": r"\b(underground|duct\w*|vaults?|corridors?)\b",
+    "facility": r"\bfacilit\w*\b",
+}
+
+
+def mentioned_system(msg: str) -> str | None:
+    m = msg.lower()
+    hits = [k for k, rx in _SYSTEM_WORDS.items() if re.search(rx, m)]
+    return hits[0] if len(hits) == 1 else None
 
 
 def classify(msg: str, has_scenario: bool) -> str:
     m = msg.lower()
-    if re.search(r"\bcompar|\bversus\b|\bvs\.?\b|scenario a.*scenario b", m):
+    if re.search(
+        r"\bcompar|scenario a.*scenario b|\bscenarios?\b.*\b(?:versus|vs\.?)\b|\b(?:versus|vs\.?)\b.*\bscenario|\ba\s+(?:versus|vs\.?|and)\s+b\b",
+        m,
+    ):
         return "compare"
     if re.search(r"provenance|\breal\b(?!-time)|verified|accurate|data source|where does the data|simulated data|made up|fake|trust", m):
         return "provenance"
@@ -117,9 +185,13 @@ def classify(msg: str, has_scenario: bool) -> str:
         return "alternatives"
     if re.search(r"most important|most critical|single point|weakest|vulnerab|bottleneck|critical component", m):
         return "metrics"
-    if re.search(r"what happens|if .* fail|simulate|consequence|impact of|knock|goes down|outage", m):
+    simulate = re.search(r"what happens|if .* fail|simulate|consequence|impact of|knock|goes down|outage", m)
+    depends = re.search(r"depend|rely|relies|served by|feeds|supplied", m)
+    if simulate and depends:
+        return "dependents_and_simulate"
+    if simulate:
         return "simulate"
-    if re.search(r"depend|rely|relies|served by|feeds|supplied", m):
+    if depends:
         return "dependents"
     if re.search(r"affected", m) and has_scenario:
         return "affected"
@@ -358,35 +430,76 @@ def _qualitative_mitigations(r: SimulationResult) -> list[str]:
     return tips
 
 
-def answer_simulation(s: _Session, target: str | None, scenario: ScenarioInput | None) -> str:
+def _target_scenario(s: _Session, t: Target) -> ScenarioInput | None:
+    if t.node_id:
+        return ScenarioInput(name=f"Failure of {s.name(t.node_id)}", failed_nodes=[t.node_id])
+    if t.edge_id:
+        _, edges = _indices(s.net)
+        e = edges.get(t.edge_id)
+        return ScenarioInput(name=f"Failure of {(e.name if e and e.name else t.edge_id)}", failed_edges=[t.edge_id])
+    return None
+
+
+def _pick_scenario(s: _Session, t: Target, prefer_active: bool) -> ScenarioInput | None:
+    """Which failure the question is about.
+
+    An element explicitly named in the question overrides the loaded scenario — unless it is
+    part of that scenario or one of its victims ("why did Grady lose comms?"), in which case
+    the loaded scenario is the one to explain. Deictic questions use the loaded scenario.
+    """
+    active = s.req.context.active_scenario
+    named = _target_scenario(s, t)
+    if active is not None and named is not None and t.explicit:
+        if (t.node_id and t.node_id in active.failed_nodes) or (t.edge_id and t.edge_id in active.failed_edges):
+            return active
+        try:
+            r_active = s.ctx.engine.simulate(active)
+            victims = {a.node_id for a in r_active.affected_nodes if a.severity != "info"}
+        except ValueError:
+            victims = set()
+        if t.node_id and t.node_id in victims:
+            return active
+        return named
+    if active is not None and (prefer_active or named is None):
+        return active
+    return named
+
+
+def _scen_args(scenario: ScenarioInput) -> dict[str, Any]:
+    return {
+        "failed_nodes": scenario.failed_nodes,
+        "failed_edges": scenario.failed_edges,
+        "horizon_hours": scenario.horizon_hours,
+        "enable_restoration": scenario.enable_restoration,
+    }
+
+
+def _impacted(r: SimulationResult) -> list:
+    """Same rule as ImpactMetrics.total_nodes_affected: info rows keep full service."""
+    return [a for a in r.affected_nodes if a.severity != "info"]
+
+
+def answer_simulation(s: _Session, t: Target) -> str:
+    scenario = _target_scenario(s, t) or s.req.context.active_scenario
     if scenario is None:
-        if not target:
-            return "I couldn't tell which component to fail. Select a component or name it (e.g. a substation id) and ask again."
-        scenario = ScenarioInput(name=f"Failure of {s.name(target)}", failed_nodes=[target])
-    ok, out = s.call(
-        "run_failure_simulation",
-        {
-            "failed_nodes": scenario.failed_nodes,
-            "failed_edges": scenario.failed_edges,
-            "horizon_hours": scenario.horizon_hours,
-            "enable_restoration": scenario.enable_restoration,
-            "name": scenario.name or None,
-        },
-    )
+        return "I couldn't tell which component to fail. Select a component or name it (e.g. a substation id) and ask again."
+    ok, out = s.call("run_failure_simulation", {**_scen_args(scenario), "name": scenario.name or None})
     if not ok:
         return f"The simulation could not run: {out.payload.get('error')}"
     p = out.payload
-    failed = ", ".join(f"{f['name']} (`{f['id']}`)" for f in p["failed_nodes"]) or ", ".join(f"`{e}`" for e in p["failed_edges"])
+    r = s.ctx.results[p["scenario_id"]]
+    failed = _initiating(s, scenario)
+    systems = sorted({SYSTEM_LABEL.get(a.system.value, a.system.value) for a in _impacted(r)})
+    if len(_impacted(r)) <= len(scenario.failed_nodes):
+        lead = f"If {failed} fails, the model shows no loss of service beyond it — redundancy absorbs the failure."
+    else:
+        lead = f"If {failed} fails, the modelled cascade affects {len(systems)} system(s): {', '.join(systems)}."
     steps = [f"**Step {c['step']}**: {_short(c['label'], 200)}" for c in p["cascade_steps"][:6]]
     alts = [_short(a["description"], 200) + ("" if a["capacity_ok"] else " _(capacity-limited)_") for a in p["alternative_paths"][:4]]
-    parts = [
-        f"If {failed} fails, the modelled cascade spreads across "
-        f"{len({c['system'] for c in p['affected_components']})} system(s).",
-        "**What the simulation shows**\n" + _bullets(_sim_overview(s, p)),
-        "**How it cascades**\n" + _bullets(steps),
-    ]
+    parts = [lead, "**What the simulation shows**\n" + _bullets(_sim_overview(s, p)), "**How it cascades**\n" + _bullets(steps)]
     if alts:
-        parts.append("**Alternatives & redundancy**\n" + _bullets(alts))
+        more = p.get("alternative_paths_total", len(alts)) - len(alts)
+        parts.append("**Alternatives & redundancy**\n" + _bullets(alts + ([f"…and {more} more"] if more > 0 else [])))
     parts.append(_caveat(p))
     return "\n\n".join(parts)
 
@@ -438,21 +551,62 @@ def _initiating(s: _Session, scenario: ScenarioInput) -> str:
     return ", ".join(parts) or "the selected elements"
 
 
-def answer_explain_mitigate(s: _Session, target: str | None) -> str:
-    scenario = s.req.context.active_scenario
-    if scenario is None:
-        if not target:
-            return (
-                "There is no scenario loaded to explain. Run a failure simulation (or ask “what happens if … fails?”) "
-                "and I'll explain the cascade and recommend mitigations."
-            )
-        scenario = ScenarioInput(name=f"Failure of {s.name(target)}", failed_nodes=[target])
-    scen_args = {
-        "failed_nodes": scenario.failed_nodes,
-        "failed_edges": scenario.failed_edges,
-        "horizon_hours": scenario.horizon_hours,
-        "enable_restoration": scenario.enable_restoration,
+def _lead_from_result(s: _Session, scenario: ScenarioInput, r: SimulationResult) -> str:
+    """Opening sentence derived from the engine result (no fixed causal claims)."""
+    nodes, edges = _indices(s.net)
+    initiating = _initiating(s, scenario)
+    h = scenario.horizon_hours
+    failed_ids = set(r.failed_nodes)
+    init_sys = {nodes[n].system.value for n in r.failed_nodes if n in nodes} | {
+        edges[e].infrastructure_type.value for e in r.failed_edges if e in edges
     }
+    knock = [a for a in _impacted(r) if a.node_id not in failed_ids]
+    if not knock:
+        return f"The failure at {initiating} is contained: the model finds no other component losing service within the {h:g} h horizon."
+    same = [a for a in knock if a.system.value in init_sys]
+    cross = [a for a in knock if a.system.value not in init_sys]
+    reasons: list[str] = []
+    if same:
+        alts = [ap for ap in r.alternative_paths if ap.system.value in init_sys]
+        if not alts:
+            reasons.append(f"{len(same)} element(s) in the same network have no alternative supply path")
+        elif any(not ap.capacity_ok for ap in alts):
+            reasons.append(
+                f"{len(same)} element(s) in the same network stay down because the alternative paths were capacity-limited"
+            )
+        else:
+            reasons.append(f"{len(same)} element(s) in the same network are affected")
+    if cross:
+        sys_names = sorted({SYSTEM_LABEL.get(a.system.value, a.system.value) for a in cross})
+        no_backup = [a for a in cross if a.state in ("failed", "outage", "closed", "disconnected", "inaccessible")]
+        on_backup = [a for a in cross if a.state == "on_backup"]
+        txt = f"{len(cross)} component(s) in {', '.join(sys_names)} depend on it"
+        if no_backup:
+            txt += f" — {len(no_backup)} lose service"
+        if on_backup:
+            txt += f"{',' if no_backup else ' —'} {len(on_backup)} run on backup for now"
+        reasons.append(txt)
+    return f"The cascade starts at {initiating} and reaches {len(knock)} other component(s): " + "; ".join(reasons) + "."
+
+
+_METRIC_UNITS = {
+    "Power unserved": "MW",
+    "Water unserved": "L/s",
+    "Telecom endpoints disconnected": "",
+    "Travel time increase": "%",
+    "Transit stations closed": "",
+    "Population affected (modelled)": "people",
+}
+
+
+def answer_explain_mitigate(s: _Session, t: Target) -> str:
+    scenario = _pick_scenario(s, t, prefer_active=True)
+    if scenario is None:
+        return (
+            "There is no scenario loaded to explain. Run a failure simulation (or ask “what happens if … fails?”) "
+            "and I'll explain the cascade and recommend mitigations."
+        )
+    scen_args = _scen_args(scenario)
     ok, out = s.call("get_affected_components", {**scen_args, "min_severity": "minor"})
     if not ok:
         return f"I couldn't analyse the scenario: {out.payload.get('error')}"
@@ -460,11 +614,10 @@ def answer_explain_mitigate(s: _Session, target: str | None) -> str:
     from app.ai.tools import summarize_result
 
     p = summarize_result(s.ctx, result)
-    initiating = _initiating(s, scenario)
     why = [f"**Step {c['step']}**: {_short(c['label'], 200)}" for c in p["cascade_steps"][:6]]
 
-    # Quantify every candidate with the engine, then rank by modelled severity reduction.
-    ranked: list[tuple[float, str]] = []
+    # Quantify every candidate with the engine; a candidate "helps" if ANY metric improves.
+    ranked: list[tuple[float, int, str]] = []
     no_effect: list[str] = []
     for text, mods in _mitigation_candidates(s, result)[:7]:
         ok2, out2 = s.call("evaluate_mitigation", {"scenario": scen_args, "modifications": mods})
@@ -474,36 +627,32 @@ def answer_explain_mitigate(s: _Session, target: str | None) -> str:
         sev, aff = ch["Severity index"], ch["Components affected"]
         gain = sev["before"] - sev["after"]
         saved = out2.payload["critical_facilities_no_longer_affected"]
+        improved = [c for c in out2.payload["metric_changes"] if c["change"] < -0.05]
         effect = f"severity {sev['before']:.0f} → {sev['after']:.0f}, affected components {aff['before']:.0f} → {aff['after']:.0f}"
-        if ch["Power unserved"]["change"] < -0.05:
-            effect += f", unserved power {ch['Power unserved']['before']:.1f} → {ch['Power unserved']['after']:.1f} MW"
+        for c in improved:
+            if c["metric"] in _METRIC_UNITS:
+                u = _METRIC_UNITS[c["metric"]]
+                effect += f", {c['metric'].lower()} {c['before']:,.1f} → {c['after']:,.1f}{(' ' + u) if u and u != '%' else u}"
         if saved:
             effect += "; protects " + ", ".join(x["name"] for x in saved[:3])
-        if gain > 0.05 or saved:
-            ranked.append((gain, f"{text} **Modelled effect:** {effect}."))
+        if improved or saved:
+            ranked.append((gain, len(improved), f"{text} **Modelled effect:** {effect}."))
         else:
             title = text.split(",")[0].split(" (")[0].strip()
             if title:
                 no_effect.append(title)
-    ranked.sort(key=lambda x: -x[0])
-    mit = [t for _, t in ranked[:3]]
+    ranked.sort(key=lambda x: (-x[0], -x[1]))
+    mit = [txt for _, _, txt in ranked[:3]]
     if no_effect:
-        mit.append(
-            "Tested with no modelled improvement (another limit binds): " + "; ".join(no_effect[:2]) + "."
-        )
+        mit.append("Also tested, with no modelled improvement in this scenario: " + "; ".join(no_effect[:2]) + ".")
     quantified_text = " ".join(mit)
     mit += [
         tip for tip in _qualitative_mitigations(result)
         if not (tip.startswith("Dual-home") and "Dual-home" in quantified_text)
     ]
 
-    lead = (
-        f"The cascade starts at {initiating}. It spreads because the affected section has no alternative supply with "
-        f"enough spare capacity, and other systems depend on it without enough backup for the "
-        f"{scenario.horizon_hours:g} h horizon."
-    )
     parts = [
-        lead,
+        _lead_from_result(s, scenario, result),
         "**What the simulation shows**\n" + _bullets(_sim_overview(s, p)),
         "**Why it cascades**\n" + _bullets(why),
     ]
@@ -521,7 +670,38 @@ def answer_explain_mitigate(s: _Session, target: str | None) -> str:
     return "\n\n".join(parts)
 
 
-def answer_dependents(s: _Session, target: str | None) -> str:
+def _edge_summary(s: _Session, edge_id: str) -> str:
+    nodes, edges = _indices(s.net)
+    e = edges[edge_id]
+    ok, out = s.call("get_data_provenance", {"edge_id": edge_id})
+    pv = out.payload.get("provenance", {}) if ok else {}
+    lines = [
+        f"Type: {e.connection_type.replace('_', ' ')} ({e.relation.value}, {e.infrastructure_type.value})",
+        f"Connects {s.name(e.source_node)} (`{e.source_node}`) ↔ {s.name(e.target_node)} (`{e.target_node}`)",
+        f"Length ≈ {e.length_m:,.0f} m" + (f", buried ≈ {e.depth_m:g} m" if e.depth_m else ""),
+    ]
+    if e.capacity is not None:
+        lines.append(f"Capacity: {e.capacity:g} {e.capacity_unit or ''}".rstrip())
+    hosted = [h for h in e.properties.get("hosted_edge_ids", []) if h in edges]
+    if hosted:
+        by: dict[str, int] = {}
+        for h in hosted:
+            by[edges[h].infrastructure_type.value] = by.get(edges[h].infrastructure_type.value, 0) + 1
+        lines.append("Hosts " + ", ".join(f"{n} {SYSTEM_LABEL.get(k, k).lower()} link(s)" for k, n in sorted(by.items())) + " (a strike fails them together)")
+    if e.corridor_id:
+        lines.append(f"Runs inside corridor `{e.corridor_id}`")
+    if pv:
+        lines.append(f"Provenance: **{pv['category'].replace('_', ' ')}** ({pv['confidence']:.0%}) — {pv['source']}")
+    return (
+        f"**{e.name or e.id}** (`{e.id}`)\n\n" + _bullets(lines)
+        + f"\n\nAsk “What happens if `{e.id}` fails?” to simulate it."
+    )
+
+
+def answer_dependents(s: _Session, t: Target) -> str:
+    if t.edge_id:
+        return _edge_summary(s, t.edge_id)
+    target = t.node_id
     if not target:
         return "Select a component (or name it) and I'll list what depends on it."
     ok, out = s.call("trace_network_path", {"node_id": target})
@@ -529,52 +709,53 @@ def answer_dependents(s: _Session, target: str | None) -> str:
         return f"Trace failed: {out.payload.get('error')}"
     p = out.payload
     ok2, det = s.call("get_component_details", {"node_id": target})
-    by_sys: dict[str, list[str]] = {}
+    names: dict[str, list[str]] = {}
     for h in p["dependents (cross-system consumers)"]:
-        by_sys.setdefault(h["system"], []).append(f"{h['name']} (`{h['id']}`)")
-    lines = [f"**{SYSTEM_LABEL.get(k, k)}** ({len(v)}): " + ", ".join(v[:8]) + (" …" if len(v) > 8 else "") for k, v in sorted(by_sys.items())]
+        names.setdefault(h["system"], []).append(f"{h['name']} (`{h['id']}`)")
+    counts = p.get("dependents_by_system") or {k: len(v) for k, v in names.items()}
+    lines = []
+    for k in sorted(counts):
+        shown = names.get(k, [])[:6]
+        more = counts[k] - len(shown)
+        lines.append(f"**{SYSTEM_LABEL.get(k, k)}** ({counts[k]}): " + ", ".join(shown) + (f" +{more} more" if more > 0 else ""))
     d = det.payload if ok2 else {}
     crit = ""
     if d.get("criticality_rank_n_minus_1"):
         crit = (
             f" In single-failure (N-1) analysis it ranks **#{d['criticality_rank_n_minus_1']}**"
-            f" ({d.get('nodes_affected_by_single_failure')} components affected if it fails)"
+            f" ({int(d.get('nodes_affected_by_single_failure') or 0)} components affected if it fails)"
             + (" and is a **single point of failure**." if d.get("is_single_point_of_failure") else ".")
         )
+    supply = (
+        "it is a source / core node of its network."
+        if not p["upstream_total"]
+        else " → ".join(p["source_paths"][0]) if p["source_paths"] else f"{p['upstream_total']} upstream element(s)."
+    )
     parts = [
         f"{s.name(target)} (`{target}`) serves **{p['downstream_total']}** downstream elements in its own network and "
         f"**{p['dependents_total']}** components in other systems depend on it.{crit}",
         "**Cross-system dependents**\n" + (_bullets(lines) if lines else "- none modelled"),
-        "**Upstream supply**: " + (" → ".join(p["source_paths"][0]) if p["source_paths"] else "it is a source / core node."),
+        "**Upstream supply**: " + supply,
         _caveat(),
     ]
     return "\n\n".join(parts)
 
 
-def answer_alternatives(s: _Session, target: str | None) -> str:
-    scenario = s.req.context.active_scenario
-    if scenario is None and target:
-        scenario = ScenarioInput(name=f"Failure of {s.name(target)}", failed_nodes=[target])
+def answer_alternatives(s: _Session, t: Target) -> str:
+    scenario = _pick_scenario(s, t, prefer_active=True)
     if scenario is None:
         return "Load or run a scenario (or select a component) and I'll list the alternative paths the model finds."
-    ok, out = s.call(
-        "run_failure_simulation",
-        {
-            "failed_nodes": scenario.failed_nodes,
-            "failed_edges": scenario.failed_edges,
-            "horizon_hours": scenario.horizon_hours,
-            "enable_restoration": scenario.enable_restoration,
-            "name": scenario.name,
-        },
-    )
+    ok, out = s.call("run_failure_simulation", {**_scen_args(scenario), "name": scenario.name})
     if not ok:
         return f"The simulation could not run: {out.payload.get('error')}"
     alts = out.payload["alternative_paths"]
-    if not alts:
+    total = out.payload.get("alternative_paths_total", len(alts))
+    if not total:
         return "The model finds **no alternative paths** for this scenario — affected elements have no redundant supply.\n\n" + _caveat(out.payload)
-    lines = [f"**{a['system']} · {a['purpose']}** — {a['description']}" + ("" if a["capacity_ok"] else " _(capacity-limited)_") for a in alts]
+    lines = [f"**{a['system']} · {a['purpose']}** — {_short(a['description'], 220)}" + ("" if a["capacity_ok"] else " _(capacity-limited)_") for a in alts]
+    shown = "" if total == len(alts) else f" (showing the first {len(alts)})"
     return (
-        f"The engine found **{len(alts)}** alternative path(s); they are illuminated in green in the 3D view.\n\n"
+        f"For {_initiating(s, scenario)}, the engine found **{total}** alternative path(s); they are illuminated in green in the 3D view{shown}.\n\n"
         + _bullets(lines)
         + f"\n\nRedundancy score: **{out.payload['metrics']['redundancy_score']:.0%}** of initially lost demand recovered.\n\n"
         + _caveat(out.payload)
@@ -582,7 +763,8 @@ def answer_alternatives(s: _Session, target: str | None) -> str:
 
 
 def answer_metrics(s: _Session) -> str:
-    ok, out = s.call("get_network_metrics", {"top_n": 8})
+    system = mentioned_system(s.req.message)
+    ok, out = s.call("get_network_metrics", {"top_n": 8, **({"system": system} if system else {})})
     if not ok:
         return f"Metrics unavailable: {out.payload.get('error')}"
     p = out.payload
@@ -591,16 +773,15 @@ def answer_metrics(s: _Session) -> str:
         f"{c['nodes_affected']} components affected"
         for c in p["criticality_ranking_n_minus_1"][:6]
     ]
-    spof = []
-    for sysm in p["systems"]:
-        if sysm["articulation_points_total"]:
-            spof.append(
-                f"{SYSTEM_LABEL.get(sysm['system'], sysm['system'])}: {sysm['articulation_points_total']} articulation points, "
-                f"redundancy {sysm['redundancy_fraction']:.0%}"
-            )
+    spof = [
+        f"{SYSTEM_LABEL.get(m['system'], m['system'])}: {m['articulation_points_total']} articulation points, redundancy {m['redundancy_fraction']:.0%}"
+        for m in p["systems"]
+        if m["articulation_points_total"]
+    ]
     top = p["criticality_ranking_n_minus_1"][0] if p["criticality_ranking_n_minus_1"] else None
+    scope = f" in the {SYSTEM_LABEL.get(system, system).lower()} network" if system else ""
     lead = (
-        f"The most important component is **{top['name']}** (`{top['id']}`): failing it alone produces the highest modelled severity ({top['severity_index']:.0f}/100)."
+        f"The most important component{scope} is **{top['name']}** (`{top['id']}`): failing it alone produces the highest modelled severity ({top['severity_index']:.0f}/100)."
         if top
         else "No ranking available."
     )
@@ -638,13 +819,22 @@ def answer_compare(s: _Session) -> str:
     )
 
 
-def answer_provenance(s: _Session, target: str | None) -> str:
-    if target and re.search(r"this|it|component|selected", s.req.message.lower()):
-        ok, out = s.call("get_data_provenance", {"node_id": target})
+def answer_provenance(s: _Session, t: Target) -> str:
+    specific = t.explicit or re.search(
+        r"\b(?:this|that|selected)\s+(?:component|asset|node|element|one|substation|station|facility)\b|\bit\b",
+        s.req.message.lower(),
+    )
+    if t.edge_id and specific:
+        ok, out = s.call("get_data_provenance", {"edge_id": t.edge_id})
+        if ok:
+            pv = out.payload["provenance"]
+            return f"`{t.edge_id}` is **{pv['category'].replace('_', ' ').upper()}** (confidence {pv['confidence']:.0%}). Source: {pv['source']}." + (f"\n\n{pv['notes']}" if pv.get("notes") else "")
+    if t.node_id and specific:
+        ok, out = s.call("get_data_provenance", {"node_id": t.node_id})
         if ok:
             pv = out.payload["provenance"]
             return (
-                f"{s.name(target)} (`{target}`) is **{pv['category'].replace('_', ' ').upper()}** "
+                f"{s.name(t.node_id)} (`{t.node_id}`) is **{pv['category'].replace('_', ' ').upper()}** "
                 f"(confidence {pv['confidence']:.0%}). Source: {pv['source']}."
                 + (f"\n\n{pv['notes']}" if pv.get("notes") else "")
             )
@@ -658,43 +848,51 @@ def answer_provenance(s: _Session, target: str | None) -> str:
     return "\n\n".join(
         [
             "DEEPTRACE labels every element as verified, publicly mapped, estimated or simulated. "
-            "In this build the utility topology is **simulated** (illustrative), and named public places have **estimated** locations.",
+            "In this build the utility topology is **simulated** (illustrative), and named public places have **estimated** locations. Nothing is labelled verified.",
             "**Elements by provenance**\n" + _bullets(lines),
             "**Datasets**\n" + _bullets(ds),
         ]
     )
 
 
-def answer_trace(s: _Session, target: str | None) -> str:
-    if not target:
+def answer_trace(s: _Session, t: Target) -> str:
+    if t.edge_id:
+        return _edge_summary(s, t.edge_id)
+    if not t.node_id:
         return "Select a component (or name it) to trace its connections."
-    ok, out = s.call("trace_network_path", {"node_id": target})
+    ok, out = s.call("trace_network_path", {"node_id": t.node_id})
     if not ok:
         return f"Trace failed: {out.payload.get('error')}"
     p = out.payload
+    supply = "source / core node" if not p["upstream_total"] else (" → ".join(p["source_paths"][0]) if p["source_paths"] else "—")
     return "\n\n".join(
         [
             p["summary"],
             f"- Upstream elements: **{p['upstream_total']}**\n- Downstream elements: **{p['downstream_total']}**\n"
             f"- Cross-system providers: **{len(p['dependencies (cross-system providers)'])}**\n"
             f"- Cross-system dependents: **{p['dependents_total']}**",
-            "**Supply path**: " + (" → ".join(p["source_paths"][0]) if p["source_paths"] else "source/core node"),
+            "**Supply path**: " + supply,
             "The trace is drawn in 3D: solid lines are physical connections, dashed arcs are logical dependencies.",
         ]
     )
 
 
-def answer_details(s: _Session, target: str | None) -> str:
-    if not target:
-        return (
-            "I can answer questions about the loaded network using the simulation engine, for example:\n"
-            "- “What depends on this component?” (select one first)\n"
-            "- “What happens if the Five Points substation fails?”\n"
-            "- “Why did this happen, and what could we do differently?” (after a simulation)\n"
-            "- “Which component is the most important in this network?”\n"
-            "- “What alternative routes exist?” · “Compare scenario A and B” · “Is this data real?”"
-        )
-    ok, out = s.call("get_component_details", {"node_id": target})
+_HELP = (
+    "I can answer questions about the loaded network using the simulation engine, for example:\n"
+    "- “What depends on this component?” (select one first)\n"
+    "- “What happens if the Five Points substation fails?”\n"
+    "- “Why did this happen, and what could we do differently?” (after a simulation)\n"
+    "- “Which component is the most important in the water network?”\n"
+    "- “What alternative routes exist?” · “Compare scenario A and B” · “Is this data real?”"
+)
+
+
+def answer_details(s: _Session, t: Target) -> str:
+    if t.edge_id:
+        return _edge_summary(s, t.edge_id)
+    if not t.node_id:
+        return _HELP
+    ok, out = s.call("get_component_details", {"node_id": t.node_id})
     if not ok:
         return f"Lookup failed: {out.payload.get('error')}"
     d = out.payload
@@ -723,27 +921,32 @@ def _plan_and_answer(req: AnalystRequest, engine) -> tuple[list[dict[str, Any]],
     s = _Session(req, engine)
     has_scenario = req.context.active_scenario is not None
     intent = classify(req.message, has_scenario)
-    target = resolve_target(s) if intent not in ("metrics", "compare") else None
+    t = Target() if intent in ("metrics", "compare") else resolve_target(s, allow_search=intent != "provenance")
+    if t.unknown_id and not t.found and intent not in ("provenance",):
+        return s.events, (
+            f"I couldn't find `{t.unknown_id}` in the loaded network, so I won't guess. "
+            "Use search (⌘K) to find the exact id, or describe the component by name."
+        ), s.calls
     if intent == "simulate":
-        text = answer_simulation(s, target, None if target else req.context.active_scenario)
-    elif intent == "explain_mitigate":
-        text = answer_explain_mitigate(s, target)
+        text = answer_simulation(s, t)
+    elif intent == "dependents_and_simulate":
+        text = answer_dependents(s, t) + "\n\n---\n\n" + answer_simulation(s, t)
+    elif intent in ("explain_mitigate", "affected"):
+        text = answer_explain_mitigate(s, t)
     elif intent == "dependents":
-        text = answer_dependents(s, target)
+        text = answer_dependents(s, t)
     elif intent == "alternatives":
-        text = answer_alternatives(s, target)
+        text = answer_alternatives(s, t)
     elif intent == "metrics":
         text = answer_metrics(s)
     elif intent == "compare":
         text = answer_compare(s)
     elif intent == "provenance":
-        text = answer_provenance(s, target)
+        text = answer_provenance(s, t)
     elif intent == "trace":
-        text = answer_trace(s, target)
-    elif intent == "affected":
-        text = answer_explain_mitigate(s, target)
+        text = answer_trace(s, t)
     else:
-        text = answer_details(s, target)
+        text = answer_details(s, t)
     return s.events, text, s.calls
 
 

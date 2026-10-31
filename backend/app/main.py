@@ -6,11 +6,16 @@ Run:  cd backend && .venv/bin/uvicorn app.main:app --reload --port 8000
 from __future__ import annotations
 
 import logging
+import math
 import threading
 from contextlib import asynccontextmanager
+from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.api.routes import router, warm_up
 from app.config import get_settings
@@ -47,6 +52,22 @@ app.add_middleware(
 )
 
 app.include_router(router)
+
+
+def _json_safe(v: Any) -> Any:
+    if isinstance(v, float) and not math.isfinite(v):
+        return str(v)
+    if isinstance(v, dict):
+        return {k: _json_safe(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_json_safe(x) for x in v]
+    return v
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+    """422 with a JSON-safe body (inputs may contain NaN/Infinity, which JSON cannot encode)."""
+    return JSONResponse(status_code=422, content={"detail": _json_safe(jsonable_encoder(exc.errors()))})
 
 
 @app.get("/")
