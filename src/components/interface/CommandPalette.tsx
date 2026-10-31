@@ -22,7 +22,7 @@ import { useStore } from "@/lib/store";
 import { LAYER_ORDER, SCENARIO_TYPE_LABELS, SYSTEM_STYLES, typeLabel } from "@/lib/systems";
 import { world } from "@/engine/worldBridge";
 import type { InfrastructureNode } from "@/types/infrastructure";
-import { closePanel, focusNode, openPanel, restoreWorld, runPreset, startDemo, toggleDeepMode } from "./actions";
+import { closePanel, focusNode, leaveDiff, openPanel, restoreWorld, runPreset, startDemo, toggleDeepMode } from "./actions";
 import { SYSTEM_ICONS } from "./icons";
 import { cx, Kbd, ProvenanceChip, SystemDot } from "./ui";
 
@@ -188,7 +188,10 @@ function useCommands(): Command[] {
         label: "Trace selected component",
         Icon: Waypoints,
         keywords: "trace upstream downstream dependencies selected",
-        run: () => void S().showTrace(selectedNodeId),
+        run: () => {
+          leaveDiff(); // the A/B diff view does not draw traces
+          void S().showTrace(selectedNodeId);
+        },
       });
     return cmds.filter((c) => c.id !== "demo" || demoScript);
   }, [layers, presets, deepMode, showDependencies, showParticles, showLabels, demoScript, selectedNodeId]);

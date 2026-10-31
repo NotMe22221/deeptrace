@@ -5,7 +5,7 @@
  */
 import { emptyScenario } from "@/lib/api";
 import { SCENARIO_FOR_SYSTEM } from "@/lib/format";
-import { useStore, type PanelKey } from "@/lib/store";
+import { useStore, viewOutsideDiff, type PanelKey } from "@/lib/store";
 import { connectionLabel } from "@/lib/systems";
 import { world } from "@/engine/worldBridge";
 import { useUI, type RightPanel } from "./uiStore";
@@ -107,23 +107,15 @@ export async function simulateEdgeFailure(id: string) {
 }
 
 /**
- * The A/B diff view draws neither cascade playback nor highlights. When the user drives playback
- * or turns on a highlight while the map shows the diff, switch the map to the slot that holds
- * `result` (matched by identity or scenario id) without touching result, playback or highlight.
+ * The A/B diff view draws neither cascade playback, highlights nor traces. When the user drives
+ * playback, turns on a highlight or traces a component while the map shows the diff, switch the
+ * map to the slot that holds `result` (matched by identity or scenario id) without touching
+ * result, playback, highlight or trace.
  */
 export function leaveDiff() {
   const s = S();
   if (s.compareView !== "diff") return;
-  if (!s.result) return void useStore.setState({ compareView: null });
-  const r = s.result;
-  const id = r.scenario_id;
-  const slot =
-    s.slots.A === r || s.slots.A?.scenario_id === id
-      ? "A"
-      : s.slots.B === r || s.slots.B?.scenario_id === id
-        ? "B"
-        : null;
-  useStore.setState({ compareView: slot });
+  useStore.setState({ compareView: viewOutsideDiff(s) });
 }
 
 /**

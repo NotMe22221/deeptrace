@@ -1,4 +1,5 @@
 "use client";
+import { useRef } from "react";
 import { X } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { cx } from "./ui";
@@ -20,6 +21,7 @@ export function HighlightChip() {
   const setHighlight = useStore((s) => s.setHighlight);
   // The A/B diff view does not draw highlights (e.g. one set by the analyst while comparing).
   const hiddenByDiff = useStore((s) => s.compareView === "diff" && !!s.comparison);
+  const clearRef = useRef<HTMLButtonElement>(null);
   const color = highlight ? (TONE[highlight.tone] ?? TONE.info) : TONE.info;
   const count = highlight ? highlight.node_ids.length + highlight.edge_ids.length : 0;
   return (
@@ -43,7 +45,11 @@ export function HighlightChip() {
           {hiddenByDiff && (
             <button
               type="button"
-              onClick={leaveDiff}
+              onClick={(e) => {
+                const hadFocus = document.activeElement === e.currentTarget;
+                leaveDiff(); // this button unmounts on the next render: keep keyboard focus in the chip
+                if (hadFocus) clearRef.current?.focus();
+              }}
               title="The A/B diff view does not draw highlights. Show this highlight on the map instead."
               className="shrink-0 rounded-full px-1.5 text-[10.5px] whitespace-nowrap text-sky-300 hover:bg-white/[0.08]"
             >
@@ -57,6 +63,7 @@ export function HighlightChip() {
             {count}
           </span>
           <button
+            ref={clearRef}
             type="button"
             aria-label="Clear highlight"
             title="Clear highlight"

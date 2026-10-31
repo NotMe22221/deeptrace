@@ -35,6 +35,7 @@ import {
   copyText,
   focusEdge,
   focusNode,
+  leaveDiff,
   simulateEdgeFailure,
   simulateNodeFailure,
   toggleDraftTarget,
@@ -477,6 +478,8 @@ function NodeInspector({ node, index }: { node: InfrastructureNode; index: Netwo
 
   const onTrace = async () => {
     if (tracingThis) return hideTrace();
+    // the A/B diff view does not draw traces: show this one on the map
+    leaveDiff();
     setTracing(true);
     await showTrace(node.id);
     setTracing(false);

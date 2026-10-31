@@ -226,6 +226,48 @@ async function routes(page) {
   st = await S(() => { const s = window.__deeptraceStore.getState(); return { status: s.compareStatus, cmp: !!s.comparison }; });
   check('R2 clearSimulation settles an in-flight comparison', st.status === 'idle' && !st.cmp, st);
 
+  // R3: a slot run started just BEFORE Compare that lands during the comparison keeps its slot
+  await reset();
+  await S(async () => { const s = window.__deeptraceStore.getState(); const P = (id) => s.presets.find((x) => x.id === id).scenario;
+    await s.runSimulation(P('A-DS-FIVEPOINTS'), 'A'); await window.__deeptraceStore.getState().runSimulation(P('B-EDGEWOOD-DUCTBANK'), 'B'); });
+  delays['/api/simulate'] = 1500;
+  await S(() => { const s = window.__deeptraceStore.getState(); window.__pa = s.runSimulation(s.presets.find((x) => x.id === 'C-WATER-MAIN-DECATUR').scenario, 'A'); });
+  await sleep(250); delays['/api/compare'] = 3000;
+  await S(() => { window.__pc = window.__deeptraceStore.getState().runComparison(); });
+  await S(() => Promise.all([window.__pa, window.__pc]));
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { slotA: s.slots.A?.scenario_id, result: s.result?.scenario_id, view: s.compareView, cmpA: s.comparison?.scenario_a.scenario_id }; });
+  check('R3 slot run started before Compare keeps its slot', st.slotA === 'C-WATER-MAIN-DECATUR' && st.result === 'C-WATER-MAIN-DECATUR' && st.view !== 'diff' && st.cmpA === 'A-DS-FIVEPOINTS', st);
+
+  // R3: a slot re-run that FAILS during the comparison does not block the diff view
+  await reset();
+  await S(async () => { const s = window.__deeptraceStore.getState(); const P = (id) => s.presets.find((x) => x.id === id).scenario;
+    await s.runSimulation(P('A-DS-FIVEPOINTS'), 'A'); await window.__deeptraceStore.getState().runSimulation(P('B-EDGEWOOD-DUCTBANK'), 'B'); });
+  delays['/api/compare'] = 2000;
+  await S(() => { window.__pc = window.__deeptraceStore.getState().runComparison(); });
+  await sleep(200);
+  await S(() => window.__deeptraceStore.getState().runSimulation({ failed_nodes: ['NO-SUCH-NODE'], failed_edges: [], horizon_hours: 4, enable_restoration: true }, 'A'));
+  await S(() => window.__pc);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { slotA: s.slots.A?.scenario_id, view: s.compareView, cmp: !!s.comparison }; });
+  check('R3 failed re-run during a comparison still shows the diff', st.slotA === 'A-DS-FIVEPOINTS' && st.view === 'diff' && st.cmp, st);
+
+  // R3: tracing (inspector button or analyst show_trace) leaves the diff view, which hides traces;
+  // the highlight chip's "show" button keeps keyboard focus inside the chip
+  await S(async () => { await window.__deeptraceStore.getState().selectNode('PWR-DS-FIVEPOINTS', { fly: false }); });
+  const traceBtn = page.getByRole('button', { name: 'Trace', exact: true });
+  await traceBtn.waitFor({ timeout: 30000 }); await traceBtn.click();
+  await page.waitForFunction(() => window.__deeptraceStore.getState().traceVisible, null, { timeout: 30000 });
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { view: s.compareView, trace: s.trace?.node_id }; });
+  check('R3 inspector Trace leaves the A/B diff view', st.view !== 'diff' && st.trace === 'PWR-DS-FIVEPOINTS', st);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); const tr = s.trace; s.hideTrace(); s.setCompareView('diff');
+    s.applyUIAction({ kind: 'show_trace', trace: tr, node_ids: [], edge_ids: [] }); const t = window.__deeptraceStore.getState(); return { view: t.compareView, vis: t.traceVisible }; });
+  check('R3 analyst show_trace leaves the A/B diff view', st.view !== 'diff' && st.vis, st);
+  await S(() => { const s = window.__deeptraceStore.getState(); s.hideTrace(); s.setCompareView('diff'); s.setHighlight({ node_ids: ['PWR-DS-FIVEPOINTS'], edge_ids: [], label: 'Focus test', tone: 'info', source: 'ai' }); });
+  const showBtn = page.locator('button', { hasText: 'hidden in A/B diff' }).first();
+  await showBtn.waitFor({ timeout: 30000 }); await showBtn.focus(); await page.keyboard.press('Enter');
+  await sleep(300);
+  st = await S(() => ({ view: window.__deeptraceStore.getState().compareView, focus: document.activeElement?.getAttribute('aria-label') ?? document.activeElement?.tagName }));
+  check('R3 highlight chip "show" leaves the diff and keeps focus in the chip', st.view !== 'diff' && st.focus === 'Clear highlight', st);
+
   // R2: a live result keeps its provenance after a failover (not relabelled "precomputed")
   await reset();
   st = await S(async () => { const s = window.__deeptraceStore.getState(); const r = await s.runSimulation({ failed_nodes: ['PWR-DS-FIVEPOINTS'], failed_edges: [], horizon_hours: 6, enable_restoration: true });

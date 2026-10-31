@@ -312,6 +312,19 @@ function localTrace(index: NetworkIndex, nodeId: string): TraceResult & { neighb
   };
 }
 
+/**
+ * The A/B diff view draws no cascade playback, highlight or trace. When one of those is asked for
+ * while the diff is shown, the map switches to this view: the slot that holds `result` (by identity
+ * or scenario id), or no comparison view at all.
+ */
+export function viewOutsideDiff(s: Pick<DeeptraceState, "result" | "slots">): "A" | "B" | null {
+  const r = s.result;
+  if (!r) return null;
+  if (s.slots.A === r || s.slots.A?.scenario_id === r.scenario_id) return "A";
+  if (s.slots.B === r || s.slots.B?.scenario_id === r.scenario_id) return "B";
+  return null;
+}
+
 /** An engine request that never reached the engine (network failure / timeout, no HTTP status). */
 const engineUnreachable = (e: unknown) => e instanceof ApiError && e.status === undefined;
 
@@ -526,23 +539,33 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
   /**
    * State for a new comparison. Slot objects the UI already holds are kept when they are the
    * compared scenarios, and `result` follows its slot, so the displayed result stays identifiable
-   * as A or B (the A/B chips compare by identity). A slot in `keep` was re-run after Compare was
-   * clicked: it belongs to that newer run and is kept as it is (the comparison panel then shows
-   * "Slots changed since this comparison" instead of the older run coming back).
+   * as A or B (the A/B chips compare by identity). A slot in `keep` was filled by a newer write
+   * while the comparison ran: it belongs to that write and is kept as it is (the comparison panel
+   * then shows "Slots changed since this comparison" instead of the older run coming back).
    */
   function adoptComparison(
     s: DeeptraceState,
     c: ScenarioComparison,
     keep: { A: boolean; B: boolean } = { A: false, B: false },
   ): Partial<DeeptraceState> {
-    const A = keep.A || (s.slots.A && sameScenario(s.slots.A.scenario, c.scenario_a.scenario)) ? s.slots.A : c.scenario_a;
-    const B = keep.B || (s.slots.B && sameScenario(s.slots.B.scenario, c.scenario_b.scenario)) ? s.slots.B : c.scenario_b;
+    const compared = { A: c.scenario_a, B: c.scenario_b };
+    const pick = (k: "A" | "B") => {
+      const cur = s.slots[k];
+      return cur && (keep[k] || sameScenario(cur.scenario, compared[k].scenario)) ? cur : compared[k];
+    };
+    const A = pick("A");
+    const B = pick("B");
+    // a kept slot that now holds another scenario means a newer run owns the map
+    const superseded = (["A", "B"] as const).some((k) => {
+      const cur = s.slots[k];
+      return keep[k] && !!cur && !sameScenario(cur.scenario, compared[k].scenario);
+    });
     const result = s.result && s.result === s.slots.A ? A : s.result && s.result === s.slots.B ? B : s.result;
     const moved = result !== s.result && result !== null;
     return {
       comparison: c,
       // don't swap the map from a newer run to the diff of an older comparison
-      compareView: keep.A || keep.B ? s.compareView : "diff",
+      compareView: superseded ? s.compareView : "diff",
       slots: { A, B },
       result,
       panels: { ...s.panels, comparison: true },
@@ -875,9 +898,10 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       const epoch = simEpoch;
       const seq = ++compareSeq;
       latestCompareGuard = isCurrent;
-      // a slot re-run while this comparison is in flight belongs to that newer run
-      const seqA = slotSeq.A;
-      const seqB = slotSeq.B;
+      // A slot holding another object when the comparison lands was filled by a newer write (a
+      // re-run, one already in flight at Compare, or the analyst) and belongs to it. Failed or
+      // cancelled re-runs leave the slot untouched and do not count.
+      const startSlots = get().slots;
       set({ compareStatus: "running", simError: null });
       const stale = () => {
         if (seq !== compareSeq) return true; // a newer comparison owns compareStatus
@@ -890,8 +914,10 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       try {
         const comparison = await compare(A, B);
         if (stale()) return null;
-        const keep = { A: slotSeq.A !== seqA, B: slotSeq.B !== seqB };
-        set((s) => ({ ...adoptComparison(s, comparison, keep), compareStatus: "idle" }));
+        set((s) => ({
+          ...adoptComparison(s, comparison, { A: s.slots.A !== startSlots.A, B: s.slots.B !== startSlots.B }),
+          compareStatus: "idle",
+        }));
         return comparison;
       } catch (e) {
         if (stale()) return null;
@@ -1110,7 +1136,12 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
         case "show_trace":
           if (a.trace) {
             traceSeq++;
-            set({ trace: a.trace, traceVisible: true });
+            // the analyst is showing a component's connections: the diff view would hide them
+            set((s) => ({
+              trace: a.trace,
+              traceVisible: true,
+              ...(s.compareView === "diff" && s.comparison ? { compareView: viewOutsideDiff(s) } : {}),
+            }));
           }
           break;
         case "show_simulation":
@@ -1196,6 +1227,8 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
           case "trace":
             if (get().selectedNodeId !== focus) await get().selectNode(focus, { fly: true });
             if (!current()) return;
+            // reached by a step chip from the compare step: the diff view would hide the trace
+            if (get().compareView === "diff") set((s) => ({ compareView: viewOutsideDiff(s) }));
             await get().showTrace(focus);
             break;
           case "simulate":
