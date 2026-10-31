@@ -1,0 +1,549 @@
+{
+ "_comment": "SYNTHETIC TEST DATA in Overpass API JSON format for DEEPTRACE unit tests. It is NOT real OpenStreetMap data: ids, names, tags and positions are invented (loosely shaped like the downtown Atlanta grid) and must never be used as a data source.",
+ "version": 0.6,
+ "generator": "synthetic fixture (not Overpass)",
+ "osm3s": {
+  "timestamp_osm_base": "2026-01-01T00:00:00Z",
+  "copyright": "Synthetic test data; real OSM data is \u00a9 OpenStreetMap contributors, ODbL."
+ },
+ "elements": [
+  {
+   "type": "node",
+   "id": 1001,
+   "lat": 33.76,
+   "lon": -84.394
+  },
+  {
+   "type": "node",
+   "id": 1002,
+   "lat": 33.76,
+   "lon": -84.39
+  },
+  {
+   "type": "node",
+   "id": 1003,
+   "lat": 33.76,
+   "lon": -84.386
+  },
+  {
+   "type": "node",
+   "id": 1004,
+   "lat": 33.756,
+   "lon": -84.394
+  },
+  {
+   "type": "node",
+   "id": 1005,
+   "lat": 33.756,
+   "lon": -84.39
+  },
+  {
+   "type": "node",
+   "id": 1006,
+   "lat": 33.756,
+   "lon": -84.386
+  },
+  {
+   "type": "node",
+   "id": 1007,
+   "lat": 33.752,
+   "lon": -84.394
+  },
+  {
+   "type": "node",
+   "id": 1008,
+   "lat": 33.752,
+   "lon": -84.39
+  },
+  {
+   "type": "node",
+   "id": 1009,
+   "lat": 33.752,
+   "lon": -84.386
+  },
+  {
+   "type": "node",
+   "id": 1010,
+   "lat": 33.74,
+   "lon": -84.39
+  },
+  {
+   "type": "node",
+   "id": 1011,
+   "lat": 33.76,
+   "lon": -84.382
+  },
+  {
+   "type": "node",
+   "id": 1012,
+   "lat": 33.752,
+   "lon": -84.382
+  },
+  {
+   "type": "node",
+   "id": 1013,
+   "lat": 33.754,
+   "lon": -84.39
+  },
+  {
+   "type": "node",
+   "id": 1014,
+   "lat": 33.754,
+   "lon": -84.388
+  },
+  {
+   "type": "node",
+   "id": 3101,
+   "lat": 33.7468,
+   "lon": -84.3988
+  },
+  {
+   "type": "node",
+   "id": 3102,
+   "lat": 33.7468,
+   "lon": -84.3982
+  },
+  {
+   "type": "node",
+   "id": 3103,
+   "lat": 33.7472,
+   "lon": -84.3982
+  },
+  {
+   "type": "node",
+   "id": 3104,
+   "lat": 33.7472,
+   "lon": -84.3988
+  },
+  {
+   "type": "node",
+   "id": 3201,
+   "lat": 33.765,
+   "lon": -84.399
+  },
+  {
+   "type": "node",
+   "id": 3202,
+   "lat": 33.765,
+   "lon": -84.38
+  },
+  {
+   "type": "node",
+   "id": 3301,
+   "lat": 33.7577,
+   "lon": -84.3971
+  },
+  {
+   "type": "node",
+   "id": 3302,
+   "lat": 33.7539,
+   "lon": -84.3917
+  },
+  {
+   "type": "way",
+   "id": 2001,
+   "nodes": [
+    1001,
+    1004,
+    1007
+   ],
+   "geometry": [
+    {
+     "lat": 33.76,
+     "lon": -84.394
+    },
+    {
+     "lat": 33.756,
+     "lon": -84.394
+    },
+    {
+     "lat": 33.752,
+     "lon": -84.394
+    }
+   ],
+   "tags": {
+    "highway": "secondary",
+    "name": "Spring Street Northwest",
+    "lanes": "3"
+   }
+  },
+  {
+   "type": "way",
+   "id": 2002,
+   "nodes": [
+    1002,
+    1005,
+    1008,
+    1010
+   ],
+   "geometry": [
+    {
+     "lat": 33.76,
+     "lon": -84.39
+    },
+    {
+     "lat": 33.756,
+     "lon": -84.39
+    },
+    {
+     "lat": 33.752,
+     "lon": -84.39
+    },
+    {
+     "lat": 33.74,
+     "lon": -84.39
+    }
+   ],
+   "tags": {
+    "highway": "primary",
+    "name": "Peachtree Street Northeast",
+    "lanes": "4",
+    "maxspeed": "30 mph"
+   }
+  },
+  {
+   "type": "way",
+   "id": 2003,
+   "nodes": [
+    1003,
+    1006,
+    1009
+   ],
+   "geometry": [
+    {
+     "lat": 33.76,
+     "lon": -84.386
+    },
+    {
+     "lat": 33.756,
+     "lon": -84.386
+    },
+    {
+     "lat": 33.752,
+     "lon": -84.386
+    }
+   ],
+   "tags": {
+    "highway": "secondary",
+    "name": "Courtland Street Northeast",
+    "oneway": "yes"
+   }
+  },
+  {
+   "type": "way",
+   "id": 2004,
+   "nodes": [
+    1001,
+    1002,
+    1003
+   ],
+   "geometry": [
+    {
+     "lat": 33.76,
+     "lon": -84.394
+    },
+    {
+     "lat": 33.76,
+     "lon": -84.39
+    },
+    {
+     "lat": 33.76,
+     "lon": -84.386
+    }
+   ],
+   "tags": {
+    "highway": "secondary",
+    "name": "Andrew Young International Boulevard Northwest"
+   }
+  },
+  {
+   "type": "way",
+   "id": 2005,
+   "nodes": [
+    1004,
+    1005,
+    1006
+   ],
+   "geometry": [
+    {
+     "lat": 33.756,
+     "lon": -84.394
+    },
+    {
+     "lat": 33.756,
+     "lon": -84.39
+    },
+    {
+     "lat": 33.756,
+     "lon": -84.386
+    }
+   ],
+   "tags": {
+    "highway": "secondary",
+    "name": "Marietta Street Northwest",
+    "maxspeed": "25 mph"
+   }
+  },
+  {
+   "type": "way",
+   "id": 2006,
+   "nodes": [
+    1007,
+    1008,
+    1009
+   ],
+   "geometry": [
+    {
+     "lat": 33.752,
+     "lon": -84.394
+    },
+    {
+     "lat": 33.752,
+     "lon": -84.39
+    },
+    {
+     "lat": 33.752,
+     "lon": -84.386
+    }
+   ],
+   "tags": {
+    "highway": "tertiary",
+    "name": "Edgewood Avenue Northeast"
+   }
+  },
+  {
+   "type": "way",
+   "id": 2007,
+   "nodes": [
+    1011,
+    1012
+   ],
+   "geometry": [
+    {
+     "lat": 33.76,
+     "lon": -84.382
+    },
+    {
+     "lat": 33.752,
+     "lon": -84.382
+    }
+   ],
+   "tags": {
+    "highway": "motorway",
+    "name": "Downtown Connector",
+    "ref": "I 75;I 85",
+    "oneway": "yes"
+   }
+  },
+  {
+   "type": "way",
+   "id": 2008,
+   "nodes": [
+    1012,
+    1009
+   ],
+   "geometry": [
+    {
+     "lat": 33.752,
+     "lon": -84.382
+    },
+    {
+     "lat": 33.752,
+     "lon": -84.386
+    }
+   ],
+   "tags": {
+    "highway": "motorway_link",
+    "oneway": "yes"
+   }
+  },
+  {
+   "type": "way",
+   "id": 2009,
+   "nodes": [
+    1013,
+    1014
+   ],
+   "geometry": [
+    {
+     "lat": 33.754,
+     "lon": -84.39
+    },
+    {
+     "lat": 33.754,
+     "lon": -84.388
+    }
+   ],
+   "tags": {
+    "highway": "footway",
+    "name": "Synthetic footpath"
+   }
+  },
+  {
+   "type": "way",
+   "id": 2010,
+   "nodes": [
+    1005,
+    1014
+   ],
+   "geometry": [
+    {
+     "lat": 33.756,
+     "lon": -84.39
+    },
+    {
+     "lat": 33.754,
+     "lon": -84.388
+    }
+   ],
+   "tags": {
+    "highway": "service"
+   }
+  },
+  {
+   "type": "node",
+   "id": 3001,
+   "lat": 33.7527,
+   "lon": -84.3934,
+   "tags": {
+    "power": "substation",
+    "name": "Synthetic substation A",
+    "voltage": "115000;12470"
+   }
+  },
+  {
+   "type": "way",
+   "id": 3002,
+   "nodes": [
+    3101,
+    3102,
+    3103,
+    3104,
+    3101
+   ],
+   "geometry": [
+    {
+     "lat": 33.7468,
+     "lon": -84.3988
+    },
+    {
+     "lat": 33.7468,
+     "lon": -84.3982
+    },
+    {
+     "lat": 33.7472,
+     "lon": -84.3982
+    },
+    {
+     "lat": 33.7472,
+     "lon": -84.3988
+    },
+    {
+     "lat": 33.7468,
+     "lon": -84.3988
+    }
+   ],
+   "tags": {
+    "power": "substation",
+    "name": "Synthetic substation B"
+   }
+  },
+  {
+   "type": "node",
+   "id": 3003,
+   "lat": 33.77,
+   "lon": -84.3835,
+   "tags": {
+    "man_made": "water_tower",
+    "name": "Synthetic water tower"
+   }
+  },
+  {
+   "type": "node",
+   "id": 3004,
+   "lat": 33.7627,
+   "lon": -84.3876,
+   "tags": {
+    "telecom": "exchange",
+    "name": "Synthetic exchange"
+   }
+  },
+  {
+   "type": "node",
+   "id": 3005,
+   "lat": 33.752,
+   "lon": -84.3815,
+   "tags": {
+    "amenity": "hospital",
+    "name": "Grady Memorial Hospital",
+    "note": "synthetic test record"
+   }
+  },
+  {
+   "type": "node",
+   "id": 3006,
+   "lat": 33.754,
+   "lon": -84.3915,
+   "tags": {
+    "railway": "station",
+    "public_transport": "station",
+    "name": "Five Points",
+    "network": "MARTA"
+   }
+  },
+  {
+   "type": "way",
+   "id": 3007,
+   "nodes": [
+    3201,
+    3202
+   ],
+   "geometry": [
+    {
+     "lat": 33.765,
+     "lon": -84.399
+    },
+    {
+     "lat": 33.765,
+     "lon": -84.38
+    }
+   ],
+   "tags": {
+    "power": "line",
+    "voltage": "115000"
+   }
+  },
+  {
+   "type": "way",
+   "id": 3008,
+   "nodes": [
+    3301,
+    3302
+   ],
+   "geometry": [
+    {
+     "lat": 33.7577,
+     "lon": -84.3971
+    },
+    {
+     "lat": 33.7539,
+     "lon": -84.3917
+    }
+   ],
+   "tags": {
+    "railway": "subway",
+    "name": "Synthetic subway"
+   }
+  },
+  {
+   "type": "node",
+   "id": 3009,
+   "lat": 33.7,
+   "lon": -84.3,
+   "tags": {
+    "amenity": "police",
+    "name": "Outside the bbox"
+   }
+  }
+ ]
+}

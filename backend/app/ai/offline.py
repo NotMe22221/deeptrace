@@ -107,7 +107,7 @@ def classify(msg: str, has_scenario: bool) -> str:
     m = msg.lower()
     if re.search(r"\bcompar|\bversus\b|\bvs\.?\b|scenario a.*scenario b", m):
         return "compare"
-    if re.search(r"provenance|is (this|it) real|verified|accurate|data source|where does the data|real data|simulated data", m):
+    if re.search(r"provenance|\breal\b(?!-time)|verified|accurate|data source|where does the data|simulated data|made up|fake|trust", m):
         return "provenance"
     if re.search(r"differently|mitigat|prevent|recommend|reduce the impact|improve|resilien|harden", m):
         return "explain_mitigate"
@@ -178,10 +178,14 @@ def _caveat(p: dict[str, Any] | None = None) -> str:
     return base
 
 
-def _mitigation_candidates(s: _Session, r: SimulationResult) -> list[tuple[str, dict[str, Any]]]:
-    """Rule-based mitigation candidates derived from structured simulation output."""
+def _mitigation_candidates(s: _Session, r: SimulationResult) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Rule-based mitigation candidates derived from structured simulation output.
+
+    Each candidate is (description, modifications) and is later quantified by re-running
+    the scenario with ``evaluate_mitigation``.
+    """
     nodes, edges = _indices(s.net)
-    cands: list[tuple[str, dict[str, Any]]] = []
+    cands: list[tuple[str, list[dict[str, Any]]]] = []
     seen: set[str] = set()
 
     def is_power(i: str) -> bool:
@@ -189,9 +193,11 @@ def _mitigation_candidates(s: _Session, r: SimulationResult) -> list[tuple[str, 
             i in edges and edges[i].infrastructure_type.value == "power"
         )
 
-    # (a) consumers that lost function because they lost power and lack backup
-    priority = {"pump_station": 0, "internet_exchange": 1, "data_center": 1, "central_office": 2, "hospital": 0,
-                "transit_station": 3, "cell_site": 4}
+    hours = max(8.0, r.scenario.horizon_hours * 2)
+
+    # (a) consumers that lost their function because they lost power and lack backup
+    priority = {"hospital": 0, "pump_station": 0, "internet_exchange": 1, "data_center": 1, "central_office": 2,
+                "transit_station": 3, "cell_site": 4, "access_node": 5}
     power_victims = [
         a for a in r.affected_nodes
         if a.system.value not in ("power", "underground")
@@ -201,57 +207,59 @@ def _mitigation_candidates(s: _Session, r: SimulationResult) -> list[tuple[str, 
         and (any(is_power(c) for c in a.caused_by) or "power" in a.cause.lower())
     ]
     power_victims.sort(key=lambda a: (priority.get(nodes[a.node_id].type, 9), SEVERITY_ORDER[a.severity], a.node_id))
-    for a in power_victims[:2]:
+    for a in power_victims[:3]:
         if a.node_id in seen:
             continue
         seen.add(a.node_id)
-        hours = max(8.0, r.scenario.horizon_hours * 2)
         cands.append(
             (
-                f"Add {hours:g} h of backup generation/batteries at {s.name(a.node_id)} (`{a.node_id}`) — it fails because it has no backup for the outage horizon.",
-                {"kind": "backup_power", "target_id": a.node_id, "hours": hours},
+                f"Add {hours:g} h of backup power at {s.name(a.node_id)} (`{a.node_id}`), which goes dark because its backup does not cover the {r.scenario.horizon_hours:g} h horizon.",
+                [{"kind": "backup_power", "target_id": a.node_id, "hours": hours}],
             )
         )
 
-    # (b) capacity-limited restoration through tie lines
+    # (b) capacity-limited restoration through tie switches: upgrade the whole tie unit
     for p in r.alternative_paths:
-        if p.system.value == "power" and not p.capacity_ok:
-            tie = next((e for e in p.edge_ids if e in edges and edges[e].connection_type == "tie_line"), None)
-            if tie and tie not in seen:
-                seen.add(tie)
-                cands.append(
-                    (
-                        f"Increase the rating of tie `{tie}` (or add a second tie) — automatic restoration was capacity-limited.",
-                        {"kind": "capacity_upgrade", "target_id": tie, "factor": 2.0},
-                    )
-                )
-                break
+        if p.system.value != "power" or p.capacity_ok:
+            continue
+        tie_edges = [e for e in p.edge_ids if e in edges and edges[e].connection_type == "tie_line"]
+        tie_switches = [
+            n for n in p.node_ids
+            if n in nodes and nodes[n].type == "switch" and nodes[n].properties.get("normally_open")
+        ]
+        key = "|".join(sorted(tie_edges + tie_switches))
+        if not tie_edges or key in seen:
+            continue
+        seen.add(key)
+        mods = [{"kind": "capacity_upgrade", "target_id": e, "factor": 2.0} for e in tie_edges]
+        mods += [
+            {"kind": "capacity_upgrade", "target_id": n, "factor": 2.0}
+            for n in tie_switches
+            if nodes[n].capacity is not None
+        ]
+        label = tie_switches[0] if tie_switches else tie_edges[0]
+        cands.append(
+            (
+                f"Double the rating of tie `{label}` ({', '.join(f'`{e}`' for e in tie_edges)}), because automatic restoration through it was capacity-limited.",
+                mods[:5],
+            )
+        )
+        if sum(1 for c in cands if c[1][0]["kind"] == "capacity_upgrade") >= 2:
+            break
 
     # (c) common-cause corridor failure hitting telecom
     corridor_edges = [e for e in r.scenario.failed_edges if e in edges and edges[e].infrastructure_type.value == "underground"]
     for cid in corridor_edges:
         hosted = [h for h in edges[cid].properties.get("hosted_edge_ids", []) if h in edges]
-        fibre = next((h for h in hosted if edges[h].infrastructure_type.value == "telecom"), None)
-        if fibre and fibre not in seen:
-            seen.add(fibre)
+        fibre = [h for h in hosted if edges[h].infrastructure_type.value == "telecom"]
+        if fibre and cid not in seen:
+            seen.add(cid)
             cands.append(
                 (
-                    f"Route fibre `{fibre}` through a physically diverse path instead of shared duct bank `{cid}` — one excavation strike currently cuts power and internet together.",
-                    {"kind": "separate_corridor", "target_id": fibre},
+                    f"Route the fibre in duct bank `{cid}` ({', '.join(f'`{f}`' for f in fibre[:3])}) along a physically diverse path, since one excavation strike currently cuts power and internet together.",
+                    [{"kind": "separate_corridor", "target_id": f} for f in fibre[:5]],
                 )
             )
-
-    # (d) unbacked telecom sites
-    for a in r.affected_nodes:
-        if a.system.value == "telecom" and a.state in ("failed", "outage") and a.node_id not in seen and len(cands) < 4:
-            if any(is_power(c) for c in a.caused_by):
-                seen.add(a.node_id)
-                cands.append(
-                    (
-                        f"Extend battery backup at {s.name(a.node_id)} (`{a.node_id}`) beyond the {r.scenario.horizon_hours:g} h horizon.",
-                        {"kind": "backup_power", "target_id": a.node_id, "hours": max(8.0, r.scenario.horizon_hours * 2)},
-                    )
-                )
     return cands
 
 
@@ -289,8 +297,8 @@ def answer_simulation(s: _Session, target: str | None, scenario: ScenarioInput |
         return f"The simulation could not run: {out.payload.get('error')}"
     p = out.payload
     failed = ", ".join(f"{f['name']} (`{f['id']}`)" for f in p["failed_nodes"]) or ", ".join(f"`{e}`" for e in p["failed_edges"])
-    steps = [f"**Step {c['step']} — {c['label']}**: {c['description']}" for c in p["cascade_steps"][:6]]
-    alts = [f"{a['description']}" + ("" if a["capacity_ok"] else " _(capacity-limited)_") for a in p["alternative_paths"][:4]]
+    steps = [f"**Step {c['step']}**: {_short(c['label'], 200)}" for c in p["cascade_steps"][:6]]
+    alts = [_short(a["description"], 200) + ("" if a["capacity_ok"] else " _(capacity-limited)_") for a in p["alternative_paths"][:4]]
     parts = [
         f"If {failed} fails, the modelled cascade spreads across "
         f"{len({c['system'] for c in p['affected_components']})} system(s).",
@@ -303,6 +311,53 @@ def answer_simulation(s: _Session, target: str | None, scenario: ScenarioInput |
     return "\n\n".join(parts)
 
 
+def _short(text: str, limit: int = 170) -> str:
+    """First clause of an engine sentence, bounded in length."""
+    t = text.split("; ")[0].strip()
+    return t if len(t) <= limit else t[: limit - 1].rsplit(" ", 1)[0] + "…"
+
+
+def _consequence_lines(s: _Session, r: SimulationResult) -> list[str]:
+    """Group the most serious consequences by system instead of listing every element."""
+    nodes, _ = _indices(s.net)
+    lines: list[str] = []
+    initiating = set(r.failed_nodes)
+    power_out = [a for a in r.affected_nodes if a.system.value == "power" and a.state in ("de_energized", "failed") and a.node_id not in initiating]
+    restored = [a for a in r.affected_nodes if a.state == "restored"]
+    if power_out or restored:
+        lines.append(
+            f"Electricity: {len(power_out)} element(s) remain de-energised"
+            + (f", {len(restored)} restored by automatic tie switching" if restored else "")
+            + f" ({r.impact_metrics.power_load_unserved_mw:.1f} MW unserved)."
+        )
+    order = ("facility", "water", "telecom", "transport")
+    for sysname in order:
+        rows = [
+            a for a in r.affected_nodes
+            if a.system.value == sysname and a.state not in ("restored", "rerouted", "operational") and a.node_id not in initiating
+        ]
+        if not rows:
+            continue
+        rows.sort(key=lambda a: (SEVERITY_ORDER[a.severity], a.step, a.node_id))
+        by_state: dict[str, list[str]] = {}
+        for a in rows:
+            by_state.setdefault(a.state.replace("_", " "), []).append(s.name(a.node_id))
+        parts = []
+        for state, names in by_state.items():
+            shown = ", ".join(names[:3]) + (f" +{len(names) - 3} more" if len(names) > 3 else "")
+            parts.append(f"{state}: {shown}")
+        lines.append(f"{SYSTEM_LABEL[sysname]}: " + "; ".join(parts) + ".")
+    return lines
+
+
+def _initiating(s: _Session, scenario: ScenarioInput) -> str:
+    """Name the scenario's own failed elements (not the engine-expanded hosted edges)."""
+    _, edges = _indices(s.net)
+    parts = [f"{s.name(n)} (`{n}`)" for n in scenario.failed_nodes]
+    parts += [f"{edges[e].name or e} (`{e}`)" if e in edges else f"`{e}`" for e in scenario.failed_edges]
+    return ", ".join(parts) or "the selected elements"
+
+
 def answer_explain_mitigate(s: _Session, target: str | None) -> str:
     scenario = s.req.context.active_scenario
     if scenario is None:
@@ -312,77 +367,68 @@ def answer_explain_mitigate(s: _Session, target: str | None) -> str:
                 "and I'll explain the cascade and recommend mitigations."
             )
         scenario = ScenarioInput(name=f"Failure of {s.name(target)}", failed_nodes=[target])
-    ok, out = s.call(
-        "get_affected_components",
-        {
-            "failed_nodes": scenario.failed_nodes,
-            "failed_edges": scenario.failed_edges,
-            "horizon_hours": scenario.horizon_hours,
-            "enable_restoration": scenario.enable_restoration,
-            "min_severity": "minor",
-        },
-    )
+    scen_args = {
+        "failed_nodes": scenario.failed_nodes,
+        "failed_edges": scenario.failed_edges,
+        "horizon_hours": scenario.horizon_hours,
+        "enable_restoration": scenario.enable_restoration,
+    }
+    ok, out = s.call("get_affected_components", {**scen_args, "min_severity": "minor"})
     if not ok:
         return f"I couldn't analyse the scenario: {out.payload.get('error')}"
-    result = next(iter(s.ctx.results.values()))
+    result = s.ctx.results[out.payload["scenario_id"]]
     from app.ai.tools import summarize_result
 
     p = summarize_result(s.ctx, result)
-    initiating = ", ".join(f"{f['name']} (`{f['id']}`)" for f in p["failed_nodes"]) or ", ".join(
-        f"`{e}`" for e in p["failed_edges"]
-    )
-    why = [f"**Step {c['step']} — {c['label']}**: {c['description']}" for c in p["cascade_steps"][:7]]
-    worst = [
-        f"{c['name']} (`{c['id']}`) — {c['state'].replace('_', ' ')}: {c['cause']}"
-        for c in p["affected_components"]
-        if c["severity"] in ("critical", "major")
-    ][:5]
+    initiating = _initiating(s, scenario)
+    why = [f"**Step {c['step']}**: {_short(c['label'], 200)}" for c in p["cascade_steps"][:6]]
 
-    cands = _mitigation_candidates(s, result)
-    quantified: list[str] = []
-    for text, mod in cands[:3]:
-        ok2, out2 = s.call(
-            "evaluate_mitigation",
-            {
-                "scenario": {
-                    "failed_nodes": scenario.failed_nodes,
-                    "failed_edges": scenario.failed_edges,
-                    "horizon_hours": scenario.horizon_hours,
-                    "enable_restoration": scenario.enable_restoration,
-                },
-                "modifications": [mod],
-            },
-        )
-        if ok2:
-            ch = {c["metric"]: c for c in out2.payload["metric_changes"]}
-            sev = ch["Severity index"]
-            aff = ch["Components affected"]
-            saved = out2.payload["critical_facilities_no_longer_affected"]
-            effect = (
-                f"severity {sev['before']:.0f} → {sev['after']:.0f}, components affected {aff['before']:.0f} → {aff['after']:.0f}"
-            )
-            if saved:
-                effect += "; protects " + ", ".join(x["name"] for x in saved[:3])
-            quantified.append(f"{text} **Modelled effect:** {effect}.")
+    # Quantify every candidate with the engine, then rank by modelled severity reduction.
+    ranked: list[tuple[float, str]] = []
+    no_effect: list[str] = []
+    for text, mods in _mitigation_candidates(s, result)[:5]:
+        ok2, out2 = s.call("evaluate_mitigation", {"scenario": scen_args, "modifications": mods})
+        if not ok2:
+            continue
+        ch = {c["metric"]: c for c in out2.payload["metric_changes"]}
+        sev, aff = ch["Severity index"], ch["Components affected"]
+        gain = sev["before"] - sev["after"]
+        saved = out2.payload["critical_facilities_no_longer_affected"]
+        effect = f"severity {sev['before']:.0f} → {sev['after']:.0f}, affected components {aff['before']:.0f} → {aff['after']:.0f}"
+        if ch["Power unserved"]["change"] < -0.05:
+            effect += f", unserved power {ch['Power unserved']['before']:.1f} → {ch['Power unserved']['after']:.1f} MW"
+        if saved:
+            effect += "; protects " + ", ".join(x["name"] for x in saved[:3])
+        if gain > 0.05 or saved:
+            ranked.append((gain, f"{text} **Modelled effect:** {effect}."))
         else:
-            quantified.append(text)
-    qual = _qualitative_mitigations(result)
+            no_effect.append(text.split(",")[0].split(" (")[0])
+    ranked.sort(key=lambda x: -x[0])
+    mit = [t for _, t in ranked[:3]]
+    if no_effect:
+        mit.append(
+            "Tested with no modelled improvement (another limit binds): " + "; ".join(no_effect[:2]) + "."
+        )
+    mit += _qualitative_mitigations(result)
 
     lead = (
-        f"The cascade starts at {initiating} and propagates because downstream components have no alternative supply "
-        f"with enough capacity, and other systems depend on them without sufficient backup."
+        f"The cascade starts at {initiating}. It spreads because the affected section has no alternative supply with "
+        f"enough spare capacity, and other systems depend on it without enough backup for the "
+        f"{scenario.horizon_hours:g} h horizon."
     )
-    parts = [lead, "**What the simulation shows**\n" + _bullets(_sim_overview(s, p)), "**Why it cascades**\n" + _bullets(why)]
-    if worst:
-        parts.append("**Most serious consequences**\n" + _bullets(worst))
+    parts = [
+        lead,
+        "**What the simulation shows**\n" + _bullets(_sim_overview(s, p)),
+        "**Why it cascades**\n" + _bullets(why),
+    ]
+    cons = _consequence_lines(s, result)
+    if cons:
+        parts.append("**Consequences by system**\n" + _bullets(cons))
     if p["alternative_paths"]:
         parts.append(
             "**What already helped**\n"
-            + _bullets(
-                [a["description"] + ("" if a["capacity_ok"] else " _(capacity-limited)_") for a in p["alternative_paths"][:4]]
-            )
+            + _bullets([_short(a["description"], 200) + ("" if a["capacity_ok"] else " _(capacity-limited)_") for a in p["alternative_paths"][:3]])
         )
-    mit = quantified + qual
     if mit:
         parts.append("**What we could do differently**\n" + _bullets(mit))
     parts.append(_caveat(p))
