@@ -55,7 +55,7 @@ const API = process.env.NEXT_PUBLIC_DEEPTRACE_API_URL || "http://localhost:8000"
   const mode = await page.evaluate(() => window.__deeptraceStore.getState().dataMode);
   console.log(`data mode: ${mode}`);
   await page.waitForTimeout(4000);
-  await page.screenshot({ path: path.join(OUT, "00-boot.png") });
+  await page.screenshot({ path: path.join(OUT, "00-boot.png"), timeout: 120000 });
 
   await page.evaluate(() => window.__deeptraceStore.getState().startDemo());
   const steps = await page.evaluate(() => window.__deeptraceStore.getState().demoScript.steps.length);
@@ -82,7 +82,7 @@ const API = process.env.NEXT_PUBLIC_DEEPTRACE_API_URL || "http://localhost:8000"
       };
     });
     console.log(JSON.stringify(info));
-    await page.screenshot({ path: path.join(OUT, `${String(i + 1).padStart(2, "0")}-${info.action}.png`) });
+    await page.screenshot({ path: path.join(OUT, `${String(i + 1).padStart(2, "0")}-${info.action}.png`), timeout: 120000 });
   }
   const final = await page.evaluate(() => {
     const s = window.__deeptraceStore.getState();
@@ -90,7 +90,7 @@ const API = process.env.NEXT_PUBLIC_DEEPTRACE_API_URL || "http://localhost:8000"
   });
   await page.evaluate(() => window.__deeptraceStore.getState().restoreWorld());
   await page.waitForTimeout(2500);
-  await page.screenshot({ path: path.join(OUT, "11-restored.png") });
+  await page.screenshot({ path: path.join(OUT, "11-restored.png"), timeout: 120000 });
   await browser.close();
 
   const ok = final.comparison && final.slots[0] && final.slots[1] && problems.length === 0;
