@@ -3,13 +3,7 @@ import { useEffect } from "react";
 import { useStore } from "@/lib/store";
 import { isTypingTarget } from "@/lib/format";
 import { world } from "@/engine/worldBridge";
-import {
-  closePanel,
-  leaveDiffForPlayback,
-  openPanel,
-  toggleDeepMode,
-  togglePanel,
-} from "@/components/interface/actions";
+import { closePanel, leaveDiff, openPanel, toggleDeepMode, togglePanel } from "@/components/interface/actions";
 import { useUI, type RightPanel } from "@/components/interface/uiStore";
 
 const RIGHT: RightPanel[] = ["inspector", "analyst", "comparison", "provenance"];
@@ -69,9 +63,14 @@ export function useGlobalShortcuts() {
           return;
         case "ArrowRight":
         case "ArrowLeft": {
-          // Focused controls that use the arrow keys (range sliders, radios, tabs) keep them.
+          // Only controls that really move with the arrow keys keep them: range sliders (depth,
+          // horizon, cascade scrubber) and native radios. Text fields are excluded above by
+          // isTypingTarget. Our role=tab / role=radio buttons (demo step dots, panel tabs, Show A/B/Diff)
+          // have no arrow handling, so the demo keeps the arrows there. If roving arrow navigation is
+          // added to those groups later, add their selectors here.
           const t = e.target as HTMLElement | null;
-          const onControl = t && t !== document.body && t.closest("input, [role=slider], [role=tab], [role=radio]");
+          const onControl =
+            t && t !== document.body && t.closest("input[type=range], input[type=radio], [role=slider]");
           if (onControl || !S.demo.active || S.demo.busy) return;
           e.preventDefault();
           void (k === "ArrowRight" ? S.demoNext() : S.demoPrev());
@@ -85,7 +84,7 @@ export function useGlobalShortcuts() {
           const atEnd = S.playback.step >= S.playback.maxStep;
           if (S.playback.playing) return S.setPlaying(false);
           // Playback only renders outside the A/B diff view.
-          leaveDiffForPlayback();
+          leaveDiff();
           if (atEnd) S.replayCascade();
           else S.setPlaying(true);
           return;

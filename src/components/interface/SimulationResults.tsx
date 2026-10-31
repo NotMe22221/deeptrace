@@ -6,7 +6,7 @@ import { fmtCompact, fmtMeters, fmtNum, fmtPct, fmtSeconds } from "@/lib/format"
 import { LAYER_ORDER, NODE_STATE_STYLES, SYSTEM_STYLES, typeLabel } from "@/lib/systems";
 import { world } from "@/engine/worldBridge";
 import type { AlternativePath, SimulationResult, SystemType } from "@/types/infrastructure";
-import { focusNode, leaveDiffForPlayback } from "./actions";
+import { focusNode, leaveDiff } from "./actions";
 import { affectedStyle } from "./stateStyle";
 import { Chip, cx, IconButton, SectionLabel, Slider, SystemDot, Tooltip } from "./ui";
 
@@ -213,6 +213,8 @@ export function ResultOverview({ result }: { result: SimulationResult }) {
             aria-pressed={critCount ? critActive : undefined}
             onClick={() => {
               if (critActive) return setHighlight(null);
+              // the A/B diff view does not draw highlights: show the result being highlighted
+              leaveDiff();
               setHighlight({
                 node_ids: m.critical_facilities_affected,
                 edge_ids: [],
@@ -321,7 +323,7 @@ export function PlaybackControls({ compact }: { compact?: boolean }) {
           label="Replay cascade"
           size="sm"
           onClick={() => {
-            leaveDiffForPlayback();
+            leaveDiff();
             replayCascade();
           }}
         >
@@ -334,7 +336,7 @@ export function PlaybackControls({ compact }: { compact?: boolean }) {
           size="sm"
           disabled={playback.step <= 0}
           onClick={() => {
-            leaveDiffForPlayback();
+            leaveDiff();
             setPlaying(false);
             setPlaybackStep(playback.step - 1);
           }}
@@ -348,7 +350,7 @@ export function PlaybackControls({ compact }: { compact?: boolean }) {
         pressed={playback.playing}
         onClick={() => {
           if (playback.playing) return setPlaying(false);
-          leaveDiffForPlayback();
+          leaveDiff();
           if (atEnd) replayCascade();
           else setPlaying(true);
         }}
@@ -367,7 +369,7 @@ export function PlaybackControls({ compact }: { compact?: boolean }) {
           size="sm"
           disabled={atEnd}
           onClick={() => {
-            leaveDiffForPlayback();
+            leaveDiff();
             setPlaying(false);
             setPlaybackStep(playback.step + 1);
           }}
@@ -417,7 +419,7 @@ export function CascadeTimeline({ result }: { result: SimulationResult }) {
             min={0}
             max={Math.max(1, playback.maxStep)}
             onChange={(v) => {
-              leaveDiffForPlayback();
+              leaveDiff();
               setPlaying(false);
               setPlaybackStep(v);
             }}
@@ -449,7 +451,7 @@ export function CascadeTimeline({ result }: { result: SimulationResult }) {
                 type="button"
                 aria-current={current ? "step" : undefined}
                 onClick={() => {
-                  leaveDiffForPlayback();
+                  leaveDiff();
                   setPlaying(false);
                   setPlaybackStep(s.step);
                 }}
@@ -672,10 +674,19 @@ function AffectedGroups({ result }: { result: SimulationResult }) {
   );
 }
 
+/** Element-wise id comparison (the highlight stores the path's arrays unchanged). */
+const sameIds = (a: readonly string[], b: readonly string[]) =>
+  a.length === b.length && a.every((id, i) => id === b[i]);
+
 function AltPathRow({ p }: { p: AlternativePath }) {
   const highlight = useStore((s) => s.highlight);
   const setHighlight = useStore((s) => s.setHighlight);
-  const active = highlight?.label === p.purpose && highlight.tone === "success";
+  // Every path of a system shares one purpose ("fibre reroute"…), so identify the path by its ids.
+  const active =
+    highlight?.tone === "success" &&
+    highlight.label === p.purpose &&
+    sameIds(highlight.edge_ids, p.edge_ids) &&
+    sameIds(highlight.node_ids, p.node_ids);
   return (
     <li>
       <button
@@ -683,6 +694,8 @@ function AltPathRow({ p }: { p: AlternativePath }) {
         aria-pressed={active}
         onClick={() => {
           if (active) return setHighlight(null);
+          // the A/B diff view does not draw highlights: show the result being highlighted
+          leaveDiff();
           setHighlight({
             node_ids: p.node_ids,
             edge_ids: p.edge_ids,

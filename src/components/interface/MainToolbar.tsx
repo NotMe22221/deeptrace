@@ -12,7 +12,7 @@ import {
   Search,
   X,
 } from "lucide-react";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useIsPresent } from "framer-motion";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { isTypingTarget } from "@/lib/format";
 import { useStore, type PanelKey } from "@/lib/store";
@@ -369,17 +369,23 @@ function NarrowMenu({
   const panels = useStore((s) => s.panels);
   const demoActive = useStore((s) => s.demo.active);
   const exitDemo = useStore((s) => s.exitDemo);
+  // false while AnimatePresence plays the exit animation (the menu is already closed then)
+  const isPresent = useIsPresent();
   useEffect(() => {
+    // While exiting, attach nothing, so Esc and taps reach the global handlers.
+    if (!isPresent) return;
     const onDown = (e: PointerEvent) => {
       const t = e.target as HTMLElement;
       if (t.closest?.("[data-menu-toggle]")) return;
       if (ref.current && !ref.current.contains(t)) onClose();
     };
-    // The menu is the top-most surface: take Esc in the capture phase and stop it, so the
-    // global Esc handler does not also close the sheet underneath. Text fields (e.g. the
-    // command palette opened over the menu) keep their own Esc.
+    // Take Esc in the capture phase (so the global handler does not also close the sheet
+    // underneath) only when the menu is the top-most surface: the shortcuts overlay (z-85) and
+    // the command palette (z-80) sit above it and are closed first by the global handler.
+    // Text fields keep their own Esc.
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape" || isTypingTarget(e.target)) return;
+      if (useUI.getState().shortcutsOpen || useStore.getState().panels.search) return;
       e.stopImmediatePropagation();
       e.preventDefault();
       onClose();
@@ -391,7 +397,7 @@ function NarrowMenu({
       window.removeEventListener("pointerdown", onDown);
       window.removeEventListener("keydown", onKey, true);
     };
-  }, [onClose]);
+  }, [onClose, isPresent]);
   const item = (
     label: string,
     Icon: typeof FlaskConical,

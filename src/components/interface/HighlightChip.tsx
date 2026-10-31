@@ -1,7 +1,9 @@
 "use client";
 import { X } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
+import { cx } from "./ui";
 import { useStore } from "@/lib/store";
+import { leaveDiff } from "./actions";
 
 const TONE: Record<string, string> = {
   info: "#7dd3fc",
@@ -16,6 +18,8 @@ const SOURCE: Record<string, string> = { ai: "AI analyst", search: "search", use
 export function HighlightChip() {
   const highlight = useStore((s) => s.highlight);
   const setHighlight = useStore((s) => s.setHighlight);
+  // The A/B diff view does not draw highlights (e.g. one set by the analyst while comparing).
+  const hiddenByDiff = useStore((s) => s.compareView === "diff" && !!s.comparison);
   const color = highlight ? (TONE[highlight.tone] ?? TONE.info) : TONE.info;
   const count = highlight ? highlight.node_ids.length + highlight.edge_ids.length : 0;
   return (
@@ -32,10 +36,20 @@ export function HighlightChip() {
           style={{ borderColor: `${color}55`, borderRadius: 999 }}
         >
           <span className="size-2 shrink-0 rounded-full" style={{ background: color, boxShadow: `0 0 8px ${color}` }} />
-          <span className="min-w-0 truncate text-[12px] text-ink-100">
+          <span className={cx("min-w-0 truncate text-[12px] text-ink-100", hiddenByDiff && "opacity-70")}>
             <span className="text-ink-400">Highlight: </span>
             {highlight.label ?? "custom"}
           </span>
+          {hiddenByDiff && (
+            <button
+              type="button"
+              onClick={leaveDiff}
+              title="The A/B diff view does not draw highlights. Show this highlight on the map instead."
+              className="shrink-0 rounded-full px-1.5 text-[10.5px] whitespace-nowrap text-sky-300 hover:bg-white/[0.08]"
+            >
+              hidden in A/B diff · show
+            </button>
+          )}
           <span
             className="dt-num shrink-0 text-[10.5px] text-ink-400"
             title={`Set by ${SOURCE[highlight.source] ?? highlight.source}`}

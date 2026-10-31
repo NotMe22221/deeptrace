@@ -131,7 +131,12 @@ function PresetCard({ p }: { p: ScenarioPreset }) {
   const index = useStore((s) => s.index);
   // "Loaded" means the whole scenario matches (targets + horizon + restoration), so a preset
   // whose settings were changed in the draft can be reloaded with its defaults.
+  // It also requires the preset's identity: every draft edit (targets, horizon, restoration) clears
+  // scenario_id/name, so after an edit, even one later undone, "Load" stays available and restores
+  // the preset's name and defaults.
   const loaded =
+    !!draft.scenario_id &&
+    draft.scenario_id === p.scenario.scenario_id &&
     sameTargets(draft, p.scenario) &&
     draft.horizon_hours === p.scenario.horizon_hours &&
     draft.enable_restoration === p.scenario.enable_restoration;

@@ -107,13 +107,14 @@ export async function simulateEdgeFailure(id: string) {
 }
 
 /**
- * Cascade playback only renders outside the A/B diff view. When the user drives playback while
- * the map shows the diff, switch the map to the slot that holds `result` (matched by scenario id,
- * because runComparison replaces the slot objects) without touching result or playback.
+ * The A/B diff view draws neither cascade playback nor highlights. When the user drives playback
+ * or turns on a highlight while the map shows the diff, switch the map to the slot that holds
+ * `result` (matched by identity or scenario id) without touching result, playback or highlight.
  */
-export function leaveDiffForPlayback() {
+export function leaveDiff() {
   const s = S();
-  if (s.compareView !== "diff" || !s.result) return;
+  if (s.compareView !== "diff") return;
+  if (!s.result) return void useStore.setState({ compareView: null });
   const r = s.result;
   const id = r.scenario_id;
   const slot =
