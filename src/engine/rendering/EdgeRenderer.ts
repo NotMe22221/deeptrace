@@ -118,6 +118,11 @@ export class EdgeRenderer {
     }
   }
 
+  /** Cancel in-flight cascade flashes (result cleared / superseded / diff view). */
+  clearFlash() {
+    for (const e of this.entries) e.flashStart = -1;
+  }
+
   applyDisplay(model: DisplayModel, deepT: number) {
     this.display = model;
     this.deepT = deepT;

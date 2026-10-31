@@ -169,6 +169,13 @@ export class EffectsLayer {
     }
   }
 
+  /** Translucent ground effects are hidden during the pick pass (they would cover picks below). */
+  get pickExcluded(): { show: boolean }[] {
+    const out: { show: boolean }[] = this.rings.map((r) => r.prim);
+    if (this.outage) out.push(this.outage);
+    return out;
+  }
+
   update(time: number) {
     const now = performance.now() / 1000;
     if (this.rings.length) {

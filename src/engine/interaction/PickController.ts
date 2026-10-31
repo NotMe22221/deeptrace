@@ -27,6 +27,9 @@ export class PickController {
   private timer: number | null = null;
   private buttons = 0;
   private hovered: PickId | null = null;
+  /** last pointer position over the canvas; null when the pointer is off it */
+  private last: Cesium.Cartesian2 | null = null;
+  private readonly lastView: Cesium.Matrix4;
   private readonly cleanup: (() => void)[] = [];
 
   constructor(C: CesiumModule, viewer: Cesium.Viewer, handlers: PickHandlers) {
@@ -36,8 +39,10 @@ export class PickController {
     viewer.cesiumWidget.screenSpaceEventHandler.removeInputAction(C.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
     viewer.cesiumWidget.screenSpaceEventHandler.removeInputAction(C.ScreenSpaceEventType.LEFT_CLICK);
     this.handler = new C.ScreenSpaceEventHandler(viewer.scene.canvas);
+    this.lastView = C.Matrix4.clone(viewer.scene.camera.viewMatrix);
     this.handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.MotionEvent) => {
-      this.pending = C.Cartesian2.clone(m.endPosition);
+      this.last = C.Cartesian2.clone(m.endPosition);
+      this.pending = this.last;
       this.schedule();
     }, C.ScreenSpaceEventType.MOUSE_MOVE);
     this.handler.setInputAction((e: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
@@ -53,6 +58,7 @@ export class PickController {
     const up = (ev: PointerEvent) => (this.buttons = ev.buttons);
     const leave = () => {
       this.pending = null;
+      this.last = null;
       this.setHover(null, null);
     };
     canvas.addEventListener("pointerdown", down);
@@ -63,11 +69,27 @@ export class PickController {
       window.removeEventListener("pointerup", up);
       canvas.removeEventListener("pointerleave", leave);
     });
+    // the camera can move under a stationary pointer (flights, keyboard, fly-to, orbit): re-pick there
+    const rmPost = viewer.scene.postRender.addEventListener(() => {
+      const v = this.scene.camera.viewMatrix;
+      if (C.Matrix4.equals(v, this.lastView)) return;
+      C.Matrix4.clone(v, this.lastView);
+      // while the view keeps moving, re-pick at a gentler rate than pointer motion
+      this.refresh(120);
+    });
+    this.cleanup.push(rmPost);
   }
 
-  private schedule() {
+  /** Re-pick at the last pointer position (camera moved or scene geometry / display changed). */
+  refresh(minGapMs = 33) {
+    if (!this.last) return;
+    this.pending = this.last;
+    this.schedule(minGapMs);
+  }
+
+  private schedule(minGapMs = 33) {
     if (this.timer !== null) return;
-    const wait = Math.max(0, 33 - (performance.now() - this.lastPick));
+    const wait = Math.max(0, minGapMs - (performance.now() - this.lastPick));
     this.timer = window.setTimeout(() => {
       this.timer = null;
       this.lastPick = performance.now();

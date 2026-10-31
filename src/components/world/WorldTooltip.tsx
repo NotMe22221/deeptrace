@@ -4,10 +4,27 @@
  */
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { indexResult } from "@/engine/rendering/displayState";
+import { DIFF_HEX } from "@/engine/rendering/palette";
 import { useWorldUi } from "@/engine/worldUi";
 import { useStore } from "@/lib/store";
 import { connectionLabel, EDGE_STATE_STYLES, NODE_STATE_STYLES, PROVENANCE_STYLES, SYSTEM_STYLES, typeLabel } from "@/lib/systems";
-import type { EdgeState, NodeState, ProvenanceCategory, SystemType } from "@/types/infrastructure";
+import type { EdgeState, NodeState, ProvenanceCategory, SimulationResult, SystemType } from "@/types/infrastructure";
+
+const BLOCKED: ReadonlySet<EdgeState> = new Set<EdgeState>(["failed", "interrupted", "isolated", "normally_open"]);
+
+/** Final state of a node in one scenario (initiating failures count as failed). */
+function nodeStateIn(r: SimulationResult, id: string, fallback: NodeState): NodeState {
+  if (r.failed_nodes?.includes(id)) return "failed";
+  return r.node_states?.[id] ?? indexResult(r).affState.get(id) ?? fallback;
+}
+
+/** Final state of an edge in one scenario. */
+function edgeStateIn(r: SimulationResult, id: string, fallback: EdgeState): EdgeState {
+  if (r.failed_edges?.includes(id)) return "failed";
+  return r.edge_states?.[id] ?? r.interrupted_edges?.find((ie) => ie.edge_id === id)?.state ?? fallback;
+}
+
+const diffColor = (a: boolean, b: boolean, fallback: string) => (a && b ? DIFF_HEX.both : a ? DIFF_HEX.a : b ? DIFF_HEX.b : fallback);
 
 interface TipModel {
   title: string;
@@ -23,6 +40,8 @@ export default function WorldTooltip() {
   const hoveredId = useStore((s) => s.hoveredId);
   const index = useStore((s) => s.index);
   const result = useStore((s) => (s.compareView === "diff" ? null : s.result));
+  // in the comparison diff view the map shows A / B membership, so the tooltip does too
+  const comparison = useStore((s) => (s.compareView === "diff" ? s.comparison : null));
   const baseline = useStore((s) => s.baseline);
   const step = useStore((s) => s.playback.step);
   const ref = useRef<HTMLDivElement>(null);
@@ -40,11 +59,26 @@ export default function WorldTooltip() {
         if (rs && at <= step) state = rs;
       }
       const ss = NODE_STATE_STYLES[state] ?? NODE_STATE_STYLES.operational;
+      let tipState = { label: ss.label, color: ss.color, impacted: ss.impacted };
+      if (comparison) {
+        const sa = nodeStateIn(comparison.scenario_a, node.id, state);
+        const sb = nodeStateIn(comparison.scenario_b, node.id, state);
+        // membership mirrors the map: the engine's diff sets, plus initiating failures
+        const inA =
+          comparison.in_both.includes(node.id) || comparison.only_in_a.includes(node.id) || !!comparison.scenario_a.failed_nodes?.includes(node.id);
+        const inB =
+          comparison.in_both.includes(node.id) || comparison.only_in_b.includes(node.id) || !!comparison.scenario_b.failed_nodes?.includes(node.id);
+        tipState = {
+          label: `A: ${NODE_STATE_STYLES[sa]?.label ?? sa} · B: ${NODE_STATE_STYLES[sb]?.label ?? sb}`,
+          color: diffColor(inA, inB, ss.color),
+          impacted: inA || inB,
+        };
+      }
       return {
         title: node.name,
         subtitle: typeLabel(node.type),
         system: node.system,
-        state: { label: ss.label, color: ss.color, impacted: ss.impacted },
+        state: tipState,
         provenance: node.provenance?.category ?? "simulated",
         depth: node.elevation < 0 ? `${Math.abs(node.elevation).toFixed(node.elevation > -10 ? 1 : 0)} m below ground` : node.elevation > 2 ? `${node.elevation.toFixed(0)} m above ground` : null,
       };
@@ -58,6 +92,19 @@ export default function WorldTooltip() {
         if (rs && rs !== "operational" && at <= step) state = rs;
       }
       const ss = EDGE_STATE_STYLES[state] ?? EDGE_STATE_STYLES.operational;
+      let tipState = { label: edge.relation === "dependency" ? `Dependency · ${ss.label}` : ss.label, color: ss.color, impacted: ss.impacted };
+      if (comparison) {
+        const sa = edgeStateIn(comparison.scenario_a, edge.id, state);
+        const sb = edgeStateIn(comparison.scenario_b, edge.id, state);
+        const blockedIn = (r: SimulationResult) => (r.interrupted_edges ?? []).some((ie) => ie.edge_id === edge.id && BLOCKED.has(ie.state));
+        const inA = blockedIn(comparison.scenario_a);
+        const inB = blockedIn(comparison.scenario_b);
+        tipState = {
+          label: `A: ${EDGE_STATE_STYLES[sa]?.label ?? sa} · B: ${EDGE_STATE_STYLES[sb]?.label ?? sb}`,
+          color: diffColor(inA, inB, ss.color),
+          impacted: inA || inB,
+        };
+      }
       const a = index.nodes.get(edge.source_node)?.name ?? edge.source_node;
       const b = index.nodes.get(edge.target_node)?.name ?? edge.target_node;
       const sys = edge.relation === "dependency" ? (index.nodes.get(edge.source_node)?.system ?? edge.infrastructure_type) : edge.infrastructure_type;
@@ -65,13 +112,13 @@ export default function WorldTooltip() {
         title: edge.name || connectionLabel(edge.connection_type),
         subtitle: `${a} → ${b}`,
         system: sys,
-        state: { label: edge.relation === "dependency" ? `Dependency · ${ss.label}` : ss.label, color: ss.color, impacted: ss.impacted },
+        state: tipState,
         provenance: edge.provenance?.category ?? "simulated",
         depth: edge.depth_m > 0 ? `${edge.depth_m.toFixed(edge.depth_m < 10 ? 1 : 0)} m deep · ${Math.round(edge.length_m)} m` : `${Math.round(edge.length_m)} m`,
       };
     }
     return null;
-  }, [hoveredId, index, result, baseline, step]);
+  }, [hoveredId, index, result, comparison, baseline, step]);
 
   useLayoutEffect(() => {
     if (ref.current) {

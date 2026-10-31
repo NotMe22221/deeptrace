@@ -154,6 +154,11 @@ export function computeDisplay(geom: NetworkGeometry, s: DisplayInput): DisplayM
   const depEdges = new Set<string>();
   let tone: RGB | null = null;
   const tr = s.traceVisible ? s.trace : null;
+  // the highlight (AI analyst / search / alt-path rows) layers on top of a visible trace
+  const hl = !diff && s.highlight && (s.highlight.node_ids.length || s.highlight.edge_ids.length) ? s.highlight : null;
+  const hlNodes = new Set<string>(hl?.node_ids ?? []);
+  const hlEdges = new Set<string>(hl?.edge_ids ?? []);
+  if (hl) tone = TONES[hl.tone] ?? TONES.info;
   if (diff) {
     focusMode = "diff";
   } else if (tr) {
@@ -185,11 +190,10 @@ export function computeDisplay(geom: NetworkGeometry, s: DisplayInput): DisplayM
         focusNodes.add(g.edge.target_node);
       }
     }
-  } else if (s.highlight && (s.highlight.node_ids.length || s.highlight.edge_ids.length)) {
+  } else if (hl) {
     focusMode = "highlight";
-    tone = TONES[s.highlight.tone] ?? TONES.info;
-    for (const id of s.highlight.node_ids) focusNodes.add(id);
-    for (const id of s.highlight.edge_ids) focusEdges.add(id);
+    for (const id of hl.node_ids) focusNodes.add(id);
+    for (const id of hl.edge_ids) focusEdges.add(id);
   }
 
   // ---- diff sets
@@ -261,9 +265,10 @@ export function computeDisplay(geom: NetworkGeometry, s: DisplayInput): DisplayM
         halo = rgb;
       }
     } else if (focusMode === "trace") {
-      if (focusNodes.has(n.id)) {
+      if (focusNodes.has(n.id) || hlNodes.has(n.id)) {
         emphasis = 1;
         alpha = 1;
+        if (hlNodes.has(n.id)) halo = tone;
       } else alpha = Math.min(alpha, 0.17);
     } else if (focusMode === "highlight") {
       if (focusNodes.has(n.id)) {
@@ -289,7 +294,7 @@ export function computeDisplay(geom: NetworkGeometry, s: DisplayInput): DisplayM
     const dep = g.cls === "dependency";
     let visible: boolean;
     if (dep) {
-      visible = sv.visible && dv.visible && (s.showDependencies || depEdges.has(e.id) || focusEdges.has(e.id));
+      visible = sv.visible && dv.visible && (s.showDependencies || depEdges.has(e.id) || focusEdges.has(e.id) || hlEdges.has(e.id));
     } else {
       visible = layers[e.infrastructure_type] !== false && (!g.facility || layers.facility !== false);
     }
@@ -391,6 +396,11 @@ export function computeDisplay(geom: NetworkGeometry, s: DisplayInput): DisplayM
         if (flow) {
           flow = { ...flow, sizeMul: flow.sizeMul * 1.2, speedMul: flow.speedMul * 1.1 };
         }
+      } else if (hlEdges.has(e.id)) {
+        rgb = tone ?? rgb;
+        alpha = 1;
+        widthMul = 1.5;
+        core = 0.4;
       } else {
         alpha = Math.min(alpha, 0.14);
         flow = null;

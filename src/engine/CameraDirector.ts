@@ -165,7 +165,7 @@ export class CameraDirector {
     const radius = Math.max(bs.radius, 180);
     const deep = this.ctx.deep();
     this.flySphere(new C.BoundingSphere(bs.center, radius), {
-      offset: new C.HeadingPitchRange(this.camera.heading, (deep ? -24 : -42) * D2R, Math.max(520, radius * 2.5)),
+      offset: new C.HeadingPitchRange(this.camera.heading, (deep ? -24 : -42) * D2R, this.fitRange(radius)),
       duration: opts?.duration ?? 2.0,
       easingFunction: C.EasingFunction.CUBIC_IN_OUT,
     });
@@ -173,6 +173,20 @@ export class CameraDirector {
 
   /** Deep view framing (exposed for tuning). Heights are fractions of the displayed max depth. */
   deepView = { headingDeg: 24, distK: 0.5, camBelowK: 0, camAboveK: 0.04, targetK: 0.85 };
+
+  /**
+   * Distance at which a sphere of `radius` fits the narrower field of view (Cesium's fov is the
+   * horizontal one on landscape canvases, so the vertical half-angle is the binding one there).
+   */
+  private fitRange(radius: number, margin = 1.06): number {
+    const fr = this.camera.frustum as Cesium.PerspectiveFrustum;
+    const fovy = fr.fovy ?? Math.PI / 3;
+    const aspect = fr.aspectRatio ?? 1;
+    const tanY = Math.tan(fovy / 2);
+    const tanX = tanY * (Number.isFinite(aspect) && aspect > 0 ? aspect : 1);
+    const half = Math.atan(Math.min(tanX, tanY));
+    return Math.max(520, (radius / Math.sin(Math.max(0.05, half))) * margin);
+  }
 
   /** Oblique cross-section vantage just under the surface, looking across the layered district. */
   flyToDeepView(opts?: { duration?: number }) {

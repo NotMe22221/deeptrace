@@ -105,7 +105,7 @@ export class WorldController {
   readonly strata: StrataLayer;
   readonly models: ModelLodManager;
   buildings: BuildingStyler | null = null;
-  private picker: PickController;
+  readonly picker: PickController;
   geom: NetworkGeometry | null = null;
   display: DisplayModel | null = null;
   private pendingNetwork: InfrastructureNetwork | null = null;
@@ -183,7 +183,17 @@ export class WorldController {
       },
       click: (id) => this.onClick(id),
       doubleClick: (id) => this.onDoubleClick(id),
-      transient: () => [this.particles.collection, this.particles.pulses, this.effects.flareCollection, this.nodes.halos, this.nodes.selection, this.strata.labels],
+      transient: () => [
+        this.particles.collection,
+        this.particles.pulses,
+        this.effects.flareCollection,
+        this.nodes.halos,
+        this.nodes.selection,
+        this.strata.labels,
+        ...this.nodes.pickExcluded,
+        ...this.strata.pickExcluded,
+        ...this.effects.pickExcluded,
+      ],
     });
 
     this.api = {
@@ -394,10 +404,8 @@ export class WorldController {
     try {
       const tp = await C.createWorldTerrainAsync();
       if (this.destroyed) return;
-      this.viewer.scene.terrainProvider = tp;
-      this.terrainMode = "terrain";
+      this.activateTerrain(tp);
       setStatus({ terrain: "ion-world" });
-      if (this.geom) void this.sampleGround();
     } catch (e) {
       console.warn("[deeptrace] world terrain unavailable", e);
       setStatus({ terrain: "ellipsoid" });
@@ -427,6 +435,23 @@ export class WorldController {
     });
   }
 
+  /** Switch the globe to a real terrain provider and ground the network on it. */
+  activateTerrain(tp: Cesium.TerrainProvider) {
+    if (this.destroyed) return;
+    this.viewer.scene.terrainProvider = tp;
+    this.terrainMode = "terrain";
+    const geom = this.geom;
+    if (geom) {
+      // built on the bare ellipsoid (ground 0): re-anchor at the region ground right away so the
+      // network is not buried ~300 m under the terrain while sampling runs (or if it fails)
+      const rg = geom.network.region.ground_elevation_m ?? 0;
+      geom.groundBase = rg;
+      geom.applyGround([], rg, rg);
+      this.afterGroundChange();
+      void this.sampleGround();
+    }
+  }
+
   /** Sample world terrain once for every node and edge vertex. */
   private async sampleGround() {
     const C = this.C;
@@ -441,8 +466,10 @@ export class WorldController {
       const res = await C.sampleTerrainMostDetailed(this.viewer.scene.terrainProvider, cartos);
       if (this.destroyed || geom !== this.geom) return;
       const heights = res.map((c) => c.height);
-      const centerH = heights.pop() ?? geom.groundBase;
-      geom.applyGround(heights, Number.isFinite(centerH) ? centerH : geom.groundBase);
+      // failed tiles come back without a height: fall back to the region's ground, never 0
+      const fallback = geom.network.region.ground_elevation_m ?? geom.groundBase;
+      const centerH = heights.pop();
+      geom.applyGround(heights, centerH !== undefined && Number.isFinite(centerH) ? centerH : fallback, fallback);
       this.afterGroundChange();
     } catch (e) {
       console.warn("[deeptrace] terrain sampling failed", e);
@@ -456,6 +483,7 @@ export class WorldController {
     if (!geom) return;
     this.nodes.rebuildGlyphs();
     this.strata.build(geom);
+    useWorldUi.getState().set({ strata: this.strata.strata });
     this.buildings?.setFrame(geom.frame);
     this.models.setGeometry(geom);
     this.dirty.positions = true;
@@ -505,9 +533,15 @@ export class WorldController {
   private cascadeEffects(s: DeeptraceState, p: DeeptraceState) {
     const geom = this.geom;
     const r = s.result;
-    if (!geom || !r || s.compareView === "diff") return;
     const pb = s.playback;
     const pp = p.playback;
+    // a cleared or replaced result, a new run (replay / showSlot / setCompareView) or entering the
+    // diff view supersedes any in-flight shockwaves, ripples, flares and edge flashes
+    if (r !== p.result || pb.runId !== pp.runId || (s.compareView === "diff" && p.compareView !== "diff")) {
+      this.effects.clear();
+      this.edges.clearFlash();
+    }
+    if (!geom || !r || s.compareView === "diff") return;
     const now = performance.now() / 1000;
     if (pb.runId !== pp.runId) {
       if (pb.playing && pb.step === 0) this.initiatingEffects(s);
@@ -618,6 +652,7 @@ export class WorldController {
     this.nodes.build(geom);
     this.nodes.setSelected(st.selectedNodeId);
     this.strata.build(geom);
+    useWorldUi.getState().set({ strata: this.strata.strata });
     this.models.setGeometry(geom);
     this.buildings?.setFrame(geom.frame);
     // fixed key light from the south-east, consistent at any time of day
@@ -753,6 +788,7 @@ export class WorldController {
         this.applyGlobe(this.deepT);
         this.strata.update(this.deepT, st.depthScale);
         positionsChanged = true;
+        this.picker.refresh(120);
         if (this.deepT > 0 && this.deepT < 1 && Math.abs(this.deepT - 0.5) < 0.04) this.dirty.particles = true;
         this.lastPosCost = (performance.now() - tp) / 1000;
       } else if (throttle) {
@@ -774,15 +810,19 @@ export class WorldController {
           }),
         );
         this.dirty.particles = true;
+        // trace pulses follow edge visibility / diff view
+        this.dirty.trace = true;
+        // what is under a stationary pointer may have changed (layers, focus, results)
+        this.picker.refresh();
       }
       if (this.dirty.particles && this.display) {
         this.dirty.particles = false;
         this.particles.rebuild(geom, this.display, this.deepT, st.showParticles);
       }
-      if (this.dirty.trace) {
+      if (this.dirty.trace && this.display) {
         this.dirty.trace = false;
         const tr = st.traceVisible ? st.trace : null;
-        this.particles.setTrace(geom, tr?.node_id ?? null, tr?.source_paths ?? null);
+        this.particles.setTrace(geom, this.display, tr?.node_id ?? null, tr?.source_paths ?? null);
       }
 
       // ---- per-frame animation

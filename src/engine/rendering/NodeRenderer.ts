@@ -95,6 +95,8 @@ export class NodeRenderer {
   readonly drops: Cesium.PolylineCollection;
   readonly selection: Cesium.BillboardCollection;
   private glyphPrim: Cesium.Primitive | null = null;
+  /** service-zone / area discs: separate, non-pickable primitive (see pickExcluded) */
+  private discPrim: Cesium.Primitive | null = null;
   private glyphReady = false;
   private entries: NodeEntry[] = [];
   private byId = new Map<string, NodeEntry>();
@@ -250,8 +252,13 @@ export class NodeRenderer {
       this.scene.primitives.remove(this.glyphPrim);
       this.glyphPrim = null;
     }
+    if (this.discPrim) {
+      this.scene.primitives.remove(this.discPrim);
+      this.discPrim = null;
+    }
     this.glyphReady = false;
     const instances: Cesium.GeometryInstance[] = [];
+    const discInstances: Cesium.GeometryInstance[] = [];
     const offsetSupported = !!Cx.OffsetGeometryInstanceAttribute && !!Cx.GeometryOffsetAttribute;
     const offsetAttr = Cx.GeometryOffsetAttribute?.ALL;
     for (const e of this.entries) {
@@ -288,7 +295,8 @@ export class NodeRenderer {
         show: new C.ShowGeometryInstanceAttribute(true),
       };
       if (offsetSupported) attributes.offset = new Cx.OffsetGeometryInstanceAttribute!(0, 0, 0);
-      instances.push(
+      // the id stays on disc instances too: attribute updates look instances up by it
+      (sp.shape === "disc" ? discInstances : instances).push(
         new C.GeometryInstance({
           geometry: geometry as Cesium.Geometry,
           modelMatrix: enu,
@@ -297,22 +305,43 @@ export class NodeRenderer {
         }),
       );
     }
-    if (!instances.length) return;
-    try {
-      this.glyphPrim = this.scene.primitives.add(
-        new C.Primitive({
-          geometryInstances: instances,
-          appearance: new C.PerInstanceColorAppearance({ translucent: true, closed: true, flat: false }),
-          asynchronous: false,
-          releaseGeometryInstances: true,
-          compressVertices: false,
-        }),
-      );
-      (this.glyphPrim as unknown as { _dtOffset: boolean })._dtOffset = offsetSupported;
-    } catch (err) {
-      console.warn("[deeptrace] glyph primitive failed", err);
-      this.glyphPrim = null;
-    }
+    const make = (list: Cesium.GeometryInstance[], allowPicking: boolean): Cesium.Primitive | null => {
+      if (!list.length) return null;
+      try {
+        const prim: Cesium.Primitive = this.scene.primitives.add(
+          new C.Primitive({
+            geometryInstances: list,
+            appearance: new C.PerInstanceColorAppearance({ translucent: true, closed: true, flat: false }),
+            asynchronous: false,
+            allowPicking,
+            releaseGeometryInstances: true,
+            compressVertices: false,
+          }),
+        );
+        (prim as unknown as { _dtOffset: boolean })._dtOffset = offsetSupported;
+        return prim;
+      } catch (err) {
+        console.warn("[deeptrace] glyph primitive failed", err);
+        return null;
+      }
+    };
+    this.glyphPrim = make(instances, true);
+    // Large, nearly transparent area discs must not steal hover/click from the lines and nodes
+    // they cover; the zone stays pickable through its icon and label.
+    this.discPrim = make(discInstances, false);
+  }
+
+  /**
+   * Primitives to hide during the pick pass. allowPicking:false alone is not enough: Cesium still
+   * draws translucent commands into the pick framebuffer, blending over the line pick colours.
+   */
+  get pickExcluded(): { show: boolean }[] {
+    return this.discPrim ? [this.discPrim] : [];
+  }
+
+  private glyphPrimsReady(): boolean {
+    if (!this.glyphPrim && !this.discPrim) return false;
+    return (!this.glyphPrim || this.glyphPrim.ready) && (!this.discPrim || this.discPrim.ready);
   }
 
   setShowLabels(v: boolean) {
@@ -438,14 +467,14 @@ export class NodeRenderer {
   }
 
   private updateGlyphAttributes() {
-    const prim = this.glyphPrim;
-    if (!prim || !this.display) return;
-    if (!prim.ready) return;
+    if (!this.display || !this.glyphPrimsReady()) return;
     this.glyphReady = true;
     const C = this.C;
-    const hasOffset = (prim as unknown as { _dtOffset: boolean })._dtOffset;
     for (const e of this.entries) {
       if (!e.glyph) continue;
+      const prim = e.glyph.shape === "disc" ? this.discPrim : this.glyphPrim;
+      if (!prim) continue;
+      const hasOffset = (prim as unknown as { _dtOffset: boolean })._dtOffset;
       const attrs = prim.getGeometryInstanceAttributes(e.pickId);
       if (!attrs) continue;
       const v = e.vis;
@@ -473,7 +502,7 @@ export class NodeRenderer {
       this.glyphStylesDirty = true;
     }
     if (this.glyphStylesDirty || !this.glyphReady) {
-      if (this.glyphPrim?.ready) {
+      if (this.glyphPrimsReady()) {
         this.glyphStylesDirty = false;
         this.updateGlyphAttributes();
       }
@@ -560,5 +589,7 @@ export class NodeRenderer {
     }
     if (this.glyphPrim && !this.glyphPrim.isDestroyed()) this.scene.primitives.remove(this.glyphPrim);
     this.glyphPrim = null;
+    if (this.discPrim && !this.discPrim.isDestroyed()) this.scene.primitives.remove(this.discPrim);
+    this.discPrim = null;
   }
 }

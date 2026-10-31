@@ -264,19 +264,22 @@ export class NetworkGeometry {
     return pts;
   }
 
-  /** Apply sampled ground heights (same order as samplePoints()). */
-  applyGround(heights: ArrayLike<number>, regionGround: number) {
+  /**
+   * Apply sampled ground heights (same order as samplePoints()). Points without a height (failed
+   * terrain tiles, or an empty array to re-anchor everything) take `fallback`.
+   */
+  applyGround(heights: ArrayLike<number>, regionGround: number, fallback: number = regionGround) {
     const C = this.C;
     let k = 0;
     for (const n of this.nodes) {
       const h = heights[k++];
-      n.ground = Number.isFinite(h) ? h : this.groundBase;
+      n.ground = Number.isFinite(h) ? h : fallback;
       C.Cartesian3.fromDegrees(n.lon, n.lat, n.ground, undefined, n.base);
     }
     for (const e of this.edges) {
       for (let i = 0; i < e.n; i++) {
         const h = heights[k++];
-        e.ground[i] = Number.isFinite(h) ? h : this.groundBase;
+        e.ground[i] = Number.isFinite(h) ? h : fallback;
       }
       this.computeBase(e);
     }

@@ -35,12 +35,16 @@ export default function WorldOverlay() {
   const deepT = useWorldUi((s) => s.deepT);
   const dismissed = useWorldUi((s) => s.noticeDismissed);
   const setUi = useWorldUi((s) => s.set);
+  const strata = useWorldUi((s) => s.strata) ?? STRATA;
 
   const showDiff = compareView === "diff" && hasComparison;
   const showDeep = deepT > 0.05 || deepMode;
   // the interface keeps the bottom of the left column free for this stack:
   // 112 px normally, 250 px while Deep Mode or the comparison diff is on
   const showNotice = !dismissed && ws.status !== "loading" && (!ws.ionToken || ws.buildings === "unavailable") && !!ws.message;
+  // the notice only shows when buildings are off; terrain may still be streaming (token present,
+  // OSM Buildings failed) so only mention it when it is actually off
+  const noticePrefix = ws.terrain === "ion-world" ? "3D buildings off." : "3D buildings & terrain off.";
 
   return (
     <>
@@ -67,7 +71,7 @@ export default function WorldOverlay() {
                   <span className="h-1.5 w-3 shrink-0 rounded-sm border border-sky-300/50" />
                   Surface reference grid · 0 m
                 </li>
-                {STRATA.map((s) => (
+                {strata.map((s) => (
                   <li key={s.depth} className="flex items-center gap-2 text-[10.5px] leading-[14px] text-ink-200">
                     <span className="h-1.5 w-3 shrink-0 rounded-sm" style={{ background: `${rgbToHex(s.rgb)}aa` }} />
                     <span className="truncate">{s.label}</span>
@@ -98,7 +102,7 @@ export default function WorldOverlay() {
           <div className="dt-panel pointer-events-auto flex w-full items-start gap-2 px-3 py-2" style={{ borderRadius: 12 }}>
             <span className="mt-[5px] h-1.5 w-1.5 shrink-0 rounded-full bg-amber-300/80" />
             <div className="text-[10.5px] leading-snug text-ink-300">
-              <span className="text-ink-100">3D buildings &amp; terrain off.</span> {ws.message}
+              <span className="text-ink-100">{noticePrefix}</span> {ws.message}
             </div>
             <button
               type="button"

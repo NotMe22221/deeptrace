@@ -133,10 +133,14 @@ export class ParticleSystem {
     for (let i = used; i < this.pool.length; i++) this.pool[i].show = false;
   }
 
-  /** Trace pulses along source paths (node-id or edge-id sequences). */
-  setTrace(geom: NetworkGeometry, startNode: string | null, sourcePaths: string[][] | null) {
+  /**
+   * Trace pulses along source paths (node-id or edge-id sequences). Pulses follow the display
+   * model: none in the comparison diff view, and each path stops at its first hidden edge so the
+   * sprites never run over edges that are not drawn (layer toggles).
+   */
+  setTrace(geom: NetworkGeometry, model: DisplayModel, startNode: string | null, sourcePaths: string[][] | null) {
     this.paths = [];
-    if (startNode && sourcePaths?.length) {
+    if (startNode && sourcePaths?.length && !model.diff) {
       const adj = new Map<string, EdgeGeom[]>();
       for (const e of geom.edges) {
         for (const nid of [e.edge.source_node, e.edge.target_node]) {
@@ -154,6 +158,7 @@ export class ParticleSystem {
         if (isEdges) {
           for (const id of raw) {
             const e = geom.edges[geom.edgeIndex.get(id)!];
+            if (!model.edges[e.idx]?.visible) break;
             const reversed = e.edge.target_node === cur;
             segs.push({ e, reversed, start: acc });
             acc += e.length;
@@ -169,6 +174,7 @@ export class ParticleSystem {
             const cands = (adj.get(cur) ?? []).filter((e) => (e.edge.source_node === cur && e.edge.target_node === nxt) || (e.edge.target_node === cur && e.edge.source_node === nxt));
             const e = cands.find((c) => c.cls !== "dependency") ?? cands[0];
             if (e) {
+              if (!model.edges[e.idx]?.visible) break;
               const reversed = e.edge.target_node === cur;
               segs.push({ e, reversed, start: acc });
               acc += e.length;

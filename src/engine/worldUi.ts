@@ -5,6 +5,7 @@
  * pointer updates never re-render the interface panels.
  */
 import { create } from "zustand";
+import type { Stratum } from "./rendering/StrataLayer";
 
 export interface WorldUiState {
   /** pointer position (CSS px, relative to the viewer) of the hovered object */
@@ -15,6 +16,8 @@ export interface WorldUiState {
   deepT: number;
   orbiting: boolean;
   noticeDismissed: boolean;
+  /** strata band labels derived from the loaded network (null until built) */
+  strata: Stratum[] | null;
   set: (p: Partial<Omit<WorldUiState, "set">>) => void;
 }
 
@@ -24,5 +27,6 @@ export const useWorldUi = create<WorldUiState>((set) => ({
   deepT: 0,
   orbiting: false,
   noticeDismissed: false,
+  strata: null,
   set: (p) => set(p),
 }));

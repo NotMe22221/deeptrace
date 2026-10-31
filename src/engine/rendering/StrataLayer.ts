@@ -16,11 +16,55 @@ export interface Stratum {
   rgb: RGB;
 }
 
+/** Reference planes. Default labels match the bundled dataset; build() re-derives them from the network. */
 export const STRATA: Stratum[] = [
-  { depth: 3, label: "0–3 m · shallow utilities", rgb: [0.45, 0.78, 0.95] },
-  { depth: 8, label: "3–8 m · utility corridors", rgb: [0.55, 0.62, 0.86] },
-  { depth: 30, label: "10–30 m · transit tunnels", rgb: [0.62, 0.52, 0.92] },
+  { depth: 3, label: "0–3 m · utilities & corridors", rgb: [0.45, 0.78, 0.95] },
+  { depth: 8, label: "3–8 m · shallow transit", rgb: [0.55, 0.62, 0.86] },
+  { depth: 30, label: "8–30 m · deep transit", rgb: [0.62, 0.52, 0.92] },
 ];
+
+const fmt = (m: number) => (Math.abs(m - Math.round(m)) < 0.05 ? String(Math.round(m)) : m.toFixed(1));
+
+/**
+ * Label each band (previous plane, this plane] with what the network actually puts there, so the
+ * legend can never contradict the dataset's burial depths.
+ */
+export function deriveStrata(geom: NetworkGeometry): Stratum[] {
+  type Cat = "utilities" | "corridors" | "transit";
+  const items: { depth: number; cat: Cat }[] = [];
+  for (const e of geom.edges) {
+    const d = e.edge.depth_m ?? 0;
+    if (e.cls === "corridor") items.push({ depth: d, cat: "corridors" });
+    else if (e.cls === "buried") items.push({ depth: d, cat: e.edge.infrastructure_type === "transport" ? "transit" : "utilities" });
+  }
+  for (const n of geom.nodes) {
+    if (!n.underground) continue;
+    const d = -(n.node.elevation ?? 0);
+    const t = n.node.type;
+    const cat: Cat = n.node.system === "transport" ? "transit" : n.node.system === "underground" || /tunnel|corridor/.test(t) ? "corridors" : "utilities";
+    items.push({ depth: d, cat });
+  }
+  if (!items.length) return STRATA;
+  const maxDepth = Math.max(...items.map((i) => i.depth));
+  const order: Cat[] = ["utilities", "corridors", "transit"];
+  const bands = STRATA.map((st, i) => {
+    const lo = i ? STRATA[i - 1].depth : 0;
+    const hi = i === STRATA.length - 1 ? Math.max(st.depth, maxDepth) : st.depth;
+    const inBand = items.filter((it) => it.depth > lo + 1e-6 && it.depth <= hi + 1e-6);
+    const cats = order.filter((c) => inBand.some((it) => it.cat === c));
+    return { st, lo, hi, cats, inBand };
+  });
+  // the same category in consecutive bands reads as shallow / deep
+  return bands.map((b, i) => {
+    const names = b.cats.map((c) => {
+      const above = bands.slice(0, i).some((o) => o.cats.includes(c));
+      const below = bands.slice(i + 1).some((o) => o.cats.includes(c));
+      return above && !below ? `deep ${c}` : !above && below ? `shallow ${c}` : c;
+    });
+    const range = `${fmt(b.lo)}–${fmt(b.hi)} m`;
+    return { ...b.st, label: names.length ? `${range} · ${names.join(" & ")}` : `${range} · reference plane` };
+  });
+}
 
 interface Plane {
   prim: Cesium.Primitive;
@@ -39,6 +83,8 @@ export class StrataLayer {
   private up: Cesium.Cartesian3;
   private corner: Cesium.Cartesian3;
   private labelAnchors: Cesium.Cartesian3[] = [];
+  /** band labels derived from the current network (also shown in the overlay legend) */
+  strata: Stratum[] = STRATA;
   private readonly tmp: Cesium.Cartesian3;
   private readonly tmpColor: Cesium.Color;
   private last = "";
@@ -119,7 +165,8 @@ export class StrataLayer {
       this.planes.push({ prim, mat, depth, rgb, label: lab, surface });
     };
     mk(0, [0.5, 0.7, 0.95], null, true);
-    for (const st of STRATA) mk(st.depth, st.rgb, st.label, false);
+    this.strata = deriveStrata(geom);
+    for (const st of this.strata) mk(st.depth, st.rgb, st.label, false);
     this.last = "";
   }
 
@@ -144,6 +191,11 @@ export class StrataLayer {
         p.label.backgroundColor = setColor(this.tmpColor, [0.024, 0.04, 0.075], 0.6 * a);
       }
     }
+  }
+
+  /** Planes are hidden during the pick pass so they never occlude or corrupt picks below them. */
+  get pickExcluded(): { show: boolean }[] {
+    return this.planes.map((p) => p.prim);
   }
 
   clear() {
