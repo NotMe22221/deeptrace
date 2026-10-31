@@ -6,6 +6,7 @@ import {
   FlaskConical,
   GitCompareArrows,
   Keyboard,
+  Layers,
   Menu,
   RotateCcw,
   Search,
@@ -60,14 +61,14 @@ function StatusChip({
       <span
         tabIndex={0}
         aria-label={`${label}: ${value}. ${detail}`}
-        className="flex h-6 items-center gap-1.5 rounded-md border border-white/[0.07] bg-white/[0.025] px-2"
+        className="flex h-6 shrink-0 items-center gap-1.5 rounded-md border border-white/[0.07] bg-white/[0.025] px-2"
       >
         <span
           className={cx("size-1.5 rounded-full", tone === "busy" && "animate-pulse-soft")}
           style={{ background: c, boxShadow: `0 0 6px ${c}` }}
         />
-        {showLabel && <span className="font-mono text-[9.5px] tracking-[0.14em] text-ink-400">{label}</span>}
-        <span className="max-w-[150px] truncate font-mono text-[10px] tracking-[0.06em] text-ink-100 uppercase">{value}</span>
+        {showLabel && <span className="font-mono text-[9.5px] tracking-[0.14em] whitespace-nowrap text-ink-400">{label}</span>}
+        <span className="max-w-[150px] truncate font-mono text-[10.5px] tracking-[0.02em] whitespace-nowrap text-ink-100">{value}</span>
       </span>
     </Tooltip>
   );
@@ -146,7 +147,7 @@ export function MainToolbar() {
   const status = useStatus();
   const [menuOpen, setMenuOpen] = useState(false);
   const showLabels = width >= 1700;
-  const showChipLabels = width >= 1500;
+  const showChipLabels = width >= 1820;
   const showRegion = width >= 1180;
 
   const region = network?.region;
@@ -203,10 +204,10 @@ export function MainToolbar() {
         {showRegion && region && (
           <>
             <span className="h-6 w-px bg-white/[0.08]" />
-            <div className="min-w-0 leading-tight">
+            <div className="min-w-[96px] shrink leading-tight">
               <div className="truncate text-[12.5px] font-medium text-ink-50">{region.name}</div>
               <div className="dt-num truncate text-[9.5px] tracking-[0.08em] text-ink-400 uppercase">
-                {region.city} · {network.nodes.length} nodes · {network.edges.length} links
+                {network.nodes.length} nodes · {network.edges.length} links
               </div>
             </div>
           </>
@@ -353,7 +354,7 @@ function NarrowMenu({
       className="dt-panel-strong absolute top-[52px] right-0 w-[260px] p-1.5"
       role="menu"
     >
-      {item("Layers", BookOpenCheck, () => togglePanel("layers"), panels.layers)}
+      {item("Layers", Layers, () => togglePanel("layers"), panels.layers)}
       {ACTIONS.map((a) => item(a.label, a.Icon, () => togglePanel(a.key), panels[a.key]))}
       {item("Start demo", Clapperboard, startDemo, false, demoDisabled)}
       {item("Restore world", RotateCcw, restoreWorld)}

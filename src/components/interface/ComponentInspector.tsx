@@ -422,7 +422,8 @@ function NodeInspector({ node, index }: { node: InfrastructureNode; index: Netwo
   const dependents = toRows(
     details?.dependent_ids ?? [...direct.entries()].filter(([, e]) => e.relation === "dependency" && e.source_node === node.id).map(([id]) => id),
   );
-  const connected = toRows(physicalNeighbours);
+  const listed = new Set([...upstream, ...downstream, ...dependencies, ...dependents].map((r) => r.id));
+  const connected = toRows(physicalNeighbours.filter((id) => !listed.has(id)));
 
   const affected = result?.affected_nodes.find((a) => a.node_id === node.id) ?? null;
   const simState = result?.node_states[node.id] ?? null;

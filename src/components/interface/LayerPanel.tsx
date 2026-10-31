@@ -38,7 +38,7 @@ export function LayerPanel({ rail, onExpand }: { rail?: boolean; onExpand?: () =
         subtitle={
           stats ? (
             <span className="dt-num">
-              {LAYER_ORDER.length} systems · {fmtNum(stats.totalNodes, 0)} nodes · {fmtNum(stats.totalEdges, 0)} links
+              {fmtNum(stats.totalNodes, 0)} nodes · {fmtNum(stats.totalEdges, 0)} links
             </span>
           ) : (
             "Loading network…"
@@ -92,7 +92,7 @@ function SystemList({ stats }: { stats: NetworkStats | null }) {
             <li key={key}>
               <div
                 className={cx(
-                  "group rounded-lg px-2 py-[7px] transition-colors",
+                  "group rounded-lg px-2 py-[6px] transition-colors",
                   on ? "hover:bg-white/[0.04]" : "opacity-55 hover:bg-white/[0.03] hover:opacity-80",
                 )}
               >
@@ -117,7 +117,7 @@ function SystemList({ stats }: { stats: NetworkStats | null }) {
                   <Switch checked={on} onChange={(v) => setLayer(key, v)} label={`${st.label} layer`} color={st.color} />
                 </div>
                 {s && s.nodes + s.edges > 0 && (
-                  <ProvenanceBar provenance={s.provenance} className="mt-1.5 ml-[34px]" />
+                  <ProvenanceBar provenance={s.provenance} className="mt-[5px] ml-[34px] mr-[38px]" />
                 )}
               </div>
             </li>
@@ -155,7 +155,7 @@ export function ProvenanceBar({
     .map((c) => `${PROVENANCE_STYLES[c].label} ${Math.round(((provenance[c] ?? 0) / total) * 100)}%`)
     .join(" · ");
   return (
-    <Tooltip label={`Data provenance: ${label}`} className={cx("block w-auto", className)}>
+    <Tooltip label={`Data provenance: ${label}`} className={cx("block", className)}>
       <ShareBar
         height={height}
         parts={PROVENANCE_CATEGORIES.map((c) => ({
@@ -180,14 +180,14 @@ function Overlays({ stats }: { stats: NetworkStats | null }) {
   const rows: { label: string; hint: string; value: boolean; set: (v: boolean) => void; preview: React.ReactNode }[] = [
     {
       label: "Dependency links",
-      hint: stats ? `${stats.dependencyEdges} cross-system` : "",
+      hint: stats ? `${stats.dependencyEdges}` : "",
       value: showDependencies,
       set: setShowDependencies,
       preview: <span className="h-0 w-4 border-t border-dashed border-ink-200" />,
     },
     {
       label: "Flow particles",
-      hint: "animated flows",
+      hint: "",
       value: showParticles,
       set: setShowParticles,
       preview: (
@@ -200,7 +200,7 @@ function Overlays({ stats }: { stats: NetworkStats | null }) {
     },
     {
       label: "Labels",
-      hint: "names of key assets",
+      hint: "",
       value: showLabels,
       set: setShowLabels,
       preview: <span className="font-mono text-[8px] leading-none text-ink-200">Aa</span>,
@@ -214,9 +214,9 @@ function Overlays({ stats }: { stats: NetworkStats | null }) {
           <span className="flex w-6 justify-center" aria-hidden>
             {r.preview}
           </span>
-          <button type="button" onClick={() => r.set(!r.value)} className="min-w-0 flex-1 text-left">
-            <span className="text-[12.5px] text-ink-100">{r.label}</span>
-            {r.hint && <span className="dt-num ml-1.5 text-[10px] text-ink-400">{r.hint}</span>}
+          <button type="button" onClick={() => r.set(!r.value)} className="flex min-w-0 flex-1 items-baseline gap-1.5 text-left">
+            <span className="shrink-0 text-[12.5px] text-ink-100">{r.label}</span>
+            {r.hint && <span className="dt-num truncate text-[10px] text-ink-400">{r.hint}</span>}
           </button>
           <Switch checked={r.value} onChange={r.set} label={r.label} size="sm" />
         </div>
@@ -225,7 +225,14 @@ function Overlays({ stats }: { stats: NetworkStats | null }) {
   );
 }
 
-const DEEP_SYSTEMS = ["transport", "underground", "water", "power", "telecom"] as const;
+const DEEP_SYSTEMS = ["telecom", "power", "water", "underground", "transport"] as const;
+const STRATA_NAMES: Record<(typeof DEEP_SYSTEMS)[number], string> = {
+  telecom: "Fibre",
+  power: "Power",
+  water: "Water",
+  underground: "Corridors",
+  transport: "Rail / transit",
+};
 
 function DeepBlock({ stats }: { stats: NetworkStats | null }) {
   const deepMode = useStore((s) => s.deepMode);
@@ -283,7 +290,7 @@ function DeepBlock({ stats }: { stats: NetworkStats | null }) {
                 const hi = (s!.depthMax / maxDepth) * 100;
                 return (
                   <div key={key} className="flex items-center gap-2">
-                    <span className="w-[66px] truncate text-[10.5px] text-ink-200">{st.label.split(" ")[0]}</span>
+                    <span className="w-[66px] truncate text-[10.5px] text-ink-200">{STRATA_NAMES[key]}</span>
                     <div className="relative h-[6px] flex-1 rounded-full bg-white/[0.04]">
                       <span
                         className="absolute top-0 h-full rounded-full"

@@ -69,7 +69,7 @@ export function Tooltip({
   return (
     <span
       ref={ref}
-      className={cx("inline-flex", className)}
+      className={cx(!/(^|\s)(block|flex|grid|hidden)(\s|$)/.test(className ?? "") && "inline-flex", className)}
       onPointerEnter={show}
       onPointerLeave={hide}
       onFocus={show}
@@ -431,8 +431,7 @@ export function ShareBar({
             className={cx("h-full", p.hatched && "dt-hatch")}
             style={{
               width: `${(p.value / total) * 100}%`,
-              background: p.hatched ? undefined : p.color,
-              backgroundColor: p.hatched ? `${p.color}55` : undefined,
+              backgroundColor: p.hatched ? `${p.color}55` : p.color,
             }}
           />
         ))}

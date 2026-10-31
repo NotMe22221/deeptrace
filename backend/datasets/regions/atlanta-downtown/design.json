@@ -1,0 +1,394 @@
+{
+  "_comment": "DEEPTRACE illustrative infrastructure design for the downtown Atlanta demo district. EVERYTHING in this file is SIMULATED: substations, feeders, vaults, mains, valves, fibre rings, cell sites, duct banks, capacities, loads, backup durations, occupancies and dependencies are invented for modelling and do NOT describe real utility assets. Anchors: 'at' names a street intersection ('Street A & Street B', resolved against the street graph by normalised street names) and 'near' gives [lat, lon] used to disambiguate or as a fallback. 'site' gives [lat, lon] for off-street sites (buildings, yards). Feeder vault references use '<FEEDER-ID>:<1-based index>'.",
+  "schema": "deeptrace.design/1",
+  "network": {
+    "id": "atlanta-downtown",
+    "name": "DEEPTRACE — Downtown Atlanta (illustrative digital twin)",
+    "description": "Six interdependent infrastructure systems for downtown Atlanta. Street alignments and landmark positions are ESTIMATED; every utility asset, connection and capacity is SIMULATED for demonstration and does not describe the real grid."
+  },
+  "power": {
+    "transmission_substations": [
+      {"id": "PWR-TS-WEST", "name": "TS-West 115 kV bulk supply (simulated)", "site": [33.768, -84.403], "capacity_mw": 95},
+      {"id": "PWR-TS-SOUTH", "name": "TS-South 115 kV bulk supply (simulated)", "site": [33.7468, -84.3985], "capacity_mw": 115},
+      {"id": "PWR-TS-EAST", "name": "TS-East 115 kV bulk supply (simulated)", "site": [33.752, -84.3735], "capacity_mw": 105}
+    ],
+    "distribution_substations": [
+      {"id": "PWR-DS-CENTENNIAL", "label": "DS-1 Centennial", "site": [33.7625, -84.3995], "capacity_mw": 38, "load_factor": 0.6},
+      {"id": "PWR-DS-FIVEPOINTS", "label": "DS-2 Five Points", "site": [33.7524, -84.3938], "capacity_mw": 45, "load_factor": 0.7},
+      {"id": "PWR-DS-CAPITOL", "label": "DS-3 Capitol", "site": [33.7474, -84.3875], "capacity_mw": 34, "load_factor": 0.6},
+      {"id": "PWR-DS-PEACHTREE", "label": "DS-4 Peachtree Center", "site": [33.7621, -84.3843], "capacity_mw": 40, "load_factor": 0.62},
+      {"id": "PWR-DS-GRADY", "label": "DS-5 Edgewood-Grady", "site": [33.7562, -84.3812], "capacity_mw": 32, "load_factor": 0.6},
+      {"id": "PWR-DS-CIVIC", "label": "DS-6 Civic Center", "site": [33.768, -84.3838], "capacity_mw": 28, "load_factor": 0.55}
+    ],
+    "transmission_lines": [
+      {"from": "PWR-TS-SOUTH", "to": "PWR-DS-FIVEPOINTS", "capacity_mw": 60, "role": "primary"},
+      {"from": "PWR-TS-WEST", "to": "PWR-DS-FIVEPOINTS", "capacity_mw": 28, "role": "alternate"},
+      {"from": "PWR-TS-WEST", "to": "PWR-DS-CENTENNIAL", "capacity_mw": 55, "role": "primary"},
+      {"from": "PWR-TS-SOUTH", "to": "PWR-DS-CENTENNIAL", "capacity_mw": 30, "role": "alternate"},
+      {"from": "PWR-TS-SOUTH", "to": "PWR-DS-CAPITOL", "capacity_mw": 45, "role": "primary"},
+      {"from": "PWR-TS-EAST", "to": "PWR-DS-CAPITOL", "capacity_mw": 30, "role": "alternate"},
+      {"from": "PWR-TS-EAST", "to": "PWR-DS-GRADY", "capacity_mw": 45, "role": "primary (single supply)"},
+      {"from": "PWR-TS-EAST", "to": "PWR-DS-PEACHTREE", "capacity_mw": 55, "role": "primary"},
+      {"from": "PWR-TS-WEST", "to": "PWR-DS-PEACHTREE", "capacity_mw": 30, "role": "alternate"},
+      {"from": "PWR-TS-WEST", "to": "PWR-DS-CIVIC", "capacity_mw": 40, "role": "primary"},
+      {"from": "PWR-TS-EAST", "to": "PWR-DS-CIVIC", "capacity_mw": 30, "role": "alternate"}
+    ],
+    "feeders": [
+      {"id": "CEN-1", "substation": "PWR-DS-CENTENNIAL", "capacity_mw": 10, "switch": {"at": "Northside Dr & Andrew Young International Blvd", "near": [33.7598, -84.4035]},
+       "vaults": [
+         {"at": "Northside Dr & Martin Luther King Jr Dr", "near": [33.7537, -84.4038]},
+         {"at": "Martin Luther King Jr Dr & Ted Turner Dr", "near": [33.7495, -84.3952]},
+         {"at": "Ted Turner Dr & Trinity Ave", "near": [33.7471, -84.396]}]},
+      {"id": "CEN-2", "substation": "PWR-DS-CENTENNIAL", "capacity_mw": 11, "switch": {"at": "Andrew Young International Blvd & Marietta St", "near": [33.7601, -84.3991]},
+       "vaults": [
+         {"at": "Andrew Young International Blvd & Centennial Olympic Park Dr", "near": [33.7605, -84.3962]},
+         {"at": "Andrew Young International Blvd & Luckie St", "near": [33.7607, -84.3945]},
+         {"at": "Spring St & Luckie St", "near": [33.759, -84.3925]}]},
+      {"id": "CEN-3", "substation": "PWR-DS-CENTENNIAL", "capacity_mw": 10, "switch": {"at": "Centennial Olympic Park Dr & Baker St", "near": [33.7628, -84.3961]},
+       "vaults": [
+         {"at": "Centennial Olympic Park Dr & Ivan Allen Jr Blvd", "near": [33.7657, -84.3955]},
+         {"at": "North Ave & Centennial Olympic Park Dr", "near": [33.7716, -84.3936]},
+         {"at": "North Ave & Northside Dr", "near": [33.7716, -84.4041]}]},
+      {"id": "FP-1", "substation": "PWR-DS-FIVEPOINTS", "capacity_mw": 13, "switch": {"at": "Ted Turner Dr & Mitchell St", "near": [33.7512, -84.3948]},
+       "vaults": [
+         {"at": "Marietta St & Broad St", "near": [33.7552, -84.3913]},
+         {"at": "Marietta St & Forsyth St", "near": [33.7557, -84.3921]},
+         {"at": "Marietta St & Spring St", "near": [33.7569, -84.3936]},
+         {"at": "Centennial Olympic Park Dr & Marietta St", "near": [33.7583, -84.3966]}]},
+      {"id": "FP-2", "substation": "PWR-DS-FIVEPOINTS", "capacity_mw": 13, "switch": {"at": "Forsyth St & Mitchell St", "near": [33.7509, -84.3937]},
+       "vaults": [
+         {"at": "Peachtree St & Mitchell St", "near": [33.7505, -84.3914]},
+         {"at": "Peachtree St & Martin Luther King Jr Dr", "near": [33.7488, -84.392]},
+         {"at": "Central Ave & Trinity Ave", "near": [33.7469, -84.3901]},
+         {"at": "Trinity Ave & Washington St", "near": [33.7468, -84.3886]}]},
+      {"id": "FP-3", "substation": "PWR-DS-FIVEPOINTS", "capacity_mw": 13, "switch": {"at": "Broad St & Mitchell St", "near": [33.7507, -84.3926]},
+       "vaults": [
+         {"at": "Peachtree St & Edgewood Ave", "near": [33.7546, -84.3902]},
+         {"at": "Peachtree St & Auburn Ave", "near": [33.7557, -84.3894]},
+         {"at": "Peachtree St & John Wesley Dobbs Ave", "near": [33.757, -84.3886]},
+         {"at": "Peachtree St & Ellis St", "near": [33.7585, -84.3879]}]},
+      {"id": "CAP-1", "substation": "PWR-DS-CAPITOL", "capacity_mw": 12, "switch": {"at": "Capitol Ave & Trinity Ave", "near": [33.7467, -84.3863]},
+       "vaults": [
+         {"at": "Martin Luther King Jr Dr & Washington St", "near": [33.7483, -84.3886]},
+         {"at": "Mitchell St & Washington St", "near": [33.75, -84.3884]},
+         {"at": "Decatur St & Washington St", "near": [33.7537, -84.3877]},
+         {"at": "Decatur St & Central Ave", "near": [33.754, -84.3887]}]},
+      {"id": "CAP-2", "substation": "PWR-DS-CAPITOL", "capacity_mw": 12, "switch": {"at": "Capitol Ave & Memorial Dr", "near": [33.746, -84.3863]},
+       "vaults": [
+         {"at": "Courtland St & Mitchell St", "near": [33.75, -84.3863]},
+         {"at": "Piedmont Ave & Mitchell St", "near": [33.75, -84.385]},
+         {"at": "Martin Luther King Jr Dr & Jesse Hill Jr Dr", "near": [33.7482, -84.3829]},
+         {"at": "Decatur St & Jesse Hill Jr Dr", "near": [33.7519, -84.3826]}]},
+      {"id": "GR-1", "substation": "PWR-DS-GRADY", "capacity_mw": 12, "switch": {"at": "Auburn Ave & Jesse Hill Jr Dr", "near": [33.7556, -84.3823]},
+       "vaults": [
+         {"at": "Edgewood Ave & Jesse Hill Jr Dr", "near": [33.7543, -84.3824]},
+         {"at": "Edgewood Ave & Piedmont Ave", "near": [33.7543, -84.3845]},
+         {"at": "Courtland St & Edgewood Ave", "near": [33.7544, -84.3858]},
+         {"at": "Courtland St & Decatur St", "near": [33.753, -84.386]}]},
+      {"id": "GR-2", "substation": "PWR-DS-GRADY", "capacity_mw": 11, "switch": {"at": "Jesse Hill Jr Dr & John Wesley Dobbs Ave", "near": [33.757, -84.3821]},
+       "vaults": [
+         {"at": "Jackson St & John Wesley Dobbs Ave", "near": [33.7571, -84.3745]},
+         {"at": "Auburn Ave & Jackson St", "near": [33.7553, -84.3745]},
+         {"at": "Edgewood Ave & Jackson St", "near": [33.7544, -84.3745]},
+         {"at": "Decatur St & Jackson St", "near": [33.7495, -84.3745]}]},
+      {"id": "PT-1", "substation": "PWR-DS-PEACHTREE", "capacity_mw": 11, "switch": {"at": "Courtland St & John Portman Blvd", "near": [33.7613, -84.3852]},
+       "vaults": [
+         {"at": "Peachtree St & John Portman Blvd", "near": [33.7615, -84.3866]},
+         {"at": "Spring St & John Portman Blvd", "near": [33.7622, -84.3909]},
+         {"at": "Andrew Young International Blvd & Spring St", "near": [33.7607, -84.3916]},
+         {"at": "Peachtree St & Andrew Young International Blvd", "near": [33.76, -84.3872]}]},
+      {"id": "PT-2", "substation": "PWR-DS-PEACHTREE", "capacity_mw": 11, "switch": {"at": "Piedmont Ave & John Portman Blvd", "near": [33.7612, -84.3838]},
+       "vaults": [
+         {"at": "Andrew Young International Blvd & Piedmont Ave", "near": [33.7598, -84.3839]},
+         {"at": "Piedmont Ave & Ellis St", "near": [33.7583, -84.3841]},
+         {"at": "Piedmont Ave & John Wesley Dobbs Ave", "near": [33.757, -84.3842]},
+         {"at": "Piedmont Ave & Auburn Ave", "near": [33.7557, -84.3843]}]},
+      {"id": "PT-3", "substation": "PWR-DS-PEACHTREE", "capacity_mw": 10, "switch": {"at": "Courtland St & Baker St", "near": [33.7629, -84.385]},
+       "vaults": [
+         {"at": "Andrew Young International Blvd & Courtland St", "near": [33.7599, -84.3853]},
+         {"at": "Courtland St & Ellis St", "near": [33.7583, -84.3855]},
+         {"at": "Courtland St & John Wesley Dobbs Ave", "near": [33.7571, -84.3856]}]},
+      {"id": "CIV-1", "substation": "PWR-DS-CIVIC", "capacity_mw": 10, "switch": {"at": "Peachtree St & Ralph McGill Blvd", "near": [33.7662, -84.3856]},
+       "vaults": [
+         {"at": "West Peachtree St & Ralph McGill Blvd", "near": [33.7663, -84.3874]},
+         {"at": "Ivan Allen Jr Blvd & Spring St", "near": [33.7662, -84.3897]},
+         {"at": "North Ave & Spring St", "near": [33.7716, -84.3889]}]},
+      {"id": "CIV-2", "substation": "PWR-DS-CIVIC", "capacity_mw": 10, "switch": {"at": "Piedmont Ave & Ralph McGill Blvd", "near": [33.7655, -84.383]},
+       "vaults": [
+         {"at": "North Ave & Piedmont Ave", "near": [33.7716, -84.3816]},
+         {"at": "North Ave & Peachtree St", "near": [33.7716, -84.3853]},
+         {"at": "North Ave & West Peachtree St", "near": [33.7717, -84.387]}]}
+    ],
+    "ties": [
+      {"id": "01", "a": "FP-1:4", "b": "CEN-2:1", "capacity_mw": 6, "manual_switch_hours": 3},
+      {"id": "02", "a": "FP-2:4", "b": "CAP-1:1", "capacity_mw": 5, "manual_switch_hours": 2},
+      {"id": "03", "a": "FP-3:4", "b": "PT-1:4", "capacity_mw": 8, "manual_switch_hours": 3},
+      {"id": "04", "a": "CEN-3:2", "b": "CIV-1:3", "capacity_mw": 7, "manual_switch_hours": 4},
+      {"id": "05", "a": "PT-2:4", "b": "GR-1:2", "capacity_mw": 6, "manual_switch_hours": 2},
+      {"id": "06", "a": "GR-1:4", "b": "CAP-1:4", "capacity_mw": 5, "manual_switch_hours": 3},
+      {"id": "07", "a": "GR-2:4", "b": "CAP-2:4", "capacity_mw": 4, "manual_switch_hours": 4}
+    ],
+    "population_per_mw": 1000
+  },
+  "water": {
+    "sources": [
+      {"id": "WTR-SRC-NW", "name": "NW transmission main entry (simulated)", "site": [33.7708, -84.4052], "capacity_lps": 800},
+      {"id": "WTR-SRC-SE", "name": "SE transmission main entry (simulated)", "site": [33.7468, -84.3728], "capacity_lps": 650}
+    ],
+    "pump_stations": [
+      {"id": "WTR-PS-FAIRLIE", "name": "Fairlie-Poplar booster pump station (simulated)", "site": [33.758, -84.3928], "capacity_lps": 250, "serves_pressure_zone": "high", "backup_hours": 0}
+    ],
+    "storage_tanks": [
+      {"id": "WTR-TNK-NORTH", "name": "North elevated storage tank (simulated)", "site": [33.7698, -84.3832], "storage_m3": 4000, "elevation_m": 40, "capacity_lps": 180, "pressure_zone": "high"}
+    ],
+    "junctions": [
+      {"id": "WTR-JN-01", "at": "North Ave & Northside Dr", "near": [33.7716, -84.4041], "pressure_zone": "low"},
+      {"id": "WTR-JN-02", "at": "Northside Dr & Marietta St", "near": [33.7662, -84.404], "pressure_zone": "low"},
+      {"id": "WTR-JN-03", "at": "Northside Dr & Martin Luther King Jr Dr", "near": [33.7537, -84.4038], "pressure_zone": "low"},
+      {"id": "WTR-JN-04", "at": "Centennial Olympic Park Dr & Marietta St", "near": [33.7583, -84.3966], "pressure_zone": "low"},
+      {"id": "WTR-JN-05", "at": "Martin Luther King Jr Dr & Ted Turner Dr", "near": [33.7495, -84.3952], "pressure_zone": "low"},
+      {"id": "WTR-JN-06", "at": "Marietta St & Spring St", "near": [33.7569, -84.3936], "pressure_zone": "low"},
+      {"id": "WTR-JN-07", "at": "Peachtree St & Edgewood Ave", "near": [33.7546, -84.3902], "pressure_zone": "low"},
+      {"id": "WTR-JN-08", "at": "Peachtree St & Martin Luther King Jr Dr", "near": [33.7488, -84.392], "pressure_zone": "low"},
+      {"id": "WTR-JN-09", "at": "Martin Luther King Jr Dr & Washington St", "near": [33.7483, -84.3886], "pressure_zone": "low"},
+      {"id": "WTR-JN-10", "at": "Courtland St & Decatur St", "near": [33.753, -84.386], "pressure_zone": "low"},
+      {"id": "WTR-JN-11", "at": "Martin Luther King Jr Dr & Jesse Hill Jr Dr", "near": [33.7482, -84.3829], "pressure_zone": "low"},
+      {"id": "WTR-JN-12", "at": "Edgewood Ave & Jesse Hill Jr Dr", "near": [33.7543, -84.3824], "pressure_zone": "low"},
+      {"id": "WTR-JN-13", "at": "Boulevard & Martin Luther King Jr Dr", "near": [33.7486, -84.3718], "pressure_zone": "low"},
+      {"id": "WTR-JN-14", "at": "Peachtree St & Andrew Young International Blvd", "near": [33.76, -84.3872], "pressure_zone": "low"},
+      {"id": "WTR-JN-15", "at": "Piedmont Ave & Auburn Ave", "near": [33.7557, -84.3843], "pressure_zone": "low"},
+      {"id": "WTR-JN-16", "at": "Andrew Young International Blvd & Centennial Olympic Park Dr", "near": [33.7605, -84.3962], "pressure_zone": "low"},
+      {"id": "WTR-JN-17", "at": "Edgewood Ave & Jackson St", "near": [33.7544, -84.3745], "pressure_zone": "low"},
+      {"id": "WTR-JN-21", "at": "Spring St & Baker St", "near": [33.7635, -84.3905], "pressure_zone": "high"},
+      {"id": "WTR-JN-22", "at": "West Peachtree St & Ralph McGill Blvd", "near": [33.7663, -84.3874], "pressure_zone": "high"},
+      {"id": "WTR-JN-23", "at": "North Ave & Peachtree St", "near": [33.7716, -84.3853], "pressure_zone": "high"},
+      {"id": "WTR-JN-24", "at": "Piedmont Ave & Ralph McGill Blvd", "near": [33.7655, -84.383], "pressure_zone": "high"},
+      {"id": "WTR-JN-25", "at": "North Ave & Piedmont Ave", "near": [33.7716, -84.3816], "pressure_zone": "high"},
+      {"id": "WTR-JN-26", "at": "Piedmont Ave & Baker St", "near": [33.7628, -84.3836], "pressure_zone": "high"},
+      {"id": "WTR-JN-27", "at": "Peachtree St & Baker St", "near": [33.7632, -84.3861], "pressure_zone": "high"}
+    ],
+    "pipes": [
+      {"from": "WTR-SRC-NW", "to": "WTR-JN-01", "type": "water_main", "capacity_lps": 900},
+      {"from": "WTR-JN-01", "to": "WTR-JN-02", "type": "water_main", "capacity_lps": 800, "valve": true},
+      {"from": "WTR-JN-02", "to": "WTR-JN-04", "type": "water_main", "capacity_lps": 600, "valve": true},
+      {"from": "WTR-JN-04", "to": "WTR-JN-06", "type": "water_main", "capacity_lps": 600},
+      {"from": "WTR-JN-06", "to": "WTR-JN-07", "type": "water_main", "capacity_lps": 550, "valve": true},
+      {"from": "WTR-JN-02", "to": "WTR-JN-03", "type": "water_main", "capacity_lps": 500, "valve": true},
+      {"from": "WTR-JN-03", "to": "WTR-JN-05", "type": "water_main", "capacity_lps": 500},
+      {"from": "WTR-JN-05", "to": "WTR-JN-08", "type": "water_main", "capacity_lps": 450, "valve": true},
+      {"from": "WTR-JN-08", "to": "WTR-JN-09", "type": "water_main", "capacity_lps": 450},
+      {"from": "WTR-JN-09", "to": "WTR-JN-11", "type": "water_main", "capacity_lps": 450, "valve": true},
+      {"from": "WTR-JN-11", "to": "WTR-JN-13", "type": "water_main", "capacity_lps": 600},
+      {"from": "WTR-SRC-SE", "to": "WTR-JN-13", "type": "water_main", "capacity_lps": 700},
+      {"from": "WTR-JN-07", "to": "WTR-JN-10", "type": "water_main", "capacity_lps": 500, "valve": true},
+      {"from": "WTR-JN-10", "to": "WTR-JN-12", "type": "water_main", "capacity_lps": 450},
+      {"from": "WTR-JN-12", "to": "WTR-JN-17", "type": "water_main", "capacity_lps": 500, "valve": true},
+      {"from": "WTR-JN-17", "to": "WTR-JN-13", "type": "water_main", "capacity_lps": 500},
+      {"from": "WTR-JN-07", "to": "WTR-JN-08", "type": "distribution_main", "capacity_lps": 300, "valve": true},
+      {"from": "WTR-JN-09", "to": "WTR-JN-10", "type": "distribution_main", "capacity_lps": 250},
+      {"from": "WTR-JN-07", "to": "WTR-JN-14", "type": "distribution_main", "capacity_lps": 250, "valve": true},
+      {"from": "WTR-JN-04", "to": "WTR-JN-16", "type": "distribution_main", "capacity_lps": 200},
+      {"from": "WTR-JN-16", "to": "WTR-JN-14", "type": "distribution_main", "capacity_lps": 200, "valve": true},
+      {"from": "WTR-JN-14", "to": "WTR-JN-15", "type": "distribution_main", "capacity_lps": 180},
+      {"from": "WTR-JN-15", "to": "WTR-JN-12", "type": "distribution_main", "capacity_lps": 200, "valve": true},
+      {"from": "WTR-JN-10", "to": "WTR-JN-15", "type": "distribution_main", "capacity_lps": 200},
+      {"from": "WTR-JN-11", "to": "WTR-JN-12", "type": "distribution_main", "capacity_lps": 250},
+      {"from": "WTR-JN-03", "to": "WTR-JN-16", "type": "distribution_main", "capacity_lps": 150, "valve": true},
+      {"from": "WTR-JN-06", "to": "WTR-PS-FAIRLIE", "type": "distribution_main", "capacity_lps": 300, "label": "pump suction main"},
+      {"from": "WTR-PS-FAIRLIE", "to": "WTR-JN-21", "type": "distribution_main", "capacity_lps": 250, "label": "pump discharge main (high zone)", "directed": true},
+      {"from": "WTR-JN-21", "to": "WTR-JN-22", "type": "distribution_main", "capacity_lps": 220, "valve": true},
+      {"from": "WTR-JN-22", "to": "WTR-JN-23", "type": "distribution_main", "capacity_lps": 180, "valve": true},
+      {"from": "WTR-JN-23", "to": "WTR-JN-25", "type": "distribution_main", "capacity_lps": 150},
+      {"from": "WTR-JN-25", "to": "WTR-JN-24", "type": "distribution_main", "capacity_lps": 150, "valve": true},
+      {"from": "WTR-JN-24", "to": "WTR-JN-26", "type": "distribution_main", "capacity_lps": 150},
+      {"from": "WTR-JN-26", "to": "WTR-JN-27", "type": "distribution_main", "capacity_lps": 180},
+      {"from": "WTR-JN-27", "to": "WTR-JN-21", "type": "distribution_main", "capacity_lps": 180, "valve": true},
+      {"from": "WTR-JN-22", "to": "WTR-JN-24", "type": "distribution_main", "capacity_lps": 120},
+      {"from": "WTR-JN-25", "to": "WTR-TNK-NORTH", "type": "distribution_main", "capacity_lps": 250, "label": "tank riser main"},
+      {"from": "WTR-JN-14", "to": "WTR-JN-27", "type": "distribution_main", "capacity_lps": 200, "boundary_valve": "WTR-VLV-B1", "label": "pressure-zone boundary (normally closed)"},
+      {"from": "WTR-JN-15", "to": "WTR-JN-26", "type": "distribution_main", "capacity_lps": 200, "boundary_valve": "WTR-VLV-B2", "label": "pressure-zone boundary (normally closed)"}
+    ],
+    "zones": [
+      {"id": "WTR-ZN-CENTENNIAL", "name": "Centennial / GWCC service zone", "site": [33.7608, -84.3978], "connect": "WTR-JN-16", "demand_lps": 45, "population": 9000, "pressure_zone": "low"},
+      {"id": "WTR-ZN-STADIUM", "name": "Stadium / Vine City service zone", "site": [33.7548, -84.4022], "connect": "WTR-JN-03", "demand_lps": 35, "population": 6500, "pressure_zone": "low"},
+      {"id": "WTR-ZN-FAIRLIE", "name": "Fairlie-Poplar service zone", "site": [33.7574, -84.3912], "connect": "WTR-JN-06", "demand_lps": 30, "population": 7000, "pressure_zone": "low"},
+      {"id": "WTR-ZN-FIVEPOINTS", "name": "Five Points service zone", "site": [33.7522, -84.391], "connect": "WTR-JN-07", "demand_lps": 40, "population": 11000, "pressure_zone": "low"},
+      {"id": "WTR-ZN-CAPITOL", "name": "Capitol / City Hall service zone", "site": [33.7478, -84.388], "connect": "WTR-JN-09", "demand_lps": 30, "population": 8000, "pressure_zone": "low"},
+      {"id": "WTR-ZN-GARNETT", "name": "Garnett / Castleberry service zone", "site": [33.7478, -84.395], "connect": "WTR-JN-05", "demand_lps": 20, "population": 4000, "pressure_zone": "low"},
+      {"id": "WTR-ZN-GSU", "name": "Georgia State service zone", "site": [33.7518, -84.3858], "connect": "WTR-JN-10", "demand_lps": 50, "population": 14000, "pressure_zone": "low"},
+      {"id": "WTR-ZN-GRADY", "name": "Grady / Edgewood service zone", "site": [33.7532, -84.381], "connect": "WTR-JN-12", "demand_lps": 55, "population": 6000, "pressure_zone": "low"},
+      {"id": "WTR-ZN-SWEETAUBURN", "name": "Sweet Auburn service zone", "site": [33.7558, -84.3762], "connect": "WTR-JN-17", "demand_lps": 25, "population": 5000, "pressure_zone": "low"},
+      {"id": "WTR-ZN-PEACHTREE", "name": "Peachtree Center service zone (high)", "site": [33.7612, -84.387], "connect": "WTR-JN-27", "demand_lps": 50, "population": 12000, "pressure_zone": "high"},
+      {"id": "WTR-ZN-CIVIC", "name": "Civic Center service zone (high)", "site": [33.7652, -84.3885], "connect": "WTR-JN-22", "demand_lps": 30, "population": 6000, "pressure_zone": "high"},
+      {"id": "WTR-ZN-NORTHAVE", "name": "North Avenue service zone (high)", "site": [33.7702, -84.3868], "connect": "WTR-JN-23", "demand_lps": 25, "population": 5000, "pressure_zone": "high"}
+    ]
+  },
+  "telecom": {
+    "cores": [
+      {"id": "TEL-IX-56MARIETTA", "landmark": "56MARIETTA", "name": "56 Marietta St carrier hotel", "type": "internet_exchange", "capacity_gbps": 3200, "backup_hours": 48, "water_backup_hours": 24},
+      {"id": "TEL-IX-EAST", "name": "East Side data center & IX (simulated)", "type": "internet_exchange", "site": [33.7605, -84.3765], "capacity_gbps": 1600, "backup_hours": 48, "water_backup_hours": 12, "facility_type": "data center"}
+    ],
+    "central_offices": [
+      {"id": "TEL-CO-PEACHTREE", "name": "CO Peachtree Center (simulated)", "site": [33.7626, -84.3878], "capacity_gbps": 800, "backup_hours": 24},
+      {"id": "TEL-CO-CAPITOL", "name": "CO Capitol Hill (simulated)", "site": [33.7512, -84.389], "capacity_gbps": 800, "backup_hours": 24}
+    ],
+    "data_centers": [
+      {"id": "TEL-DC-TECHWOOD", "name": "Techwood colocation data center (simulated)", "site": [33.769, -84.396], "demand_gbps": 40, "backup_hours": 48, "water_backup_hours": 8}
+    ],
+    "hubs": [
+      {"id": "TEL-HUB-FAIRLIE", "name": "Fibre hub Fairlie-Poplar (simulated)", "at": "Marietta St & Spring St", "near": [33.7569, -84.3936]},
+      {"id": "TEL-HUB-CENTENNIAL", "name": "Fibre hub Centennial (simulated)", "at": "Centennial Olympic Park Dr & Marietta St", "near": [33.7583, -84.3966]},
+      {"id": "TEL-HUB-GWCC", "name": "Fibre hub GWCC (simulated)", "at": "Northside Dr & Andrew Young International Blvd", "near": [33.7598, -84.4035]},
+      {"id": "TEL-HUB-STADIUM", "name": "Fibre hub Stadium (simulated)", "at": "Northside Dr & Martin Luther King Jr Dr", "near": [33.7537, -84.4038]},
+      {"id": "TEL-HUB-GARNETT", "name": "Fibre hub Garnett (simulated)", "at": "Martin Luther King Jr Dr & Forsyth St", "near": [33.7492, -84.3942]},
+      {"id": "TEL-HUB-WOODRUFF", "name": "Fibre hub Woodruff Park (simulated)", "at": "Peachtree St & Auburn Ave", "near": [33.7557, -84.3894]},
+      {"id": "TEL-HUB-AUBURN", "name": "Fibre hub Sweet Auburn (simulated)", "at": "Auburn Ave & Jesse Hill Jr Dr", "near": [33.7556, -84.3823]},
+      {"id": "TEL-HUB-GSU", "name": "Fibre hub Georgia State (simulated)", "at": "Courtland St & Decatur St", "near": [33.753, -84.386]},
+      {"id": "TEL-HUB-CIVIC", "name": "Fibre hub Civic Center (simulated)", "at": "Peachtree St & Ralph McGill Blvd", "near": [33.7662, -84.3856]},
+      {"id": "TEL-HUB-NORTHAVE", "name": "Fibre hub North Ave (simulated)", "at": "North Ave & Spring St", "near": [33.7716, -84.3889]}
+    ],
+    "links": [
+      {"from": "TEL-IX-56MARIETTA", "to": "TEL-HUB-FAIRLIE", "capacity_gbps": 400, "ring": "west"},
+      {"from": "TEL-HUB-FAIRLIE", "to": "TEL-HUB-CENTENNIAL", "capacity_gbps": 400, "ring": "west"},
+      {"from": "TEL-HUB-CENTENNIAL", "to": "TEL-HUB-GWCC", "capacity_gbps": 200, "ring": "west"},
+      {"from": "TEL-HUB-GWCC", "to": "TEL-HUB-STADIUM", "capacity_gbps": 200, "ring": "west"},
+      {"from": "TEL-HUB-STADIUM", "to": "TEL-HUB-GARNETT", "capacity_gbps": 200, "ring": "west"},
+      {"from": "TEL-HUB-GARNETT", "to": "TEL-CO-CAPITOL", "capacity_gbps": 200, "ring": "west"},
+      {"from": "TEL-CO-CAPITOL", "to": "TEL-IX-56MARIETTA", "capacity_gbps": 400, "ring": "west"},
+      {"from": "TEL-IX-EAST", "to": "TEL-HUB-AUBURN", "capacity_gbps": 400, "ring": "east"},
+      {"from": "TEL-HUB-AUBURN", "to": "TEL-HUB-WOODRUFF", "capacity_gbps": 400, "ring": "east"},
+      {"from": "TEL-HUB-WOODRUFF", "to": "TEL-CO-PEACHTREE", "capacity_gbps": 400, "ring": "east"},
+      {"from": "TEL-CO-PEACHTREE", "to": "TEL-HUB-CIVIC", "capacity_gbps": 200, "ring": "east"},
+      {"from": "TEL-HUB-CIVIC", "to": "TEL-IX-EAST", "capacity_gbps": 200, "ring": "east"},
+      {"from": "TEL-IX-56MARIETTA", "to": "TEL-HUB-WOODRUFF", "capacity_gbps": 400, "ring": "core interconnect"},
+      {"from": "TEL-CO-CAPITOL", "to": "TEL-HUB-GSU", "capacity_gbps": 200, "ring": "core interconnect"},
+      {"from": "TEL-HUB-GSU", "to": "TEL-IX-EAST", "capacity_gbps": 200, "ring": "core interconnect"},
+      {"from": "TEL-HUB-CIVIC", "to": "TEL-HUB-NORTHAVE", "capacity_gbps": 100, "ring": "spur"},
+      {"from": "TEL-HUB-NORTHAVE", "to": "TEL-DC-TECHWOOD", "capacity_gbps": 100, "ring": "spur"},
+      {"from": "TEL-HUB-CENTENNIAL", "to": "TEL-DC-TECHWOOD", "capacity_gbps": 100, "ring": "spur"}
+    ],
+    "cell_sites": [
+      {"id": "TEL-CELL-01", "name": "Cell site Peachtree Center rooftop (simulated)", "site": [33.7608, -84.388], "homes": ["TEL-CO-PEACHTREE", "TEL-HUB-WOODRUFF"], "backup_hours": 4},
+      {"id": "TEL-CELL-02", "name": "Cell site Five Points rooftop (simulated)", "site": [33.7551, -84.3895], "homes": ["TEL-HUB-WOODRUFF"], "backup_hours": 2},
+      {"id": "TEL-CELL-03", "name": "Cell site Centennial Park rooftop (simulated)", "site": [33.7616, -84.3924], "homes": ["TEL-HUB-FAIRLIE", "TEL-HUB-CENTENNIAL"], "backup_hours": 4},
+      {"id": "TEL-CELL-04", "name": "Cell site GWCC rooftop (simulated)", "site": [33.7605, -84.4015], "homes": ["TEL-HUB-GWCC"], "backup_hours": 3},
+      {"id": "TEL-CELL-05", "name": "Cell site Stadium (simulated)", "site": [33.7562, -84.4028], "homes": ["TEL-HUB-STADIUM", "TEL-HUB-GWCC"], "backup_hours": 6},
+      {"id": "TEL-CELL-06", "name": "Cell site Capitol Hill rooftop (simulated)", "site": [33.7495, -84.3866], "homes": ["TEL-CO-CAPITOL"], "backup_hours": 8},
+      {"id": "TEL-CELL-07", "name": "Cell site Grady rooftop (simulated)", "site": [33.7535, -84.3815], "homes": ["TEL-HUB-AUBURN", "TEL-HUB-GSU"], "backup_hours": 8},
+      {"id": "TEL-CELL-08", "name": "Cell site Sweet Auburn rooftop (simulated)", "site": [33.756, -84.3758], "homes": ["TEL-HUB-AUBURN"], "backup_hours": 2},
+      {"id": "TEL-CELL-09", "name": "Cell site Civic Center rooftop (simulated)", "site": [33.7672, -84.386], "homes": ["TEL-HUB-CIVIC"], "backup_hours": 3},
+      {"id": "TEL-CELL-10", "name": "Cell site Garnett rooftop (simulated)", "site": [33.748, -84.3945], "homes": ["TEL-HUB-GARNETT"], "backup_hours": 2},
+      {"id": "TEL-CELL-11", "name": "Cell site North Ave rooftop (simulated)", "site": [33.7705, -84.388], "homes": ["TEL-HUB-NORTHAVE"], "backup_hours": 4}
+    ],
+    "access_nodes": [
+      {"id": "TEL-ACC-01", "name": "Access node Fairlie-Poplar (simulated)", "at": "Forsyth St & Luckie St", "near": [33.7588, -84.3905], "homes": ["TEL-HUB-FAIRLIE"], "demand_gbps": 6, "backup_hours": 4},
+      {"id": "TEL-ACC-02", "name": "Access node Peachtree Center (simulated)", "at": "Courtland St & Ellis St", "near": [33.7583, -84.3855], "homes": ["TEL-CO-PEACHTREE"], "demand_gbps": 10, "backup_hours": 4},
+      {"id": "TEL-ACC-03", "name": "Access node Capitol Hill (simulated)", "at": "Central Ave & Mitchell St", "near": [33.7502, -84.3896], "homes": ["TEL-CO-CAPITOL", "TEL-HUB-GARNETT"], "demand_gbps": 8, "backup_hours": 8},
+      {"id": "TEL-ACC-04", "name": "Access node Georgia State (simulated)", "at": "Courtland St & Auburn Ave", "near": [33.7557, -84.3857], "homes": ["TEL-HUB-GSU"], "demand_gbps": 9, "backup_hours": 4},
+      {"id": "TEL-ACC-05", "name": "Access node Castleberry (simulated)", "at": "Ted Turner Dr & Trinity Ave", "near": [33.7471, -84.396], "homes": ["TEL-HUB-GARNETT"], "demand_gbps": 2, "backup_hours": 2}
+    ]
+  },
+  "underground": {
+    "corridors": [
+      {"id": "UGD-DB-01", "type": "duct_bank", "name": "Marietta St duct bank (Broad St - Spring St)", "from": {"at": "Marietta St & Broad St", "near": [33.7552, -84.3913]}, "to": {"at": "Marietta St & Spring St", "near": [33.7569, -84.3936]}, "depth_m": 2.0, "ducts": 12},
+      {"id": "UGD-DB-02", "type": "duct_bank", "name": "Marietta St duct bank (Spring St - Centennial Olympic Park Dr)", "from": {"at": "Marietta St & Spring St", "near": [33.7569, -84.3936]}, "to": {"at": "Centennial Olympic Park Dr & Marietta St", "near": [33.7583, -84.3966]}, "depth_m": 2.0, "ducts": 9},
+      {"id": "UGD-DB-03", "type": "duct_bank", "name": "Peachtree St duct bank (Five Points - Ellis St)", "from": {"at": "Peachtree St & Edgewood Ave", "near": [33.7546, -84.3902]}, "to": {"at": "Peachtree St & Ellis St", "near": [33.7585, -84.3879]}, "depth_m": 2.5, "ducts": 16},
+      {"id": "UGD-UT-04", "type": "utility_tunnel", "name": "Andrew Young Intl Blvd utility tunnel (Spring St - Courtland St)", "from": {"at": "Andrew Young International Blvd & Spring St", "near": [33.7607, -84.3916]}, "to": {"at": "Andrew Young International Blvd & Courtland St", "near": [33.7599, -84.3853]}, "depth_m": 3.0, "ducts": 24},
+      {"id": "UGD-DB-05", "type": "duct_bank", "name": "Edgewood Ave duct bank (Five Points - Jesse Hill Jr Dr)", "from": {"at": "Peachtree St & Edgewood Ave", "near": [33.7546, -84.3902]}, "to": {"at": "Edgewood Ave & Jesse Hill Jr Dr", "near": [33.7543, -84.3824]}, "depth_m": 1.8, "ducts": 12},
+      {"id": "UGD-DB-06", "type": "duct_bank", "name": "Martin Luther King Jr Dr duct bank (Peachtree St - Washington St)", "from": {"at": "Peachtree St & Martin Luther King Jr Dr", "near": [33.7488, -84.392]}, "to": {"at": "Martin Luther King Jr Dr & Washington St", "near": [33.7483, -84.3886]}, "depth_m": 1.5, "ducts": 8},
+      {"id": "UGD-DB-07", "type": "duct_bank", "name": "Courtland St duct bank (Edgewood Ave - Andrew Young Intl Blvd)", "from": {"at": "Courtland St & Edgewood Ave", "near": [33.7544, -84.3858]}, "to": {"at": "Andrew Young International Blvd & Courtland St", "near": [33.7599, -84.3853]}, "depth_m": 2.2, "ducts": 12}
+    ],
+    "host_connection_types": ["feeder_cable", "tie_line", "fiber_link"],
+    "min_shared_length_m": 60
+  },
+  "facilities": [
+    {"id": "FAC-GRADY", "landmark": "GRADY", "critical": true, "occupancy": 5000, "backup_power_hours": 96, "water_storage_hours": 24, "notes": "Hospital: dual power feed from two substations (simulated)."},
+    {"id": "FAC-CITYHALL", "landmark": "CITYHALL", "critical": true, "occupancy": 2000, "backup_power_hours": 48, "water_storage_hours": 4},
+    {"id": "FAC-CAPITOL", "landmark": "CAPITOL", "critical": true, "occupancy": 1500, "backup_power_hours": 48, "water_storage_hours": 4},
+    {"id": "FAC-COURTHOUSE", "landmark": "COURTHOUSE", "critical": true, "occupancy": 3000, "backup_power_hours": 24, "water_storage_hours": 2},
+    {"id": "FAC-APDHQ", "landmark": "APDHQ", "critical": true, "occupancy": 800, "backup_power_hours": 72, "water_storage_hours": 12},
+    {"id": "FAC-GSU", "landmark": "GSU", "critical": false, "occupancy": 12000, "backup_power_hours": 8, "water_storage_hours": 1},
+    {"id": "FAC-STADIUM", "landmark": "STADIUM", "critical": false, "occupancy": 1500, "event_capacity": 71000, "backup_power_hours": 2, "water_storage_hours": 1},
+    {"id": "FAC-ARENA", "landmark": "ARENA", "critical": false, "occupancy": 800, "event_capacity": 21000, "backup_power_hours": 2, "water_storage_hours": 1},
+    {"id": "FAC-GWCC", "landmark": "GWCC-VENUE", "critical": false, "occupancy": 8000, "backup_power_hours": 4, "water_storage_hours": 1},
+    {"id": "FAC-AQUARIUM", "landmark": "AQUARIUM", "critical": false, "occupancy": 6000, "backup_power_hours": 24, "water_storage_hours": 48, "notes": "Animal life-support systems assumed to have generator backup (simulated)."},
+    {"id": "FAC-CENTENNIALPARK", "landmark": "CENTENNIALPARK", "critical": false, "occupancy": 3000, "backup_power_hours": 0, "water_storage_hours": 0},
+    {"id": "FAC-PEACHTREECENTER", "landmark": "PEACHTREECENTER-COMPLEX", "critical": false, "occupancy": 12000, "backup_power_hours": 4, "water_storage_hours": 2}
+  ],
+  "transport": {
+    "gateways": [
+      {"id": "TRN-GW-I75-85-N", "name": "Downtown Connector north gateway", "near": [33.774, -84.391], "connects_to": "I-75/I-85 north (Midtown)"},
+      {"id": "TRN-GW-I75-85-S", "name": "Downtown Connector south gateway", "near": [33.7425, -84.3848], "connects_to": "I-75/I-85 south"},
+      {"id": "TRN-GW-I20-W", "name": "I-20 west gateway", "near": [33.7458, -84.4085], "connects_to": "I-20 west"},
+      {"id": "TRN-GW-I20-E", "name": "I-20 east gateway", "near": [33.7447, -84.3715], "connects_to": "I-20 east"},
+      {"id": "TRN-GW-PEACHTREE-N", "name": "Peachtree St north gateway (Midtown)", "near": [33.774, -84.3853], "connects_to": "Peachtree St into Midtown"},
+      {"id": "TRN-GW-MLK-W", "name": "MLK Jr Dr west gateway (Vine City)", "near": [33.754, -84.4085], "connects_to": "Martin Luther King Jr Dr west"}
+    ],
+    "lane_capacity_vph": {"motorway": 1900, "motorway_link": 1400, "trunk": 1700, "primary": 800, "secondary": 700, "tertiary": 600, "unclassified": 500, "residential": 400},
+    "unsignalized_share": 0.15,
+    "signal_backup_hours": {"primary": 2, "default": 0}
+  },
+  "dependencies": {
+    "power_overrides": {
+      "FAC-GRADY": ["GR-1:1", "CAP-2:4"],
+      "WTR-PS-FAIRLIE": ["FP-1:3"],
+      "TEL-IX-56MARIETTA": ["FP-1:1"],
+      "TRN-STN-FIVEPOINTS": ["FP-1:1"],
+      "FAC-GWCC": ["CEN-2:1"],
+      "FAC-STADIUM": ["CEN-1:1"]
+    },
+    "telecom_consumers": ["hospital", "government", "emergency_services", "transit_station"],
+    "telecom_redundant_consumers": ["hospital"],
+    "water_consumer_types": ["hospital", "emergency_services", "government", "university", "venue", "commercial", "transit_hub", "data_center", "internet_exchange"],
+    "water_overrides": {"FAC-GRADY": "WTR-ZN-GRADY"}
+  },
+  "scenarios": [
+    {"id": "A-DS-FIVEPOINTS", "name": "DS Five Points substation failure", "scenario_type": "power_failure",
+     "description": "DS-2 Five Points (simulated) trips. Its three radial feeders lose supply; normally-open ties to Centennial, Capitol and Peachtree Center can only pick up part of the load, and the outage cascades into water pumping, telecom, signals and MARTA.",
+     "fail_nodes": ["PWR-DS-FIVEPOINTS"], "focus_node_id": "PWR-DS-FIVEPOINTS"},
+    {"id": "B-MARIETTA-DUCTBANK", "name": "Excavation strike on Marietta St duct bank", "scenario_type": "corridor_strike",
+     "description": "A contractor strikes the shared Marietta St duct bank between Broad St and Spring St, cutting every cable it hosts at once: a Five Points power feeder and the west fibre ring (common-cause failure).",
+     "fail_edges": ["UGD-DB-01"], "focus_node_id": "corridor:UGD-DB-01"},
+    {"id": "C-WATER-MAIN-DECATUR", "name": "Transmission main break on Decatur St", "scenario_type": "water_rupture",
+     "description": "A transmission water main ruptures on Decatur St east of Five Points; crews must close isolation valves, cutting supply to part of the low-pressure grid.",
+     "fail_edges_near": [{"connection_type": "water_main", "near": [33.7538, -84.3884]}], "focus_node_id": "WTR-JN-07"},
+    {"id": "D-TELECOM-56MARIETTA", "name": "56 Marietta St carrier hotel outage", "scenario_type": "telecom_outage",
+     "description": "The core interconnection facility at 56 Marietta St (real building; modelled connections simulated) goes dark. Dual-homed rings fail over to the east core; single-homed sites may not.",
+     "fail_nodes": ["TEL-IX-56MARIETTA"], "focus_node_id": "TEL-IX-56MARIETTA"},
+    {"id": "E-ROADS-FIVEPOINTS", "name": "Five Points road closures", "scenario_type": "road_disruption",
+     "description": "Emergency closure of Peachtree St, Marietta St and Edgewood Ave where they meet at Five Points; traffic detours around the core.",
+     "fail_road_legs": {"at": "Peachtree St & Edgewood Ave", "near": [33.7546, -84.3902], "streets": ["Peachtree St", "Marietta St", "Edgewood Ave"]}, "focus_node_id": "road:Peachtree St & Edgewood Ave"},
+    {"id": "F-TS-SOUTH", "name": "Loss of TS-South bulk supply", "scenario_type": "power_failure",
+     "description": "The TS-South 115 kV bulk supply point (simulated) is lost. Its substations shift onto alternate transmission lines that were never sized to carry their full load.",
+     "fail_nodes": ["PWR-TS-SOUTH"], "focus_node_id": "PWR-TS-SOUTH"}
+  ],
+  "demo": {
+    "id": "deeptrace-atlanta-demo",
+    "title": "DEEPTRACE: one substation, six systems",
+    "focus_node_id": "PWR-DS-FIVEPOINTS",
+    "scenario_a_preset": "A-DS-FIVEPOINTS",
+    "scenario_b_preset": "B-MARIETTA-DUCTBANK",
+    "steps": [
+      {"id": "overview", "action": "overview", "title": "Downtown Atlanta as one living system",
+       "narration": "This is downtown Atlanta — Five Points, Peachtree Center, the Capitol and Grady — rebuilt as a digital twin. Streets and landmarks are approximate; every utility asset beneath them is an illustrative simulation."},
+      {"id": "deep_mode", "action": "deep_mode", "title": "Go beneath the street",
+       "narration": "Deep mode peels the city open. Pipes, cables, duct banks and rail tunnels are drawn at modelled depth, so you can see what normally only shows up when someone digs."},
+      {"id": "reveal_layers", "action": "reveal_layers", "title": "Six interdependent networks",
+       "narration": "Power, water, internet, transportation, shared underground corridors and critical facilities. The thin links between them are dependencies: pumps need power, signals need power, switches need comms."},
+      {"id": "select_node", "action": "select_node", "node_id": "PWR-DS-FIVEPOINTS", "title": "DS-2 Five Points (simulated)",
+       "narration": "This simulated distribution substation feeds the heart of downtown through three radial feeders. Its inspector shows rating, load and provenance, labelled SIMULATED."},
+      {"id": "trace", "action": "trace", "node_id": "PWR-DS-FIVEPOINTS", "title": "Trace what depends on it",
+       "narration": "Tracing downstream lights up every vault, the booster pump, the 56 Marietta carrier hotel, City Hall, MARTA Five Points and dozens of traffic signals that hang off this one substation."},
+      {"id": "simulate", "action": "simulate", "preset_id": "A-DS-FIVEPOINTS", "title": "Fail the substation",
+       "narration": "Scenario A trips DS Five Points. The engine finds every customer that lost its path to a source, then closes normally-open ties to pick up what it can."},
+      {"id": "cascade", "action": "cascade", "title": "Watch the cascade",
+       "narration": "Round by round the failure spreads: feeders de-energise, signals go dark and traffic slows, the high-pressure water zone falls back on its tank, cell sites run down their batteries. Ties restore only part of the load — they were never sized for all of it."},
+      {"id": "ask_ai", "action": "ask_ai", "question": "Why did this happen, and what could we do differently?", "title": "Ask the analyst",
+       "narration": "The AI analyst answers from the simulation results, not guesswork: it cites the elements that failed, why restoration was partial, and which upgrades would have helped most."},
+      {"id": "simulate_b", "action": "simulate_b", "preset_id": "B-MARIETTA-DUCTBANK", "title": "One shovel, two networks",
+       "narration": "Scenario B is a single excavation strike on the Marietta St duct bank. Because a power feeder and the west fibre ring share that trench, one cut hits both systems at once."},
+      {"id": "compare", "action": "compare", "title": "Compare A and B",
+       "narration": "Side by side: the substation loss drops more load, while the duct-bank strike is smaller but crosses system boundaries. Shared corridors are the hidden single points of failure."}
+    ]
+  }
+}

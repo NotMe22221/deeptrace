@@ -1,0 +1,18 @@
+{
+  "id": "atlanta-downtown",
+  "name": "Downtown Atlanta",
+  "city": "Atlanta, Georgia, USA",
+  "bbox": [33.7425, -84.4085, 33.774, -84.3715],
+  "center": [33.758, -84.3905],
+  "default_camera": {
+    "longitude": -84.4088,
+    "latitude": 33.7362,
+    "height": 1850.0,
+    "heading": 35.0,
+    "pitch": -28.0,
+    "roll": 0.0
+  },
+  "ground_elevation_m": 290.0,
+  "timezone": "America/New_York",
+  "description": "Downtown Atlanta focus district: Five Points, Fairlie-Poplar, Centennial Olympic Park / GWCC, Peachtree Center, Civic Center, the State Capitol and Georgia State, Grady and Sweet Auburn, bounded by North Ave, Boulevard, I-20 and Northside Dr. Street alignments and landmark positions are approximate (ESTIMATED); all utility assets and topology are illustrative (SIMULATED). ground_elevation_m is an approximate ellipsoid height (~320 m above sea level minus ~30 m geoid separation)."
+}

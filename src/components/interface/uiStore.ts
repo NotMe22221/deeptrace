@@ -4,6 +4,7 @@
  * Kept out of the main store because nothing in the 3D world depends on it.
  */
 import { create } from "zustand";
+import type { ScenarioType } from "@/types/infrastructure";
 
 export type RightPanel = "inspector" | "analyst" | "comparison" | "provenance";
 
@@ -22,12 +23,15 @@ interface UIState {
   /** Increments each time Deep Mode is switched on (drives the descent animation). */
   deepFx: number;
   simTab: "build" | "results";
+  /** Scenario-type tab in the simulation library (null = follow the draft). */
+  scenarioTab: ScenarioType | null;
   focusRight: (p: RightPanel) => void;
   setShortcutsOpen: (v: boolean) => void;
   pushToast: (t: Omit<Toast, "id">, ttlMs?: number) => void;
   dismissToast: (id: string) => void;
   bumpDeepFx: () => void;
   setSimTab: (t: "build" | "results") => void;
+  setScenarioTab: (t: ScenarioType) => void;
 }
 
 let toastSeq = 0;
@@ -38,6 +42,7 @@ export const useUI = create<UIState>((set, get) => ({
   toasts: [],
   deepFx: 0,
   simTab: "build",
+  scenarioTab: null,
   focusRight: (p) => set((s) => ({ rightOrder: [...s.rightOrder.filter((x) => x !== p), p] })),
   setShortcutsOpen: (v) => set({ shortcutsOpen: v }),
   pushToast: (t, ttlMs = 3200) => {
@@ -48,4 +53,5 @@ export const useUI = create<UIState>((set, get) => ({
   dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
   bumpDeepFx: () => set((s) => ({ deepFx: s.deepFx + 1 })),
   setSimTab: (t) => set({ simTab: t }),
+  setScenarioTab: (t) => set({ scenarioTab: t }),
 }));

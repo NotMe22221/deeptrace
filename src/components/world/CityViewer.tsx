@@ -1,27 +1,73 @@
 "use client";
-// TEMPORARY smoke-test viewer (replaced by the world engine).
-import { useEffect, useRef } from "react";
+/**
+ * Full-screen 3D world. Loads CesiumJS at runtime, creates the WorldController (guarded against
+ * React strict-mode double mounting), registers the WorldApi, and renders the world-owned
+ * overlays (hover tooltip, legends / notices, cascade flash).
+ */
+import { useEffect, useRef, useState } from "react";
 import { loadCesium } from "@/engine/geographic/cesiumLoader";
+import { registerWorld } from "@/engine/worldBridge";
+import type { WorldController } from "@/engine/WorldController";
+import { useStore } from "@/lib/store";
+import WorldOverlay from "./WorldOverlay";
+import WorldTooltip from "./WorldTooltip";
 
-export default function CityViewer() {
+export function CityViewer() {
   const ref = useRef<HTMLDivElement>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+
   useEffect(() => {
-    let destroyed = false;
-    let viewer: { destroy: () => void } | null = null;
-    loadCesium().then((Cesium) => {
-      if (destroyed || !ref.current) return;
-      const v = new Cesium.Viewer(ref.current, {
-        baseLayer: false,
-        baseLayerPicker: false, geocoder: false, homeButton: false, sceneModePicker: false,
-        navigationHelpButton: false, animation: false, timeline: false, fullscreenButton: false, infoBox: false, selectionIndicator: false,
-      });
-      v.scene.globe.baseColor = Cesium.Color.fromCssColorString("#0a101d");
-      v.camera.setView({ destination: Cesium.Cartesian3.fromDegrees(-84.39, 33.735, 2500), orientation: { pitch: Cesium.Math.toRadians(-35) } });
-      v.entities.add({ polyline: { positions: Cesium.Cartesian3.fromDegreesArray([-84.40, 33.75, -84.38, 33.76]), width: 6, material: new Cesium.PolylineGlowMaterialProperty({ color: Cesium.Color.CYAN, glowPower: 0.3 }) } });
-      (window as unknown as { __viewer: unknown }).__viewer = v;
-      viewer = v;
-    });
-    return () => { destroyed = true; viewer?.destroy(); };
+    let disposed = false;
+    let ctrl: WorldController | null = null;
+    const container = ref.current;
+    const fail = (msg: string) => {
+      if (disposed) return;
+      setFailure(msg);
+      useStore.getState().setWorldStatus({ status: "error", message: msg });
+    };
+    Promise.all([loadCesium(), import("@/engine/WorldController")])
+      .then(([C, mod]) => {
+        if (disposed || !container) return;
+        // strict mode / HMR: never stack two viewers in one container
+        container.replaceChildren();
+        try {
+          ctrl = new mod.WorldController(C, container);
+          registerWorld(ctrl.api);
+        } catch (e) {
+          console.error("[deeptrace] world failed to start", e);
+          fail(
+            /webgl/i.test(String((e as Error)?.message))
+              ? "WebGL is unavailable in this browser, so the 3D world cannot start."
+              : `The 3D world failed to start: ${(e as Error)?.message ?? e}`,
+          );
+        }
+      })
+      .catch((e) => fail((e as Error)?.message ?? "CesiumJS failed to load"));
+    return () => {
+      disposed = true;
+      if (ctrl) {
+        registerWorld(null);
+        ctrl.destroy();
+        ctrl = null;
+      }
+    };
   }, []);
-  return <div ref={ref} className="absolute inset-0" />;
+
+  return (
+    <div className="absolute inset-0 overflow-hidden bg-ink-950">
+      <div ref={ref} className="dt-world absolute inset-0" />
+      <WorldTooltip />
+      <WorldOverlay />
+      {failure && (
+        <div className="pointer-events-none absolute inset-0 grid place-items-center">
+          <div className="dt-panel-strong max-w-md px-5 py-4 text-center">
+            <div className="dt-label mb-1.5">3D world unavailable</div>
+            <p className="text-[13px] leading-relaxed text-ink-200">{failure}</p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
+
+export default CityViewer;

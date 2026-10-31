@@ -1,0 +1,176 @@
+{
+  "_comment": "Real, named public places in the downtown Atlanta focus district. Positions are ESTIMATED: approximate, from general public knowledge, NOT surveyed or traced from a licensed dataset (typical error 30-150 m). Station depths are low-confidence estimates. Attributes such as occupancy or backup duration are NOT stored here; they are modelled (SIMULATED) in design.json. Coordinates: lat/lon WGS84.",
+  "schema": "deeptrace.landmarks/1",
+  "landmarks": [
+    {
+      "id": "FIVEPOINTS", "name": "Five Points", "kind": "transit_station",
+      "lat": 33.7539, "lon": -84.3917, "elevation_m": -15,
+      "properties": {"operator": "MARTA", "lines": ["Red", "Gold", "Blue", "Green"], "platform": "underground", "transfer_station": true},
+      "osm_match": {"tags": {"railway": "station"}, "name": "Five Points"},
+      "provenance": {"category": "estimated", "source": "General public knowledge", "confidence": 0.7, "notes": "Approximate position from general public knowledge; not surveyed. Underground transfer station; platform depth (-15 m) is a low-confidence estimate."}
+    },
+    {
+      "id": "PEACHTREECENTER", "name": "Peachtree Center", "kind": "transit_station",
+      "lat": 33.7594, "lon": -84.3875, "elevation_m": -30,
+      "properties": {"operator": "MARTA", "lines": ["Red", "Gold"], "platform": "deep underground"},
+      "osm_match": {"tags": {"railway": "station"}, "name": "Peachtree Center"},
+      "provenance": {"category": "estimated", "source": "General public knowledge", "confidence": 0.65, "notes": "Approximate position from general public knowledge; not surveyed. Known as a deep station; platform depth (-30 m) is a low-confidence estimate."}
+    },
+    {
+      "id": "CIVICCENTER", "name": "Civic Center", "kind": "transit_station",
+      "lat": 33.7664, "lon": -84.3872, "elevation_m": 0,
+      "properties": {"operator": "MARTA", "lines": ["Red", "Gold"], "platform": "near grade (over the Downtown Connector)"},
+      "osm_match": {"tags": {"railway": "station"}, "name": "Civic Center"},
+      "provenance": {"category": "estimated", "source": "General public knowledge", "confidence": 0.6, "notes": "Approximate position from general public knowledge; not surveyed."}
+    },
+    {
+      "id": "NORTHAVE", "name": "North Avenue", "kind": "transit_station",
+      "lat": 33.7717, "lon": -84.3869, "elevation_m": -12,
+      "properties": {"operator": "MARTA", "lines": ["Red", "Gold"], "platform": "underground"},
+      "osm_match": {"tags": {"railway": "station"}, "name": "North Avenue"},
+      "provenance": {"category": "estimated", "source": "General public knowledge", "confidence": 0.65, "notes": "Approximate position from general public knowledge; not surveyed. Platform depth (-12 m) is a low-confidence estimate."}
+    },
+    {
+      "id": "GARNETT", "name": "Garnett", "kind": "transit_station",
+      "lat": 33.7486, "lon": -84.3961, "elevation_m": 0,
+      "properties": {"operator": "MARTA", "lines": ["Red", "Gold"], "platform": "near grade"},
+      "osm_match": {"tags": {"railway": "station"}, "name": "Garnett"},
+      "provenance": {"category": "estimated", "source": "General public knowledge", "confidence": 0.6, "notes": "Approximate position from general public knowledge; not surveyed."}
+    },
+    {
+      "id": "GEORGIASTATE", "name": "Georgia State", "kind": "transit_station",
+      "lat": 33.7505, "lon": -84.3857, "elevation_m": 0,
+      "properties": {"operator": "MARTA", "lines": ["Blue", "Green"], "platform": "near grade"},
+      "osm_match": {"tags": {"railway": "station"}, "name": "Georgia State"},
+      "provenance": {"category": "estimated", "source": "General public knowledge", "confidence": 0.6, "notes": "Approximate position from general public knowledge; not surveyed."}
+    },
+    {
+      "id": "KINGMEMORIAL", "name": "King Memorial", "kind": "transit_station",
+      "lat": 33.7496, "lon": -84.3757, "elevation_m": 0,
+      "properties": {"operator": "MARTA", "lines": ["Blue", "Green"], "platform": "near grade"},
+      "osm_match": {"tags": {"railway": "station"}, "name": "King Memorial"},
+      "provenance": {"category": "estimated", "source": "General public knowledge", "confidence": 0.6, "notes": "Approximate position from general public knowledge; not surveyed."}
+    },
+    {
+      "id": "GWCC", "name": "GWCC/CNN Center", "kind": "transit_station",
+      "lat": 33.7577, "lon": -84.3971, "elevation_m": -6,
+      "properties": {"operator": "MARTA", "lines": ["Blue", "Green"], "platform": "below adjacent street viaducts", "former_names": ["Dome/GWCC/Philips Arena/CNN Center"]},
+      "osm_match": {"tags": {"railway": "station"}, "name": "GWCC"},
+      "provenance": {"category": "estimated", "source": "General public knowledge", "confidence": 0.55, "notes": "Approximate position from general public knowledge; not surveyed. Relative platform level (-6 m) is a low-confidence estimate."}
+    },
+    {
+      "id": "VINECITY", "name": "Vine City", "kind": "transit_station",
+      "lat": 33.7566, "lon": -84.4044, "elevation_m": 0,
+      "properties": {"operator": "MARTA", "lines": ["Blue", "Green"], "platform": "near grade"},
+      "osm_match": {"tags": {"railway": "station"}, "name": "Vine City"},
+      "provenance": {"category": "estimated", "source": "General public knowledge", "confidence": 0.55, "notes": "Approximate position from general public knowledge; not surveyed."}
+    },
+    {
+      "id": "GRADY", "name": "Grady Memorial Hospital", "kind": "hospital",
+      "lat": 33.7522, "lon": -84.3814,
+      "properties": {"role": "Level I trauma centre (public knowledge)"},
+      "osm_match": {"tags": {"amenity": "hospital"}, "name": "Grady"},
+      "provenance": {"category": "estimated", "source": "General public knowledge", "confidence": 0.7, "notes": "Approximate position from general public knowledge; not surveyed."}
+    },
+    {
+      "id": "CITYHALL", "name": "Atlanta City Hall", "kind": "government",
+      "lat": 33.7477, "lon": -84.3894,
+      "osm_match": {"tags": {"amenity": "townhall"}, "name": "City Hall"},
+      "provenance": {"category": "estimated", "source": "General public knowledge", "confidence": 0.6, "notes": "Approximate position from general public knowledge; not surveyed."}
+    },
+    {
+      "id": "CAPITOL", "name": "Georgia State Capitol", "kind": "government",
+      "lat": 33.749, "lon": -84.3875,
+      "osm_match": {"tags": {"building": "government"}, "name": "Capitol"},
+      "provenance": {"category": "estimated", "source": "General public knowledge", "confidence": 0.7, "notes": "Approximate position from general public knowledge; not surveyed."}
+    },
+    {
+      "id": "COURTHOUSE", "name": "Fulton County Courthouse", "kind": "government",
+      "lat": 33.7495, "lon": -84.3902,
+      "osm_match": {"tags": {"amenity": "courthouse"}, "name": "Fulton County"},
+      "provenance": {"category": "estimated", "source": "General public knowledge", "confidence": 0.5, "notes": "Approximate position from general public knowledge (Pryor St); not surveyed."}
+    },
+    {
+      "id": "APDHQ", "name": "Atlanta Police Department Headquarters", "kind": "emergency_services",
+      "lat": 33.7478, "lon": -84.393,
+      "osm_match": {"tags": {"amenity": "police"}, "name": "Atlanta Police"},
+      "provenance": {"category": "estimated", "source": "General public knowledge", "confidence": 0.45, "notes": "Approximate position from general public knowledge (Peachtree St SW); not surveyed - verify before relying on it."}
+    },
+    {
+      "id": "GSU", "name": "Georgia State University (downtown campus)", "kind": "university",
+      "lat": 33.753, "lon": -84.3853,
+      "osm_match": {"tags": {"amenity": "university"}, "name": "Georgia State"},
+      "provenance": {"category": "estimated", "source": "General public knowledge", "confidence": 0.55, "notes": "Representative point for a multi-block campus; approximate, not surveyed."}
+    },
+    {
+      "id": "STADIUM", "name": "Mercedes-Benz Stadium", "kind": "venue",
+      "lat": 33.7554, "lon": -84.4008,
+      "osm_match": {"tags": {"leisure": "stadium"}, "name": "Mercedes-Benz"},
+      "provenance": {"category": "estimated", "source": "General public knowledge", "confidence": 0.75, "notes": "Approximate centroid from general public knowledge; not surveyed."}
+    },
+    {
+      "id": "ARENA", "name": "State Farm Arena", "kind": "venue",
+      "lat": 33.7573, "lon": -84.3963,
+      "osm_match": {"tags": {"leisure": "sports_centre"}, "name": "State Farm Arena"},
+      "provenance": {"category": "estimated", "source": "General public knowledge", "confidence": 0.65, "notes": "Approximate centroid from general public knowledge; not surveyed."}
+    },
+    {
+      "id": "GWCC-VENUE", "name": "Georgia World Congress Center", "kind": "venue",
+      "lat": 33.759, "lon": -84.4005,
+      "osm_match": {"tags": {"building": "yes"}, "name": "Georgia World Congress Center"},
+      "provenance": {"category": "estimated", "source": "General public knowledge", "confidence": 0.5, "notes": "Representative point for a large multi-building campus; approximate, not surveyed."}
+    },
+    {
+      "id": "AQUARIUM", "name": "Georgia Aquarium", "kind": "venue",
+      "lat": 33.764, "lon": -84.395,
+      "osm_match": {"tags": {"tourism": "aquarium"}, "name": "Georgia Aquarium"},
+      "provenance": {"category": "estimated", "source": "General public knowledge", "confidence": 0.65, "notes": "Approximate centroid from general public knowledge; not surveyed."}
+    },
+    {
+      "id": "CENTENNIALPARK", "name": "Centennial Olympic Park", "kind": "venue",
+      "lat": 33.7603, "lon": -84.3933,
+      "osm_match": {"tags": {"leisure": "park"}, "name": "Centennial Olympic Park"},
+      "provenance": {"category": "estimated", "source": "General public knowledge", "confidence": 0.65, "notes": "Approximate centroid of the park from general public knowledge; not surveyed."}
+    },
+    {
+      "id": "PEACHTREECENTER-COMPLEX", "name": "Peachtree Center", "kind": "commercial",
+      "lat": 33.7603, "lon": -84.3862,
+      "osm_match": {"tags": {}, "name": "Peachtree Center"},
+      "provenance": {"category": "estimated", "source": "General public knowledge", "confidence": 0.5, "notes": "Representative point for a multi-tower office/hotel complex; approximate, not surveyed."}
+    },
+    {
+      "id": "56MARIETTA", "name": "56 Marietta Street", "kind": "internet_exchange",
+      "lat": 33.7557, "lon": -84.3906,
+      "properties": {"facility_type": "carrier hotel / interconnection facility"},
+      "osm_match": {"tags": {}, "name": "56 Marietta"},
+      "provenance": {"category": "estimated", "source": "General public knowledge (well-known downtown carrier hotel)", "confidence": 0.6, "notes": "Real interconnection facility; approximate position from general public knowledge, not surveyed. Any connections, capacities or backup durations DEEPTRACE attaches to it are SIMULATED."}
+    }
+  ],
+  "rail_lines": [
+    {
+      "id": "NS",
+      "name": "MARTA north-south trunk (Red/Gold)",
+      "stations": ["NORTHAVE", "CIVICCENTER", "PEACHTREECENTER", "FIVEPOINTS", "GARNETT"],
+      "capacity_riders_per_h": 14000,
+      "segment_depths_m": [10, 20, 24, 8],
+      "alignment": [
+        [-84.3869, 33.7717], [-84.3871, 33.769], [-84.3872, 33.7664], [-84.3874, 33.763], [-84.3875, 33.7594],
+        [-84.3888, 33.7572], [-84.3903, 33.7554], [-84.3917, 33.7539], [-84.3935, 33.7515], [-84.3961, 33.7486]
+      ],
+      "provenance": {"category": "estimated", "source": "Authored approximate alignment (general public knowledge)", "confidence": 0.4, "notes": "Smooth approximate alignment between estimated station positions; not surveyed. Tunnel depths are low-confidence estimates."}
+    },
+    {
+      "id": "EW",
+      "name": "MARTA east-west trunk (Blue/Green)",
+      "stations": ["VINECITY", "GWCC", "FIVEPOINTS", "GEORGIASTATE", "KINGMEMORIAL"],
+      "capacity_riders_per_h": 12000,
+      "segment_depths_m": [4, 10, 12, 0],
+      "alignment": [
+        [-84.4044, 33.7566], [-84.401, 33.7571], [-84.3971, 33.7577], [-84.395, 33.7568], [-84.3932, 33.7552],
+        [-84.3917, 33.7539], [-84.3897, 33.7527], [-84.3875, 33.7514], [-84.3857, 33.7505], [-84.383, 33.75],
+        [-84.38, 33.7498], [-84.3757, 33.7496]
+      ],
+      "provenance": {"category": "estimated", "source": "Authored approximate alignment (general public knowledge)", "confidence": 0.4, "notes": "Smooth approximate alignment between estimated station positions; not surveyed. Tunnel depths are low-confidence estimates."}
+    }
+  ]
+}
