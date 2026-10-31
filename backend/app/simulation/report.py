@@ -74,7 +74,14 @@ SEVERITY_FORMULA = (
 )
 CORE_TYPES = frozenset({"internet_exchange", "data_center", "transmission_substation", "supply_source"})
 SEVERITY_ORDER = {"critical": 0, "major": 1, "minor": 2, "info": 3}
-FACILITY_IMPACT = {"outage": 1.0, "failed": 1.0, "inaccessible": 1.0, "degraded": 0.5, "on_backup": 0.25, "delayed": 0.25}
+FACILITY_IMPACT = {
+    "outage": 1.0,
+    "failed": 1.0,
+    "inaccessible": 1.0,
+    "degraded": 0.5,
+    "on_backup": 0.25,
+    "delayed": 0.25,
+}
 REDUNDANCY_ONLY_IMPACT = 0.25  # degraded facility whose service is intact (a redundant feed was lost)
 STATE_WORD = {
     "de_energized": "de-energised",
@@ -90,7 +97,10 @@ STATE_WORD = {
     "inaccessible": "inaccessible",
     "closed": "closed",
     "rerouted": "rerouted",
+    "interrupted": "interrupted",
+    "activated": "activated",
 }
+EDGE_RANK_FOR_LABEL = {"isolated": 4, "interrupted": 4, "overloaded": 3, "rerouted": 2, "activated": 1}
 SYSTEM_TITLE = {
     "power": "Power",
     "water": "Water",
@@ -136,7 +146,11 @@ class Report:
             s = g.node_sys[n]
             if s == "power" and o.state in ("de_energized", "failed"):
                 parts["power"] += g.population(n)
-            elif s == "water" and g.node_type[n] == "service_zone" and o.state in ("outage", "degraded", "isolated", "failed"):
+            elif (
+                s == "water"
+                and g.node_type[n] == "service_zone"
+                and o.state in ("outage", "degraded", "isolated", "failed")
+            ):
                 parts["water"] += g.population(n)
             elif s == "telecom" and n in self.endpoints and o.state in ("disconnected", "outage", "failed", "degraded"):
                 parts["telecom"] += g.population(n)
@@ -236,7 +250,16 @@ class Report:
     def _per_system(self, oc: CascadeOutcome, real: dict[str, NodeOutcome]) -> list[SystemImpact]:
         ce, g = self.ce, self.ce.g
         v, base = oc.view, ce.baseline.view  # type: ignore[union-attr]
-        p, bp, w, bw, t, bt, tr, btr = v.power, base.power, v.water, base.water, v.telecom, base.telecom, v.transport, base.transport
+        p, bp, w, bw, t, bt, tr, btr = (
+            v.power,
+            base.power,
+            v.water,
+            base.water,
+            v.telecom,
+            base.telecom,
+            v.transport,
+            base.transport,
+        )
         assert p and bp and w and bw and t and bt and tr and btr
 
         def pct(rem: float, b: float) -> float:
@@ -260,9 +283,9 @@ class Report:
             notes.append(f"{s} loaded to {frac * 100:.0f}% of rating")
         for e, frac in sorted(p.line_overloaded.items()):
             notes.append(f"line {e} loaded to {frac * 100:.0f}% of rating")
-        for s, (r, frac) in sorted(oc.tripped.items()):
+        for s, (_round, frac) in sorted(oc.tripped.items()):
             notes.append(f"{s} tripped at {frac * 100:.0f}% (> {EMERGENCY_LIMIT * 100:.0f}% emergency limit)")
-        for uid, why in sorted(p.blocked_ties.items()):
+        for _uid, why in sorted(p.blocked_ties.items()):
             notes.append(why[0].upper() + why[1:])
         out.append(
             SystemImpact(
@@ -402,6 +425,8 @@ class Report:
     # ---------------------------------------------------------------- steps
     def _noun(self, ids: list[str]) -> str:
         g = self.ce.g
+        if all(g.node_sys[i] == "facility" for i in ids):
+            return "facility"
         types = Counter(g.node_type[i] for i in ids)
         ty = types.most_common(1)[0][0] if len(types) == 1 else "node"
         return ty.replace("_", " ")
@@ -410,7 +435,8 @@ class Report:
         g = self.ce.g
         n = len(ids)
         names = [g.name(i) for i in ids]
-        who = join_names(names, 2) if n <= 2 else plural(n, self._noun(ids))
+        noun = self._noun(ids)
+        who = join_names(names, 2) if n <= 2 else plural(n, noun, "facilities" if noun == "facility" else None)
         if system == "transport" and key == "degraded" and all(i in self.ce.signalized for i in ids):
             return f"{n} traffic signal{'s' if n != 1 else ''} dark" if n > 2 else f"signal at {who} dark"
         if system == "power" and key == "failed":
@@ -421,6 +447,8 @@ class Report:
             return f"{who} without power (booster bypassed)"
         if system == "power" and key == "restored":
             return f"{who} restored by tie switching"
+        if key == "rerouted" and system in ("transport", "facility"):
+            return f"{who} reached by detour"
         return f"{who} {STATE_WORD.get(key, key)}"
 
     def _fragments(self, rec: RoundRecord, oc: CascadeOutcome) -> list[tuple[str, int, str, list[str]]]:
@@ -435,6 +463,22 @@ class Report:
         out = []
         for (system, key), ids in groups.items():
             out.append((system, STATE_RANK.get(key, 1), self._phrase(system, key, sorted(ids), oc), sorted(ids)))
+        # systems whose only visible change is on edges (detours, overloaded lines, ...)
+        node_systems = {system for system, _key in groups}
+        egroups: dict[tuple[str, str, str], list[str]] = {}
+        for e, (_old, new) in rec.edges.items():
+            if new in ("operational", "normally_open", "failed"):
+                continue
+            ed = g.edges[e]
+            if ed.relation != "physical" or g.edge_sys[e] in node_systems:
+                continue
+            egroups.setdefault((g.edge_sys[e], ed.connection_type, new), []).append(e)
+        for (system, ctype, state), ids in egroups.items():
+            noun = ctype.replace("_", " ")
+            who = join_names([g.name(i) for i in sorted(ids)], 1) if len(ids) == 1 else plural(len(ids), noun)
+            out.append(
+                (system, EDGE_RANK_FOR_LABEL.get(state, 1), f"{who} {STATE_WORD.get(state, state)}", sorted(ids))
+            )
         out.sort(key=lambda x: (-x[1], SYSTEMS.index(x[0]) if x[0] in SYSTEMS else 9, x[2]))
         return out
 
@@ -447,7 +491,7 @@ class Report:
         return [f"{SYSTEM_TITLE.get(s, s)}: {', '.join(phs[:2])}" for s, phs in by.items()]
 
     def steps(self, oc: CascadeOutcome) -> tuple[list[CascadeStep], dict[int, int]]:
-        ce, g = self.ce, self.ce.g
+        g = self.ce.g
         steps: list[CascadeStep] = []
         mapping: dict[int, int] = {}
         if not oc.direct_nodes and not oc.direct_edges:
@@ -463,7 +507,11 @@ class Report:
             if rec.round == 0:
                 direct = oc.direct_nodes + oc.direct_edges
                 label = "Initiating failure: " + join_names([g.name(x) for x in direct], 2)
-                desc = f"{oc.scenario.name or 'Scenario'}: " + join_names([g.label(x) for x in direct], 6) + " fail at t = 0."
+                desc = (
+                    f"{oc.scenario.name or 'Scenario'}: "
+                    + join_names([g.label(x) for x in direct], 6)
+                    + " fail at t = 0."
+                )
                 if oc.common_cause:
                     by_src: dict[str, list[str]] = {}
                     for e, src in oc.common_cause.items():
@@ -475,7 +523,9 @@ class Report:
                             f"{join_names(sorted(hs), 4)} fail with it."
                         )
                 steps.append(
-                    CascadeStep(step=idx, label=label, description=desc, systems=systems, node_ids=node_ids, edge_ids=edge_ids)
+                    CascadeStep(
+                        step=idx, label=label, description=desc, systems=systems, node_ids=node_ids, edge_ids=edge_ids
+                    )
                 )
                 continue
             frags = self._fragments(rec, oc)
@@ -494,12 +544,8 @@ class Report:
                 # lead with a dependency whose consequence shows up in this round (causal arrow)
                 changed = [n for n, (_o, new, info) in rec.nodes.items() if new != "operational" or info]
 
-                def effects(c: str) -> list[str]:
-                    return [
-                        n
-                        for n in changed
-                        if n != c and n in oc.view.nodes and c in oc.view.nodes[n].caused_by
-                    ]
+                def effects(c: str, changed: list[str] = changed) -> list[str]:
+                    return [n for n in changed if n != c and n in oc.view.nodes and c in oc.view.nodes[n].caused_by]
 
                 ranked = sorted(
                     rec.conditions,
@@ -511,6 +557,12 @@ class Report:
                         x[0],
                     ),
                 )
+                consumers = {c for c, _cnd in rec.conditions}
+                lost_res = Counter(
+                    RESOURCE_NAME.get(cnd.ctype, cnd.ctype)
+                    for _c, cnd in rec.conditions
+                    if cnd.status in ("lost", "backup")
+                )
                 lead_c, lead = ranked[0]
                 res = RESOURCE_NAME.get(lead.ctype, lead.ctype)
                 verb = {
@@ -520,14 +572,21 @@ class Report:
                     "degraded": f"{res} degraded",
                 }[lead.status]
                 eff = effects(lead_c)
-                label = f"Dependency: {g.name(lead_c)} {verb}"
-                if eff:
-                    sub = RoundRecord(rec.round, {n: rec.nodes[n] for n in eff}, {}, [], [])
-                    eff_txt = self._group_fragments(self._fragments(sub, oc))
-                    if eff_txt:
-                        label += f" → {eff_txt[0]}"
-                if len(rec.conditions) > 1:
-                    label += f" (+{len(rec.conditions) - 1} more)"
+                if len(consumers) > 3 and lost_res:
+                    # a wide round: summarise instead of singling out one consumer
+                    res_txt = join_names([r for r, _n in lost_res.most_common(2)], 2)
+                    label = f"Dependency: {len(consumers)} consumers lose {res_txt}"
+                    if frag_txt:
+                        label += " → " + " · ".join(frag_txt[:2])
+                else:
+                    label = f"Dependency: {g.name(lead_c)} {verb}"
+                    if eff:
+                        sub = RoundRecord(rec.round, {n: rec.nodes[n] for n in eff}, {}, [], [])
+                        eff_txt = self._group_fragments(self._fragments(sub, oc))
+                        if eff_txt:
+                            label += f" → {eff_txt[0]}"
+                    if len(rec.conditions) > 1:
+                        label += f" (+{len(rec.conditions) - 1} more)"
             else:
                 label = "Further propagation — " + " · ".join(frag_txt[:3])
             sentences: list[str] = []
@@ -544,10 +603,14 @@ class Report:
                     sentences.append(f"…and {len(rec.conditions) - 6} more dependency effects.")
             for s, _r, ph, ids in frags:
                 sentences.append(f"{SYSTEM_TITLE.get(s, s)}: {ph} ({join_names([g.label(i) for i in ids], 5)}).")
-            changed_edges = Counter(new for _o, new in rec.edges.values() if new not in ("operational", "normally_open"))
+            changed_edges = Counter(
+                new for _o, new in rec.edges.values() if new not in ("operational", "normally_open")
+            )
             if changed_edges:
                 sentences.append(
-                    "Edges: " + ", ".join(f"{n} {STATE_WORD.get(st, st)}" for st, n in sorted(changed_edges.items())) + "."
+                    "Edges: "
+                    + ", ".join(f"{n} {STATE_WORD.get(st, st)}" for st, n in sorted(changed_edges.items()))
+                    + "."
                 )
             steps.append(
                 CascadeStep(
@@ -601,9 +664,15 @@ class Report:
             s = f"Power: {fmt_num(im.power_load_unserved_mw)} of {fmt_num(bp.served_load)} MW unserved"  # type: ignore[union-attr]
             if p.actions:
                 s += f", {fmt_num(p.restored_load)} MW restored through {plural(len(p.actions), 'tie switch', 'tie switches')}"
-            over = [x for x in sorted(p.overloaded) + sorted(p.line_overloaded) if x not in oc.tripped]
+            over = [
+                (x, f)
+                for x, f in sorted(p.overloaded.items()) + sorted(p.line_overloaded.items())
+                if x not in oc.tripped
+            ]
             if over:
-                s += f", {join_names([g.name(x) for x in over], 2)} overloaded"
+                s += ", " + join_names([f"{g.name(x)} loaded to {f * 100:.0f}%" for x, f in over], 2)
+                if all(f <= EMERGENCY_LIMIT for _x, f in over):
+                    s += f" (overloaded but below the {EMERGENCY_LIMIT * 100:.0f}% trip limit)"
             if oc.tripped:
                 s += f", {join_names([g.name(x) for x in sorted(oc.tripped)], 2)} tripped on overload"
             parts.append(s + ".")
@@ -618,7 +687,7 @@ class Report:
             if zones_low:
                 bits.append(f"{len(zones_low)} at low pressure")
             if zones_tank:
-                bits.append(f"{len(zones_tank)} carried by storage tanks")
+                bits.append(f"{plural(len(zones_tank), 'zone')} carried by storage tanks")
             parts.append(s + (f" ({', '.join(bits)})" if bits else "") + ".")
         if im.telecom_nodes_disconnected or t.rerouted:
             parts.append(
@@ -627,18 +696,30 @@ class Report:
                 + "."
             )
         inacc = [d for d, a in tr.access.items() if a.status == "inaccessible"]
-        if abs(im.transport_travel_time_increase_pct) > 0.05 or im.transit_stations_closed or inacc:
+        delayed = [d for d, a in tr.access.items() if a.status == "delayed"]
+        detour = [d for d, a in tr.access.items() if a.status == "detour"]
+        if abs(im.transport_travel_time_increase_pct) > 0.05 or im.transit_stations_closed or inacc or detour:
             parts.append(
                 f"Transport: O-D travel time {im.transport_travel_time_increase_pct:+.1f}%"
-                + (f", {plural(im.transit_stations_closed, 'transit station')} closed" if im.transit_stations_closed else "")
+                + (
+                    f", {plural(im.transit_stations_closed, 'transit station')} closed"
+                    if im.transit_stations_closed
+                    else ""
+                )
                 + (f", {plural(len(inacc), 'destination')} inaccessible" if inacc else "")
+                + (f", {len(delayed)} delayed by more than 25%" if delayed else "")
+                + (f", {plural(len(detour), 'destination')} reached by detour" if detour else "")
                 + "."
             )
         if im.critical_facilities_affected:
             parts.append(
                 "Critical facilities affected: "
                 + join_names(
-                    [f"{g.name(f)} ({STATE_WORD.get(v.state(f), v.state(f))})" for f in im.critical_facilities_affected], 5
+                    [
+                        f"{g.name(f)} ({STATE_WORD.get(v.state(f), v.state(f))})"
+                        for f in im.critical_facilities_affected
+                    ],
+                    5,
                 )
                 + "."
             )
@@ -664,9 +745,11 @@ class Report:
         ]
         if sc.enable_restoration:
             out.append(
-                "Power: normally-open ties close automatically when tie capacity and the supplying substations' spare "
-                "capacity (rating − served load) cover the de-energised island; otherwise vaults are restored in "
-                "priority order (critical consumers, then larger loads) along the feeder and the rest is sectionalised off."
+                "Power: normally-open ties close automatically when the headroom — tie capacity, supplying substations' "
+                "spare capacity (rating − served load) and the supplying cables'/lines' 120% emergency rating — covers the "
+                "de-energised island; otherwise vaults are restored in priority order (critical consumers incl. pumps, "
+                "telecom cores and hospitals, then larger loads) along the feeder and the rest is sectionalised off. "
+                "Substation buses are not back-fed."
             )
             out.append(
                 "Power: a tie whose SCADA control link is down can only be closed manually after its manual_switch_hours "
@@ -699,7 +782,9 @@ class Report:
             "telecom endpoints) + occupants of facilities in outage/inaccessible (max avoids double counting).",
         ]
         if oc.truncated:
-            out.append(f"Cascade truncated at max_cascade_rounds = {sc.max_cascade_rounds}; later effects are not shown.")
+            out.append(
+                f"Cascade truncated at max_cascade_rounds = {sc.max_cascade_rounds}; later effects are not shown."
+            )
         return out
 
     # ---------------------------------------------------------------- result
@@ -725,7 +810,7 @@ class Report:
                         + (f" after {fmt_num(a.unit.manual_hours)} h" if a.mode == "manual" else "")
                         + f") back-feeds {g.label(a.entry)} from {g.label(src)}: {fmt_num(a.restored_load)} of "
                         f"{fmt_num(a.island_load)} MW restored"
-                        + (f" ({a.limit} limit)" if a.left_nodes else "")
+                        + (f" (limited by {a.limit})" if a.left_nodes else "")
                         + "."
                     ),
                     capacity_ok=not a.left_nodes,
@@ -806,7 +891,9 @@ class Report:
         flows: dict[str, EdgeFlow] = {}
         for res in (v.power, v.water, v.telecom, v.transport):
             for e, f in res.flows.items():  # type: ignore[union-attr]
-                flows[e] = EdgeFlow(direction=f.direction, utilization=max(0.0, f.utilization), flow=f.flow, unit=f.unit)
+                flows[e] = EdgeFlow(
+                    direction=f.direction, utilization=max(0.0, f.utilization), flow=f.flow, unit=f.unit
+                )
         flows = {e: flows[e] for e in sorted(flows)}
         reachable = sorted(n for n in g.node_ids if node_states[n] not in LOSS_STATES)
 

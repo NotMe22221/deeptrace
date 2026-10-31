@@ -152,7 +152,9 @@ class NetworkGraphs:
                 if cid in hosted:
                     hosted[cid].add(eid)
                 else:
-                    self.warnings.append(f"edge {eid} has corridor_id {cid!r} that is not a duct_bank/utility_tunnel edge")
+                    self.warnings.append(
+                        f"edge {eid} has corridor_id {cid!r} that is not a duct_bank/utility_tunnel edge"
+                    )
         self.corridor_hosted: dict[str, list[str]] = {c: sorted(h) for c, h in hosted.items()}
         self.hosted_by: dict[str, list[str]] = {}
         for c, hs in self.corridor_hosted.items():

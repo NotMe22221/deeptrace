@@ -18,8 +18,11 @@ Model (deliberately simple and explainable — *no AC power flow*):
    rating − served load). If headroom ≥ island load the whole island is restored;
    otherwise vaults are restored greedily in priority order (critical consumers first,
    then larger loads) as long as the energised path from the tie still fits — the
-   rest is sectionalised off and stays de-energised. The supplying substation's
-   transmission line headroom is checked too.
+   rest is sectionalised off and stays de-energised. Headroom also includes every
+   substation (rating − served load) and every cable/line (120 % short-term emergency
+   rating − load; such cables are then flagged ``overloaded``) on the supplier's path.
+   "Critical consumers" = critical facilities plus pumps, telecom cores/offices,
+   hospitals and emergency services.
 3. **SCADA** – a tie whose switch has a ``control_link`` provider that is down can only
    be closed by a crew: allowed when ``horizon_hours ≥ manual_switch_hours`` (default
    3 h). Ties without a control link are assumed remotely controlled.
@@ -43,6 +46,10 @@ DEFAULT_MANUAL_SWITCH_HOURS = 3.0
 ALTERNATE_PENALTY = 100.0  # supply-path cost of an alternate/standby line (used only when needed)
 ALTERNATE_ROLES = ("alternate", "standby", "backup", "secondary", "emergency")
 TRIPPABLE_EDGE_TYPES = frozenset({"transmission_line"})
+# consumers that make their supplying vault a restoration priority even without a critical flag
+CRITICAL_CONSUMER_TYPES = frozenset(
+    {"pump_station", "internet_exchange", "data_center", "central_office", "hospital", "emergency_services"}
+)
 SUBSTATION_TYPES = frozenset({"transmission_substation", "distribution_substation"})
 
 
@@ -210,9 +217,7 @@ class PowerModel:
                 continue
             caps = [c for c in (self.edge_cap[e] for e in uedges) if c is not None and c > 0]
             caps += [c for c in (as_float(g.nodes[s].capacity) for s in switches) if c is not None and c > 0]
-            hours = [
-                as_float(g.nodes[s].properties.get("manual_switch_hours"), None) for s in switches
-            ]
+            hours = [as_float(g.nodes[s].properties.get("manual_switch_hours"), None) for s in switches]
             hours = [h for h in hours if h is not None]
             automated = not any(
                 g.nodes[s].properties.get("automated") is False
@@ -240,12 +245,14 @@ class PowerModel:
         self.unit_of_switch = {s: i for i, u in enumerate(self.units) for s in u.switches}
 
         # restoration priority: vaults that are critical or feed a critical consumer
+        # (a facility flagged critical, or critical infrastructure such as a pump or core)
         self.critical: set[str] = set()
         for n in self.nodes:
             if g.nodes[n].critical:
                 self.critical.add(n)
             for link in g.consumers.get(n, []):
-                if link.ctype == "power_supply" and g.nodes[link.consumer].critical:
+                c = link.consumer
+                if link.ctype == "power_supply" and (g.nodes[c].critical or g.node_type[c] in CRITICAL_CONSUMER_TYPES):
                     self.critical.add(n)
 
         # baseline supply tree (used to explain *why* a node lost supply)
@@ -418,7 +425,7 @@ class PowerModel:
         energized0 = set(parent)
         deen0 = {n for n in self.nodes if n not in parent and n not in fn and n not in self.open_nodes}
         load0 = self._subtree_loads(order, parent)
-        cur_load: dict[str, float] = {s: load0.get(s, 0.0) for s in self.substations}
+        cur_load: dict[str, float] = dict(load0)  # subtree load of every energised node
 
         restored_order: list[str] = []
         actions: list[TieAction] = []
@@ -430,18 +437,25 @@ class PowerModel:
         scada = dict(inp.scada_down)
 
         def headroom(unit: TieUnit, sup: str) -> tuple[float, str]:
+            """Spare capacity along the whole supply path: tie, cables/lines, substations."""
             limits: list[tuple[float, str]] = [(unit.capacity, f"tie capacity {fmt_num(unit.capacity)} MW")]
-            ds = ds_of.get(sup)
-            ts = root_of.get(sup)
-            if ds is not None and self.cap.get(ds):
-                limits.append((self.cap[ds] - cur_load[ds], f"spare capacity of {g.label(ds)}"))  # type: ignore[operator]
-            if ds is not None and ds in parent and parent[ds][1] is not None:
-                line = parent[ds][1]
-                lcap = self.edge_cap.get(line)  # type: ignore[arg-type]
-                if lcap:
-                    limits.append((lcap - cur_load.get(ds, 0.0), f"spare capacity of transmission line {line}"))
-            if ts is not None and ts != ds and self.cap.get(ts):
-                limits.append((self.cap[ts] - cur_load[ts], f"spare capacity of {g.label(ts)}"))  # type: ignore[operator]
+            cur: str | None = sup
+            while cur is not None:
+                if cur in self.cap and self.cap[cur]:
+                    limits.append((self.cap[cur] - cur_load.get(cur, 0.0), f"spare capacity of {g.label(cur)}"))  # type: ignore[operator]
+                p, e = parent.get(cur, (None, None))
+                if e is not None:
+                    ecap = self.edge_cap.get(e)
+                    if ecap:
+                        # cables/lines may run up to their short-term emergency rating while restoring
+                        kind = g.edges[e].connection_type.replace("_", " ")
+                        limits.append(
+                            (
+                                ecap * EMERGENCY_LIMIT - cur_load.get(cur, 0.0),
+                                f"the {EMERGENCY_LIMIT * 100:.0f}% emergency rating of {kind} {e}",
+                            )
+                        )
+                cur = p
             return min(limits, key=lambda x: x[0])
 
         if deen0 and inp.restoration:
@@ -517,11 +531,7 @@ class PowerModel:
                             ds_of[n] = ds_of[sup]
                         restored_order.extend(chosen)
                         ds = ds_of[sup]
-                        ts = root_of[sup]
-                        if ds is not None:
-                            cur_load[ds] = cur_load.get(ds, 0.0) + rload
-                        if ts is not None and ts != ds:
-                            cur_load[ts] = cur_load.get(ts, 0.0) + rload
+                        cur_load = self._subtree_loads(order + restored_order, parent)
                         left = tuple(sorted(comp_set - set(chosen)))
                         limit = "" if not left else why
                         actions.append(
@@ -543,7 +553,7 @@ class PowerModel:
                         if left:
                             txt = (
                                 f"tie {g.label(unit.id)} restored only {fmt_num(rload)} of {fmt_num(comp_load)} MW "
-                                f"({why} limit); the rest of the section was sectionalised off because it did not fit "
+                                f"(limited by {why}); the rest of the section was sectionalised off because it did not fit "
                                 f"within the remaining headroom"
                             )
                             for n in left:
@@ -551,10 +561,7 @@ class PowerModel:
                         progress = True
                         break
                     if not progress:
-                        if not cands:
-                            txt = "no normally-open tie can back-feed this section"
-                        else:
-                            txt = "; ".join(notes)
+                        txt = "; ".join(notes) if cands else "no normally-open tie can back-feed this section"
                         for n in comp:
                             island_note[n] = (txt, tuple(note_ids))
                     else:
@@ -688,9 +695,7 @@ class PowerModel:
         for n in sorted(deen):
             loss, cb = self._loss_text(n, inp, fn)
             if n in trip_note:
-                loss += (
-                    f"; the alternative supply through {g.label(trip_note[n])} was then lost when it tripped on overload"
-                )
+                loss += f"; the alternative supply through {g.label(trip_note[n])} was then lost when it tripped on overload"
                 cb = cb + (trip_note[n],)
             if not inp.restoration:
                 extra, extra_ids = "automatic restoration is disabled for this scenario", ()
@@ -721,9 +726,8 @@ class PowerModel:
                     )
                 )
             )
-            share = (
-                f"{fmt_num(act.restored_load)} of {fmt_num(act.island_load)} MW restored"
-                + (f" ({act.limit} limit)" if act.left_nodes else "")
+            share = f"{fmt_num(act.restored_load)} of {fmt_num(act.island_load)} MW restored" + (
+                f" (limited by {act.limit})" if act.left_nodes else ""
             )
             for n in act.restored_nodes:
                 loss, cb = self._loss_text(n, inp, fn)
@@ -751,11 +755,7 @@ class PowerModel:
                 f"({fmt_num(load.get(s, 0.0))} MW"
                 + (f"; baseline {bl * 100:.0f}%" if bl is not None else "")
                 + ")"
-                + (
-                    " after load transfer from failed/tripped supply"
-                    if bl is not None and frac > bl + 1e-6
-                    else ""
-                )
+                + (" after load transfer from failed/tripped supply" if bl is not None and frac > bl + 1e-6 else "")
             )
             if s in trip:
                 txt += f" — above the {EMERGENCY_LIMIT * 100:.0f}% emergency limit, protective trip follows."

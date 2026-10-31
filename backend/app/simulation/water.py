@@ -14,8 +14,9 @@ extended-period simulation. The model is:
    sources inject into L (capacity L/s), a *powered* ``pump_station`` lifts L→H up to its
    capacity, an unpowered pump is bypassed (pass-through in L only). Low pressure zones
    draw from L (hence also from H); high pressure zones (``properties.pressure_zone``
-   containing "high"/"upper"/"boost"/"pump") only from H. Pipes carry ≤ capacity L/s in
-   each direction (``directed`` pipes one way). ``normally_closed`` valves are closed.
+   containing "high"/"upper"/"boost"/"pump") only from H. Pipes carry ≤ capacity L/s
+   (shared by both layers — see ``_solve``; ``directed`` pipes one way).
+   ``normally_closed`` valves are closed.
 3. **Storage tanks** – used only for demand the supply network cannot meet: after the
    supply max-flow, tanks inject into H on the *residual* network (augmenting paths), so
    supply-served demand is never displaced. Tank duration = storage_m3·1000 / outflow /
@@ -26,7 +27,8 @@ extended-period simulation. The model is:
    amount if the baseline already cannot meet it): ≥ 0.98 operational, ≥ 0.5 degraded
    (low pressure), < 0.5 outage.
 
-Capacities are converted to integer mL/s for numerically exact NetworkX max-flow.
+Capacities are converted to integer mL/s for numerically exact NetworkX max-flow
+(Edmonds–Karp: shortest augmenting paths, which also yields natural-looking routes).
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import networkx as nx
+from networkx.algorithms.flow import edmonds_karp
 
 from app.models.schemas import AlternativePath
 from app.simulation.common import EPS, EdgeOutcome, FlowRec, NodeOutcome, fmt_num, join_names
@@ -68,6 +71,7 @@ class _Solve:
     zone_tanks: dict[str, tuple[str, ...]]  # zone -> tanks that (would) carry it
     net: dict[str, float]  # pipe -> net L/s source->target
     reach: set[str]  # water nodes with a hydraulic path from a supply / sustained tank
+    layer_use: dict[str, tuple[float, float]] = field(default_factory=dict)  # pipe -> (|L|, |H|) in mL/s
 
 
 @dataclass
@@ -238,9 +242,7 @@ class WaterModel:
         return out
 
     # ------------------------------------------------------------------ helpers
-    def _isolate(
-        self, fn: frozenset[str], fe: frozenset[str]
-    ) -> tuple[set[str], set[str], set[str], dict[str, str]]:
+    def _isolate(self, fn: frozenset[str], fe: frozenset[str]) -> tuple[set[str], set[str], set[str], dict[str, str]]:
         g = self.g
         iso_n: set[str] = set()
         iso_e: set[str] = set()
@@ -318,6 +320,39 @@ class WaterModel:
         opened: frozenset[str],
         horizon: float,
     ) -> _Solve:
+        """Capacity-feasible solve: a pipe's capacity is shared by both pressure layers.
+
+        The two-layer max-flow lets each layer use a pipe's full capacity; whenever the
+        layers' combined use exceeds it, the capacity is split between them in proportion
+        to their use and the problem is re-solved (a few rounds converge in practice).
+        """
+        split: dict[str, tuple[int, int]] = {}
+        sol = self._solve_once(removed_n, removed_e, unpowered, opened, horizon, split)
+        for _ in range(6):
+            over = False
+            for e, (a_l, a_h) in sol.layer_use.items():
+                cap = self.pipe_cap.get(e)
+                if not cap or e in split:
+                    continue
+                c = int(round(cap * SCALE))
+                if a_l + a_h > c + 1:
+                    c_l = int(c * a_l / (a_l + a_h))
+                    split[e] = (c_l, c - c_l)
+                    over = True
+            if not over:
+                break
+            sol = self._solve_once(removed_n, removed_e, unpowered, opened, horizon, split)
+        return sol
+
+    def _solve_once(
+        self,
+        removed_n: set[str],
+        removed_e: set[str],
+        unpowered: frozenset[str],
+        opened: frozenset[str],
+        horizon: float,
+        split: dict[str, tuple[int, int]],
+    ) -> _Solve:
         g = self.g
         alive = [n for n in self.nodes if n not in removed_n and (n not in self.nc_valves or n in opened)]
         alive_set = set(alive)
@@ -349,10 +384,11 @@ class WaterModel:
                 continue
             c = scaled(self.pipe_cap.get(e))
             pipe_ends[e] = (u, v)
-            for layer in ("L", "H"):
-                add(f"{u}@{layer}", f"{v}@{layer}", c)
+            for i, layer in enumerate(("L", "H")):
+                cl = split[e][i] if e in split else c
+                add(f"{u}@{layer}", f"{v}@{layer}", cl)
                 if not ed.directed:
-                    add(f"{v}@{layer}", f"{u}@{layer}", c)
+                    add(f"{v}@{layer}", f"{u}@{layer}", cl)
         total_dem = sum(self.demand.values())
         for s in self.supplies:
             if s in alive_set:
@@ -367,7 +403,7 @@ class WaterModel:
 
         flow: dict[str, dict[str, int]] = {}
         if "S" in D and "T" in D:
-            _, flow = nx.maximum_flow(D, "S", "T")
+            _, flow = nx.maximum_flow(D, "S", "T", flow_func=edmonds_karp)
         s1 = {z: flow.get(sk, {}).get("T", 0) / SCALE for z, sk in sink_of.items()}
 
         # reachability (pressurised nodes)
@@ -383,9 +419,7 @@ class WaterModel:
         flow2: dict[str, dict[str, int]] = {}
         s2 = {z: 0.0 for z in sink_of}
         deficit = sum(self.demand[z] - s1[z] for z in sink_of)
-        candidates = [
-            tk for tk in self.tanks if tk in alive_set and (self.storage_m3.get(tk) or 0) > 0
-        ]
+        candidates = [tk for tk in self.tanks if tk in alive_set and (self.storage_m3.get(tk) or 0) > 0]
         first_attr: dict[str, set[str]] | None = None
         if deficit > EPS and candidates and "T" in D:
             R = nx.DiGraph()
@@ -415,7 +449,7 @@ class WaterModel:
                 if "S2" not in R2 or "T" not in R2:
                     flow2 = {}
                     break
-                _, flow2 = nx.maximum_flow(R2, "S2", "T")
+                _, flow2 = nx.maximum_flow(R2, "S2", "T", flow_func=edmonds_karp)
                 outs = {tk: flow2["S2"].get(f"{tk}@H", 0) / SCALE for tk in active}
                 attr = self._attribute(flow2, active, sink_of)
                 if first_attr is None:
@@ -431,9 +465,7 @@ class WaterModel:
                         newly_depleted = True
                 if not newly_depleted:
                     tank_out = {tk: o for tk, o in outs.items() if o > EPS}
-                    tank_hours = {
-                        tk: (self.storage_m3[tk] or 0.0) * 1000.0 / o / 3600.0 for tk, o in tank_out.items()
-                    }
+                    tank_hours = {tk: (self.storage_m3[tk] or 0.0) * 1000.0 / o / 3600.0 for tk, o in tank_out.items()}
                     s2 = {z: flow2.get(sk, {}).get("T", 0) / SCALE for z, sk in sink_of.items()}
                     for tk in tank_out:
                         reach_keys |= {f"{tk}@H"} | set(nx.descendants(R2, f"{tk}@H"))
@@ -448,15 +480,20 @@ class WaterModel:
 
         # ---- net pipe flows
         net: dict[str, float] = {}
+        layer_use: dict[str, tuple[float, float]] = {}
         for e, (u, v) in pipe_ends.items():
             tot = 0
+            use: list[float] = []
             for layer in ("L", "H"):
                 a, b = f"{u}@{layer}", f"{v}@{layer}"
-                tot += flow.get(a, {}).get(b, 0) - flow.get(b, {}).get(a, 0)
-                tot += flow2.get(a, {}).get(b, 0) - flow2.get(b, {}).get(a, 0)
+                lay = flow.get(a, {}).get(b, 0) - flow.get(b, {}).get(a, 0)
+                lay += flow2.get(a, {}).get(b, 0) - flow2.get(b, {}).get(a, 0)
+                tot += lay
+                use.append(abs(lay))
             net[e] = tot / SCALE
+            layer_use[e] = (use[0], use[1])
         reach = {k.rsplit("@", 1)[0] for k in reach_keys if "@" in k}
-        return _Solve(s1, s2, tank_out, tank_hours, depleted, zone_tanks, net, reach)
+        return _Solve(s1, s2, tank_out, tank_hours, depleted, zone_tanks, net, reach, layer_use)
 
     @staticmethod
     def _attribute(flow2: dict[str, dict[str, int]], tanks: list[str], sink_of: dict[str, str]) -> dict[str, set[str]]:
@@ -507,7 +544,9 @@ class WaterModel:
 
         def issue_text(x: str) -> str | None:
             if x in fe:
-                return f"main {g.label(x)} ruptured" + (f" (common-cause damage in {g.cc_phrase(cc[x])})" if x in cc else "")
+                return f"main {g.label(x)} ruptured" + (
+                    f" (common-cause damage in {g.cc_phrase(cc[x])})" if x in cc else ""
+                )
             if x in iso_e:
                 return f"main {g.label(x)} isolated around rupture {g.label(origin[x])}"
             if x in fn:
@@ -561,7 +600,22 @@ class WaterModel:
                 continue
             issues: list[str] = []
             issue_ids: list[str] = []
+            ruptures_seen: set[str] = set()
             for x in self.base_up.get(z, []):
+                rup = origin.get(x) if (x in iso_e or x in iso_n or x in closing) else (x if x in fe else None)
+                if rup is not None:
+                    # one phrase per rupture: "supply cut off by the isolation of rupture R (valves ... closed)"
+                    if rup in ruptures_seen:
+                        continue
+                    ruptures_seen.add(rup)
+                    valves = sorted(closing_names.get(rup, []))
+                    issues.append(
+                        f"its supply path is inside the isolation segment of rupture {g.label(rup)}"
+                        + (f" (valves {join_names(valves, 4)} closed)" if valves else "")
+                        + (f" — common-cause damage in {g.cc_phrase(cc[rup])}" if rup in cc else "")
+                    )
+                    issue_ids.append(rup)
+                    continue
                 txt = issue_text(x)
                 if txt:
                     issues.append(txt)
@@ -574,9 +628,7 @@ class WaterModel:
             if lv >= OPERATIONAL_LEVEL:
                 node_out[z] = NodeOutcome("on_backup", f"{head} — {reason}{tanks_txt}.", caused, lv)
             elif lv >= OUTAGE_LEVEL:
-                node_out[z] = NodeOutcome(
-                    "degraded", f"{head}, low pressure — {reason}{tanks_txt}.", caused, lv
-                )
+                node_out[z] = NodeOutcome("degraded", f"{head}, low pressure — {reason}{tanks_txt}.", caused, lv)
             else:
                 node_out[z] = NodeOutcome("outage", f"{head} — {reason}{tanks_txt}.", caused, lv)
 
@@ -607,7 +659,9 @@ class WaterModel:
                 continue
             if ty == "pump_station" and n in inp.backup_pumps:
                 node_level[n] = 1.0
-                node_out[n] = NodeOutcome("on_backup", "Booster pump running on backup power.", (), 1.0, dep="power_supply")
+                node_out[n] = NodeOutcome(
+                    "on_backup", "Booster pump running on backup power.", (), 1.0, dep="power_supply"
+                )
                 continue
             if ty == "storage_tank" and n in sol.tank_out:
                 node_level[n] = 1.0
@@ -680,7 +734,9 @@ class WaterModel:
                 continue
             bf = base_net.get(e, 0.0)
             if cap and af > cap * (1 + 1e-6):
-                edge_out[e] = EdgeOutcome("overloaded", f"Carries {fmt_num(af)} L/s = {af / cap * 100:.0f}% of capacity")
+                edge_out[e] = EdgeOutcome(
+                    "overloaded", f"Carries {fmt_num(af)} L/s = {af / cap * 100:.0f}% of capacity"
+                )
             elif af <= EPS and abs(bf) > EPS:
                 bad = [x for x in (u, v) if x in removed_n or x in unpowered]
                 why = f"{g.label(bad[0])} out of service" if bad else "upstream supply lost"

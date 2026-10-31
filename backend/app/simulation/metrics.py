@@ -5,7 +5,8 @@
   physical graph.
 * ``redundancy_fraction`` = share of demand nodes with ≥ 2 edge-disjoint paths to a
   source (normally-open ties and boundary valves count, because they can be switched):
-  power vaults → transmission sources; water zones → supplies/tanks; telecom endpoints
+  power vaults → transmission sources; water zones (leaf zones at their attachment
+  junction) → supplies/tanks; telecom endpoints
   → cores; transport destinations → gateways; underground: vaults lying on a cycle;
   facilities: share with ≥ 2 power providers.
 * ``criticality_ranking`` – single failure of every non-facility node (restoration on,
@@ -44,7 +45,13 @@ class MetricsCalculator:
         if system == "power":
             return ce.power.sources, [[n] for n in sorted(ce.power.demand)]
         if system == "water":
-            return ce.water.supplies + ce.water.tanks, [[z] for z in ce.water.zones]
+            # a zone hanging off a single service main is assessed at its attachment junction
+            # (the zone node aggregates a district; its service connection is not network redundancy)
+            groups = []
+            for z in ce.water.zones:
+                nbrs = {g.other_end(e, z) for e in ce.water.inc.get(z, [])}
+                groups.append(sorted(nbrs) if len(ce.water.inc.get(z, [])) == 1 else [z])
+            return ce.water.supplies + ce.water.tanks, groups
         if system == "telecom":
             return ce.telecom.cores, [[n] for n in ce.telecom.endpoints]
         if system == "transport":
@@ -91,9 +98,12 @@ class MetricsCalculator:
             redundancy = red / len(vaults) if vaults else 0.0
         elif sources and demand:
             H = nx.DiGraph()
+            no_transit = ce.telecom.endpoint_set if system == "telecom" else frozenset()
             for (u, v), k in mult.items():
-                H.add_edge(u, v, capacity=k)
-                H.add_edge(v, u, capacity=k)
+                if u not in no_transit:
+                    H.add_edge(u, v, capacity=k)
+                if v not in no_transit:
+                    H.add_edge(v, u, capacity=k)
             for s in sources:
                 if s in H:
                     H.add_edge("__SRC__", s, capacity=10)
@@ -162,7 +172,7 @@ class MetricsCalculator:
         return entries
 
     def compute(self) -> NetworkMetrics:
-        ce, g = self.ce, self.ce.g
+        g = self.ce.g
         systems = [self._system_metrics(s) for s in SYSTEMS]
         crit = self.criticality()
         cross = sum(1 for lk in g.dep_links.values() if g.node_sys[lk.provider] != g.node_sys[lk.consumer])

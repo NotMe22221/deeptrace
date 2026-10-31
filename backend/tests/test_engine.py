@@ -50,10 +50,11 @@ def test_unknown_ids_raise_helpful_errors(mini_engine: SimulationEngine) -> None
 
 def test_compare(mini_engine: SimulationEngine) -> None:
     a = ScenarioInput(name="Substation", failed_nodes=["PWR-DS-A"], enable_restoration=False)
-    b = ScenarioInput(name="Fibre cut", failed_edges=["TEL-FL-2"])
+    b = ScenarioInput(name="Fibre cut", failed_edges=["TEL-FL-3"])
     cmp = mini_engine.compare(a, b)
     keys = [m.key for m in cmp.metrics]
     assert keys[0] == "severity_index" and "redundancy_score" in keys and "alternative_paths" in keys
+    assert next(m for m in cmp.metrics if m.key == "alternative_paths").higher_is_worse is False
     sev = cmp.metrics[0]
     assert sev.a > sev.b and sev.worse == "a" and sev.delta == round(sev.b - sev.a, 4)
     red = next(m for m in cmp.metrics if m.key == "redundancy_score")

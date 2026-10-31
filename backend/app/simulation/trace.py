@@ -60,18 +60,20 @@ class Tracer:
         for e in ce.water.pipes:
             ed = g.edges[e]
             w = g.edge_length(e)
-            if not self.water_graph.has_edge(ed.source_node, ed.target_node) or self.water_graph[ed.source_node][
-                ed.target_node
-            ]["w"] > w:
+            if (
+                not self.water_graph.has_edge(ed.source_node, ed.target_node)
+                or self.water_graph[ed.source_node][ed.target_node]["w"] > w
+            ):
                 self.water_graph.add_edge(ed.source_node, ed.target_node, eid=e, w=w)
         # telecom: baseline routes
         self.tel_graph = nx.Graph()
         for e in ce.telecom.edges:
             ed = g.edges[e]
             w = ce.telecom.weight[e]
-            if not self.tel_graph.has_edge(ed.source_node, ed.target_node) or self.tel_graph[ed.source_node][
-                ed.target_node
-            ]["w"] > w:
+            if (
+                not self.tel_graph.has_edge(ed.source_node, ed.target_node)
+                or self.tel_graph[ed.source_node][ed.target_node]["w"] > w
+            ):
                 self.tel_graph.add_edge(ed.source_node, ed.target_node, eid=e, w=w)
         # transport: gateway shortest-path tree on the road graph (undirected view)
         tr = ce.transport
@@ -79,9 +81,10 @@ class Tracer:
         for e in tr.road_edges:
             ed = g.edges[e]
             w = tr.tt[e]
-            if not self.road_graph.has_edge(ed.source_node, ed.target_node) or self.road_graph[ed.source_node][
-                ed.target_node
-            ]["w"] > w:
+            if (
+                not self.road_graph.has_edge(ed.source_node, ed.target_node)
+                or self.road_graph[ed.source_node][ed.target_node]["w"] > w
+            ):
                 self.road_graph.add_edge(ed.source_node, ed.target_node, eid=e, w=w)
         self.road_paths: dict[str, list[str]] = {}
         gws = [x for x in tr.gateways if x in self.road_graph]
@@ -95,8 +98,10 @@ class Tracer:
             if u == v:
                 continue
             w = d["weight"] + (0.0 if not d["dependency"] else 1.0)
-            if not self.combined.has_edge(u, v) or self.combined[u][v]["w"] > w or (
-                self.combined[u][v]["w"] == w and k < self.combined[u][v]["eid"]
+            if (
+                not self.combined.has_edge(u, v)
+                or self.combined[u][v]["w"] > w
+                or (self.combined[u][v]["w"] == w and k < self.combined[u][v]["eid"])
             ):
                 self.combined.add_edge(u, v, eid=k, w=w, dep=d["dependency"])
 
@@ -148,8 +153,12 @@ class Tracer:
                 if unit_i is not None:
                     unit = ce.power.units[unit_i]
                     for tnode in unit.terminals:
-                        via = next((e for e in unit.edges if tnode in (g.edges[e].source_node, g.edges[e].target_node)), None)
-                        self._add(up, TraceHop(node_id=tnode, via_edge_id=via, depth=1, relation="physical", system="power"))  # type: ignore[arg-type]
+                        via = next(
+                            (e for e in unit.edges if tnode in (g.edges[e].source_node, g.edges[e].target_node)), None
+                        )
+                        self._add(
+                            up, TraceHop(node_id=tnode, via_edge_id=via, depth=1, relation="physical", system="power")
+                        )  # type: ignore[arg-type]
                         if via:
                             phys.add(via)
             q = deque([(n, 0)])
@@ -158,7 +167,9 @@ class Tracer:
                 if d >= max_depth:
                     continue
                 for c, e in sorted(self.power_children.get(u, [])):
-                    self._add(down, TraceHop(node_id=c, via_edge_id=e, depth=d + 1, relation="physical", system="power"))  # type: ignore[arg-type]
+                    self._add(
+                        down, TraceHop(node_id=c, via_edge_id=e, depth=d + 1, relation="physical", system="power")
+                    )  # type: ignore[arg-type]
                     phys.add(e)
                     q.append((c, d + 1))
             source_paths, pe = self._paths_to(self.power_graph, n, ce.power.sources)
@@ -176,7 +187,10 @@ class Tracer:
                         if v in seen:
                             continue
                         seen.add(v)
-                        self._add(store, TraceHop(node_id=v, via_edge_id=e, depth=d + 1, relation="physical", system=g.node_sys[v]))  # type: ignore[arg-type]
+                        self._add(
+                            store,
+                            TraceHop(node_id=v, via_edge_id=e, depth=d + 1, relation="physical", system=g.node_sys[v]),
+                        )  # type: ignore[arg-type]
                         q.append((v, d + 1))
             source_paths, pe = self._paths_to(self.water_graph, n, ce.water.supplies + ce.water.tanks)
             phys |= pe
@@ -186,7 +200,9 @@ class Tracer:
                     if i > max_depth:
                         break
                     e = self.water_graph[a][b]["eid"]
-                    self._add(up, TraceHop(node_id=b, via_edge_id=e, depth=i, relation="physical", system=g.node_sys[b]))  # type: ignore[arg-type]
+                    self._add(
+                        up, TraceHop(node_id=b, via_edge_id=e, depth=i, relation="physical", system=g.node_sys[b])
+                    )  # type: ignore[arg-type]
         elif system == "telecom":
             base = ce.telecom.baseline
             route, redges = base.routes.get(n), base.route_edges.get(n)
@@ -204,10 +220,19 @@ class Tracer:
                     continue
                 self._add(
                     down,
-                    TraceHop(node_id=m, via_edge_id=base.route_edges[m][i - 1] if i >= 1 else None, depth=i, relation="physical", system="telecom"),  # type: ignore[arg-type]
+                    TraceHop(
+                        node_id=m,
+                        via_edge_id=base.route_edges[m][i - 1] if i >= 1 else None,
+                        depth=i,
+                        relation="physical",
+                        system="telecom",
+                    ),  # type: ignore[arg-type]
                 )
                 phys |= set(base.route_edges[m][:i])
-            source_paths, pe = self._paths_to(self.tel_graph, n, ce.telecom.cores)
+            no_transit = self.tel_graph.subgraph(
+                [x for x in self.tel_graph if x not in ce.telecom.endpoint_set or x == n]
+            )
+            source_paths, pe = self._paths_to(no_transit, n, ce.telecom.cores)
             phys |= pe
         elif system == "transport":
             p = self.road_paths.get(n)
@@ -225,13 +250,21 @@ class Tracer:
                 if 0 < i <= max_depth:
                     self._add(
                         down,
-                        TraceHop(node_id=m, via_edge_id=self.road_graph[r[i - 1]][r[i]]["eid"], depth=i, relation="physical", system="transport"),  # type: ignore[arg-type]
+                        TraceHop(
+                            node_id=m,
+                            via_edge_id=self.road_graph[r[i - 1]][r[i]]["eid"],
+                            depth=i,
+                            relation="physical",
+                            system="transport",
+                        ),  # type: ignore[arg-type]
                     )
                     phys.add(self.road_graph[r[i - 1]][r[i]]["eid"])
             for e in g.incident[n]:
                 if e in ce.transport.rail_edges:
                     m = g.other_end(e, n)
-                    self._add(down, TraceHop(node_id=m, via_edge_id=e, depth=1, relation="physical", system="transport"))  # type: ignore[arg-type]
+                    self._add(
+                        down, TraceHop(node_id=m, via_edge_id=e, depth=1, relation="physical", system="transport")
+                    )  # type: ignore[arg-type]
                     phys.add(e)
             source_paths, pe = self._paths_to(self.road_graph, n, ce.transport.gateways)
             phys |= pe
@@ -251,20 +284,40 @@ class Tracer:
                     if v in seen:
                         continue
                     seen.add(v)
-                    self._add(down, TraceHop(node_id=v, via_edge_id=e, depth=d + 1, relation="physical", system=g.node_sys[v]))  # type: ignore[arg-type]
+                    self._add(
+                        down, TraceHop(node_id=v, via_edge_id=e, depth=d + 1, relation="physical", system=g.node_sys[v])
+                    )  # type: ignore[arg-type]
                     q.append((v, d + 1))
 
         # ---- dependencies (into this node, then one level into its providers)
         deps: dict[str, TraceHop] = {}
         dep_edges: set[str] = set()
         for link in sorted(g.providers.get(n, [])):
-            self._add(deps, TraceHop(node_id=link.provider, via_edge_id=link.edge_id, depth=1, relation="dependency", system=g.node_sys[link.provider]))  # type: ignore[arg-type]
+            self._add(
+                deps,
+                TraceHop(
+                    node_id=link.provider,
+                    via_edge_id=link.edge_id,
+                    depth=1,
+                    relation="dependency",
+                    system=g.node_sys[link.provider],
+                ),
+            )  # type: ignore[arg-type]
             dep_edges.add(link.edge_id)
         for p in list(deps):
             for link in sorted(g.providers.get(p, [])):
                 if link.provider == n:
                     continue
-                self._add(deps, TraceHop(node_id=link.provider, via_edge_id=link.edge_id, depth=2, relation="dependency", system=g.node_sys[link.provider]))  # type: ignore[arg-type]
+                self._add(
+                    deps,
+                    TraceHop(
+                        node_id=link.provider,
+                        via_edge_id=link.edge_id,
+                        depth=2,
+                        relation="dependency",
+                        system=g.node_sys[link.provider],
+                    ),
+                )  # type: ignore[arg-type]
                 dep_edges.add(link.edge_id)
         # ---- dependents (of this node and of everything downstream)
         dependents: dict[str, TraceHop] = {}
@@ -273,23 +326,66 @@ class Tracer:
             for link in sorted(g.consumers.get(src, [])):
                 if link.consumer == n:
                     continue
-                self._add(dependents, TraceHop(node_id=link.consumer, via_edge_id=link.edge_id, depth=d + 1, relation="dependency", system=g.node_sys[link.consumer]))  # type: ignore[arg-type]
+                self._add(
+                    dependents,
+                    TraceHop(
+                        node_id=link.consumer,
+                        via_edge_id=link.edge_id,
+                        depth=d + 1,
+                        relation="dependency",
+                        system=g.node_sys[link.consumer],
+                    ),
+                )  # type: ignore[arg-type]
                 dep_edges.add(link.edge_id)
         if system == "underground":
             for h in g.vault_hosted.get(n, []):
                 phys.add(h)
                 for end in (g.edges[h].source_node, g.edges[h].target_node):
-                    self._add(dependents, TraceHop(node_id=end, via_edge_id=h, depth=1, relation="physical", system=g.node_sys[end]))  # type: ignore[arg-type]
+                    self._add(
+                        dependents,
+                        TraceHop(node_id=end, via_edge_id=h, depth=1, relation="physical", system=g.node_sys[end]),
+                    )  # type: ignore[arg-type]
 
         def ordered(hops: dict[str, TraceHop]) -> list[TraceHop]:
             return sorted((h for h in hops.values() if h.node_id != n), key=lambda h: (h.depth, h.node_id))
 
         upl, downl, depl, dentl = ordered(up), ordered(down), ordered(deps), ordered(dependents)
         crit = [h.node_id for h in dentl if g.nodes[h.node_id].critical]
+        if system == "facility":
+            by_res: dict[str, list[str]] = {}
+            for link in sorted(g.providers.get(n, [])):
+                by_res.setdefault(link.ctype, []).append(g.label(link.provider))
+            words = {
+                "power_supply": "power from",
+                "water_supply": "water from",
+                "telecom_link": "telecom via",
+                "control_link": "control via",
+                "road_access": "road access via",
+            }
+            parts = [f"{words.get(ct, ct)} {join_names(ps, 3)}" for ct, ps in by_res.items()]
+            node = g.nodes[n]
+            summary = (
+                f"{g.label(n)} ({node.type.replace('_', ' ')}{', critical' if node.critical else ''}) depends on "
+                + ("; ".join(parts) if parts else "no modelled providers")
+                + f" ({plural(len(by_res.get('power_supply', [])), 'power feed')}"
+                + f", backup power {g.power_backup_hours(n):g} h, water storage {g.water_backup_hours(n):g} h)."
+            )
+            return TraceResult(
+                node_id=n,
+                upstream=upl,
+                downstream=downl,
+                dependencies=depl,
+                dependents=dentl,
+                physical_edge_ids=sorted(phys),
+                dependency_edge_ids=sorted(dep_edges),
+                source_paths=source_paths,
+                summary=summary,
+            )
         bits = [f"{g.label(n)} ({system} {g.node_type[n].replace('_', ' ')})"]
         if source_paths:
             bits.append(
-                f"draws service through {plural(len(upl), 'upstream element')} from {g.label(source_paths[0][-1])}"
+                f"draws service through {plural(len(upl), 'upstream element')}; nearest source "
+                f"{g.label(source_paths[0][-1])}"
             )
         elif upl:
             bits.append(f"has {plural(len(upl), 'upstream element')}")
@@ -338,9 +434,8 @@ class Tracer:
         systems: list[str] = []
         for x in p:
             s = g.node_sys[x]
-            if not systems or systems[-1] != s:
-                if s not in systems:
-                    systems.append(s)
+            if s not in systems:
+                systems.append(s)
         desc = (
             f"Shortest path from {g.label(a)} to {g.label(b)}: {plural(len(eids), 'hop')}, "
             f"{length:,.0f} m of physical conduit through {', '.join(systems)}"

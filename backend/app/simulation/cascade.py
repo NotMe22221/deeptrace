@@ -38,9 +38,7 @@ from typing import Any
 
 from app.models.schemas import ScenarioInput
 from app.simulation.common import (
-    EPS,
     LOSS_STATES,
-    STATE_RANK,
     EdgeOutcome,
     NodeOutcome,
     fmt_num,
@@ -226,8 +224,10 @@ class CascadeEngine:
             changed: list[tuple[str, Condition]] = []
             for key, cnd in sorted(derived.items()):
                 old_c = merged.get(key)
-                if old_c is None or COND_RANK[cnd.status] > COND_RANK[old_c.status] or (
-                    COND_RANK[cnd.status] == COND_RANK[old_c.status] and set(cnd.lost) > set(old_c.lost)
+                if (
+                    old_c is None
+                    or COND_RANK[cnd.status] > COND_RANK[old_c.status]
+                    or (COND_RANK[cnd.status] == COND_RANK[old_c.status] and set(cnd.lost) > set(old_c.lost))
                 ):
                     merged[key] = cnd
                     changed.append((key[0], cnd))
@@ -309,7 +309,9 @@ class CascadeEngine:
             src = cc[e]
             if src in g.edges:
                 return EdgeOutcome("failed", f"Common-cause failure: hosted in corridor {g.label(src)}, which failed")
-            return EdgeOutcome("failed", f"Common-cause failure: routed through utility vault {g.label(src)}, which failed")
+            return EdgeOutcome(
+                "failed", f"Common-cause failure: routed through utility vault {g.label(src)}, which failed"
+            )
         hosted = g.corridor_hosted.get(e)
         if hosted:
             systems = sorted({g.edge_sys[h] for h in hosted})
@@ -448,7 +450,9 @@ class CascadeEngine:
             ed = g.edges[c]
             bad = [x for x in (ed.source_node, ed.target_node) if x in fn]
             if bad:
-                edges[c] = EdgeOutcome("interrupted", f"Corridor segment unusable: utility vault {g.label(bad[0])} failed")
+                edges[c] = EdgeOutcome(
+                    "interrupted", f"Corridor segment unusable: utility vault {g.label(bad[0])} failed"
+                )
         view = RoundView(nodes, edges, power, water, telecom, transport)
         for eid in g.dependency_edge_ids:
             if eid in fe:
@@ -618,7 +622,10 @@ class CascadeEngine:
                 st, lvl = "degraded", 1.0
             cands.append((st, lvl, cnd.text, cnd.lost))
         acc = tr.access.get(f)
-        if acc is not None and acc.status != "ok":
+        if acc is not None and acc.status == "detour":
+            if not cands:  # informational only: service intact, traffic rerouted
+                return NodeOutcome("operational", f"{g.label(f)}: {acc.cause}", acc.caused_by, 1.0, info=True)
+        elif acc is not None and acc.status != "ok":
             if acc.status == "inaccessible":
                 cands.append(("inaccessible", 0.0, acc.cause, acc.caused_by))
             else:
@@ -642,9 +649,6 @@ class CascadeEngine:
         )
 
     # ---------------------------------------------------------------- helpers
-    def final_state(self, outcome: CascadeOutcome, nid: str) -> str:
-        return outcome.view.state(nid)
-
     def affected(self, outcome: CascadeOutcome) -> dict[str, NodeOutcome]:
         """Nodes whose state differs from the baseline (plus direct failures and info entries)."""
         base = self.baseline.view.nodes if self.baseline is not None else {}
@@ -659,8 +663,4 @@ class CascadeEngine:
         return out
 
 
-def is_major(state: str) -> bool:
-    return STATE_RANK.get(state, 0) >= STATE_RANK["closed"]
-
-
-__all__ = ["CascadeEngine", "CascadeOutcome", "Condition", "RoundRecord", "RoundView", "EPS", "is_major"]
+__all__ = ["CascadeEngine", "CascadeOutcome", "Condition", "RoundRecord", "RoundView"]

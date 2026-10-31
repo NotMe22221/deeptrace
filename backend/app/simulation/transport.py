@@ -9,9 +9,11 @@
 * **O-D analysis** – origins are the district ``gateway`` nodes; destinations are critical
   facilities (reached via their ``road_access`` provider intersections, else the nearest
   road node), transit stations and the other gateways. Travel-time change =
-  Σ scenario / Σ baseline − 1 over pairs reachable in both. A destination nobody can
-  reach is ``inaccessible``; one whose travel time grew by more than 25 % (or that lost
-  some of its gateways) is ``delayed``. Every facility with ``road_access`` gets an
+  Σ scenario / Σ baseline − 1 over pairs reachable in both. A gateway that can reach
+  fewer than half of its baseline destinations is itself cut off (``inaccessible``) and
+  its pairs are not held against other destinations. A destination no connected gateway
+  can reach is ``inaccessible``; one whose travel time grew by more than 25 % (or that
+  some connected gateways can no longer reach) is ``delayed``. Every facility with ``road_access`` gets an
   access status the same way (used by the dependency step).
 * **Detours** – pairs whose baseline route is blocked but still reachable become
   ``AlternativePath`` (purpose "traffic detour"); road edges whose O-D load grew are
@@ -65,7 +67,7 @@ class Destination:
 
 @dataclass
 class AccessStatus:
-    status: str  # "ok" | "delayed" | "inaccessible"
+    status: str  # "ok" | "detour" (rerouted, below the delay threshold) | "delayed" | "inaccessible"
     increase: float
     cause: str
     caused_by: tuple[str, ...]
@@ -172,9 +174,7 @@ class TransportModel:
 
         self.k = 1.0
         self.baseline = self.evaluate(TransportInputs(frozenset(), frozenset()))
-        peak = [
-            self.cap[e] / cnt for e, cnt in self._base_counts.items() if cnt > 0 and self.cap.get(e)
-        ]
+        peak = [self.cap[e] / cnt for e, cnt in self._base_counts.items() if cnt > 0 and self.cap.get(e)]
         self.k = TARGET_PEAK_UTIL * min(peak) if peak else 1.0
         self.baseline = self.evaluate(TransportInputs(frozenset(), frozenset()))
 
@@ -184,7 +184,10 @@ class TransportModel:
         n = self.g.nodes[nid]
         return min(
             self.road_nodes,
-            key=lambda r: (haversine_m(n.latitude, n.longitude, self.g.nodes[r].latitude, self.g.nodes[r].longitude), r),
+            key=lambda r: (
+                haversine_m(n.latitude, n.longitude, self.g.nodes[r].latitude, self.g.nodes[r].longitude),
+                r,
+            ),
         )
 
     # ------------------------------------------------------------------ evaluate
@@ -229,7 +232,9 @@ class TransportModel:
                 if not inp.detours and base is not None and key in base.pair_path:
                     # no rerouting: keep the baseline route if it is still passable
                     bp = base.pair_path[key]
-                    if all(D.has_edge(a, b) and D[a][b]["eid"] == e for a, b, e in zip(bp, bp[1:], base.pair_epath[key])):
+                    if all(
+                        D.has_edge(a, b) and D[a][b]["eid"] == e for a, b, e in zip(bp, bp[1:], base.pair_epath[key])
+                    ):
                         pair_time[key] = sum(D[a][b]["w"] for a, b in zip(bp, bp[1:]))
                         pair_path[key] = bp
                         pair_epath[key] = base.pair_epath[key]
@@ -265,7 +270,9 @@ class TransportModel:
                     "closed", "Station closed: no station/traction power.", (), 0.0, dep="power_supply"
                 )
         R = nx.MultiGraph()
-        rail_nodes = {g.edges[e].source_node for e in self.rail_edges} | {g.edges[e].target_node for e in self.rail_edges}
+        rail_nodes = {g.edges[e].source_node for e in self.rail_edges} | {
+            g.edges[e].target_node for e in self.rail_edges
+        }
         R.add_nodes_from(n for n in rail_nodes if n not in fn and n not in stations_closed)
         for e in self.rail_edges:
             if e in fe:
@@ -315,6 +322,15 @@ class TransportModel:
         initially_lost = recovered = 0.0
         accessible = dest_total = 0
         detour_cands: list[tuple[float, str, str]] = []
+        # a gateway that can no longer reach most of its baseline destinations is itself cut
+        # off: it is reported as inaccessible and its pairs do not make every destination "delayed"
+        cut_gateways: set[str] = set()
+        if base is not None:
+            for gw in self.gateways:
+                b_n = sum(1 for k in base.pair_time if k[0] == gw)
+                s_n = sum(1 for k in pair_time if k[0] == gw)
+                if b_n and s_n < 0.5 * b_n:
+                    cut_gateways.add(gw)
         for d in self.dests:
             pairs = [(gw, d.id) for gw in self.gateways if gw != d.id]
             bpairs = [k for k in pairs if base is None or k in base.pair_time]
@@ -360,26 +376,42 @@ class TransportModel:
                 )
             why = "; ".join(why_parts) if why_parts else "longer routes after closures"
             ids = tuple(dict.fromkeys(blocked_u[:4] + darks[:3]))
-            if not rpairs:
+            judged = [k for k in bpairs if k[0] not in cut_gateways] or bpairs
+            lost_gw = sum(1 for k in judged if k not in pair_time)
+            if not rpairs or not any(k in pair_time for k in judged):
                 access[d.id] = AccessStatus(
                     "inaccessible",
                     1.0,
-                    f"Unreachable from all {len(bpairs)} district gateways: {why}.",
+                    f"Unreachable from all {len(judged)} connected district gateways: {why}."
+                    if rpairs
+                    else f"Unreachable from all {len(bpairs)} district gateways: {why}.",
                     ids,
                 )
-            elif inc > DELAY_THRESHOLD + 1e-9 or len(rpairs) < len(bpairs):
-                lost_gw = len(bpairs) - len(rpairs)
+            elif inc > DELAY_THRESHOLD + 1e-9 or lost_gw:
                 access[d.id] = AccessStatus(
                     "delayed",
                     inc,
                     f"Travel time from gateways {'+' if inc >= 0 else ''}{inc * 100:.0f}% "
                     f"(avg {bsum / len(rpairs) / 60:.1f} → {ssum / len(rpairs) / 60:.1f} min)"
-                    + (f", unreachable from {lost_gw} of {len(bpairs)} gateways" if lost_gw else "")
+                    + (f", unreachable from {lost_gw} of {len(judged)} gateways" if lost_gw else "")
                     + f": {why}.",
                     ids,
                 )
             else:
-                access[d.id] = AccessStatus("ok", inc, "", ())
+                changed = [k for k in rpairs if pair_epath[k] != base.pair_epath[k]]
+                if changed and ssum > bsum + 0.5:
+                    # still within the delay threshold, but traffic had to take another route
+                    access[d.id] = AccessStatus(
+                        "detour",
+                        inc,
+                        f"Detour from {len(changed)} of {len(judged)} gateways: travel time "
+                        f"{'+' if inc >= 0 else ''}{inc * 100:.0f}% (avg {bsum / len(rpairs) / 60:.1f} → "
+                        f"{ssum / len(rpairs) / 60:.1f} min, below the {DELAY_THRESHOLD * 100:.0f}% delay "
+                        f"threshold): {why}.",
+                        ids,
+                    )
+                else:
+                    access[d.id] = AccessStatus("ok", inc, "", ())
 
         tt_pct = (scen_sum / base_sum - 1.0) * 100.0 if base_sum > EPS else 0.0
 
@@ -420,11 +452,21 @@ class TransportModel:
                 )
                 out = inacc if out is None or out.state in ("degraded", "on_backup") else out
             acc = access.get(n)
-            if acc and acc.status != "ok" and (out is None or out.state in ("degraded", "on_backup")):
+            if acc and acc.status == "detour" and out is None:
+                out = NodeOutcome("operational", f"{g.label(n)}: {acc.cause}", acc.caused_by, 1.0, info=True)
+            elif acc and acc.status not in ("ok", "detour") and (out is None or out.state in ("degraded", "on_backup")):
                 st = "inaccessible" if acc.status == "inaccessible" else "delayed"
-                lvl = 0.0 if st == "inaccessible" else round(max(0.0, min(1.0, 1.0 / (1.0 + max(acc.increase, 0.0)))), 4)
+                lvl = (
+                    0.0 if st == "inaccessible" else round(max(0.0, min(1.0, 1.0 / (1.0 + max(acc.increase, 0.0)))), 4)
+                )
                 new = NodeOutcome(st, f"{g.label(n)}: {acc.cause}", acc.caused_by, lvl)
-                out = new if out is None else NodeOutcome(new.state, f"{new.cause} {out.cause}", new.caused_by, new.service_level, dep=out.dep)
+                out = (
+                    new
+                    if out is None
+                    else NodeOutcome(
+                        new.state, f"{new.cause} {out.cause}", new.caused_by, new.service_level, dep=out.dep
+                    )
+                )
             if out is not None:
                 node_out[n] = out
 
@@ -464,8 +506,7 @@ class TransportModel:
                 delta = counts[e] - base_counts.get(e, 0)
                 edge_out[e] = EdgeOutcome(
                     "rerouted",
-                    "Carries detour traffic"
-                    + (f" ({int(delta)} more O-D routes than normal)" if delta > 0 else ""),
+                    "Carries detour traffic" + (f" ({int(delta)} more O-D routes than normal)" if delta > 0 else ""),
                 )
         for e in self.rail_edges:
             flows[e] = FlowRec(0, 0.0, 0.0, None)

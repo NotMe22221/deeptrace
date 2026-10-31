@@ -32,7 +32,12 @@ def test_baseline_is_nominal(mini_engine: SimulationEngine) -> None:
     assert set(b.node_states.values()) == {"operational"}
     assert set(b.edge_states.values()) <= {"operational", "normally_open"}
     assert {e for e, s in b.edge_states.items() if s == "normally_open"} == {
-        "PWR-TIE-1A", "PWR-TIE-1B", "PWR-TIE-2A", "PWR-TIE-2B", "WTR-DM-8", "WTR-DM-9",
+        "PWR-TIE-1A",
+        "PWR-TIE-1B",
+        "PWR-TIE-2A",
+        "PWR-TIE-2B",
+        "WTR-DM-8",
+        "WTR-DM-9",
     }
     im = b.impact_metrics
     assert im.severity_index == 0 and im.total_nodes_affected == 0 and im.redundancy_score == 1.0
@@ -94,7 +99,7 @@ def test_partial_tie_restoration_is_capacity_limited(mini_engine: SimulationEngi
     assert aff(r, "PWR-NV-A2").state == "restored" and aff(r, "PWR-NV-A3").state == "restored"
     left = aff(r, "PWR-NV-A1")
     assert left.state == "de_energized"
-    assert "6.0 of 9.0 MW" in left.cause and "tie capacity" in left.cause and "PWR-SW-T1" in left.caused_by
+    assert "6.0 of 9.0 MW" in left.cause and "limited by tie capacity" in left.cause and "PWR-SW-T1" in left.caused_by
     assert abs(r.impact_metrics.power_load_unserved_mw - 3.0) < 1e-6
     p = alt(r, "alt-power-tie-PWR-SW-T1")
     assert not p.capacity_ok and "6.0 of 9.0 MW" in p.description
@@ -234,7 +239,7 @@ def test_pump_with_backup_power_keeps_high_zone(mini_network) -> None:
 
 
 def test_fibre_cut_reroutes_dual_homed_nodes(mini_engine: SimulationEngine) -> None:
-    r = run(mini_engine, failed_edges=["TEL-FL-2"])
+    r = run(mini_engine, failed_edges=["TEL-FL-3"])  # AN-1's primary link to hub FH-1
     an1 = aff(r, "TEL-AN-1")
     assert an1.state == "operational" and an1.severity == "info" and "rerouted" in an1.cause
     assert r.impact_metrics.telecom_nodes_disconnected == 0
@@ -243,6 +248,14 @@ def test_fibre_cut_reroutes_dual_homed_nodes(mini_engine: SimulationEngine) -> N
     assert p.edge_ids == ["TEL-FL-6", "TEL-FL-5"] and p.added_length_m == 300
     assert r.edge_states["TEL-FL-6"] == "rerouted"
     assert r.impact_metrics.total_nodes_affected == 0 and r.impact_metrics.severity_index == 0
+
+
+def test_access_nodes_do_not_forward_transit_traffic(mini_engine: SimulationEngine) -> None:
+    # cutting the hub's only uplink isolates it: traffic may not detour through access node AN-1
+    r = run(mini_engine, failed_edges=["TEL-FL-2"])
+    assert aff(r, "TEL-FH-1").state == "disconnected"
+    assert aff(r, "TEL-AN-2").state == "disconnected"
+    assert aff(r, "TEL-AN-1").severity == "info"  # dual-homed: rerouted via FH-2
 
 
 def test_single_homed_nodes_disconnect(mini_engine: SimulationEngine) -> None:
@@ -272,8 +285,8 @@ def test_battery_backup_covers_only_short_horizons(mini_engine: SimulationEngine
 
 
 def test_rerouted_traffic_can_congest_links(mini_network) -> None:
-    edge(mini_network, "TEL-FL-6").capacity = 2.5
-    r = run(SimulationEngine(mini_network), failed_edges=["TEL-FL-2"])
+    edge(mini_network, "TEL-FL-6").capacity = 1.5
+    r = run(SimulationEngine(mini_network), failed_edges=["TEL-FL-3"])
     assert r.edge_states["TEL-FL-6"] == "overloaded"
     a = aff(r, "TEL-AN-1")
     assert a.state == "degraded" and "TEL-FL-6" in a.cause and 0 < a.service_level < 1

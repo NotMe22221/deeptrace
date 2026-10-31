@@ -3,13 +3,15 @@
 * **Cores** are operating ``internet_exchange`` and ``data_center`` nodes. A node is
   *connected* when a path over operational fibre exists to any core.
 * **Routing** – shortest path (weight = ``properties.latency_ms`` converted to fibre
-  metres at 200 km/ms, else ``length_m``) to the nearest core. In the baseline that is
+  metres at 200 km/ms, else ``length_m``) to the nearest core. Access nodes and cell
+  sites terminate traffic: routes never transit through them. In the baseline that is
   the node's *primary route*. After failures a node keeps its primary route if it is
   intact; otherwise it is *rerouted* onto the new shortest path (when
   ``enable_restoration``) or *disconnected*.
 * **Capacity** – each endpoint (``access_node``, ``cell_site`` or any node with
   ``demand``) pushes its demand (Gbps) along its route; per-link load / capacity > 1 is
   ``overloaded`` and endpoints routed over it are ``degraded`` (service = capacity/load).
+  Cores with a ``capacity`` (Gbps) are checked the same way after failover.
 * **Power** – nodes whose power provider is lost without adequate backup are taken out
   of service (``outage``) and stop forwarding traffic; nodes running on battery /
   generator for the whole horizon stay in service as ``on_backup``.
@@ -66,10 +68,9 @@ class TelecomModel:
         self.node_set = set(self.nodes)
         t = g.node_type
         self.cores = [n for n in self.nodes if t[n] in CORE_TYPES]
-        self.demand = {
-            n: max(0.0, as_float(g.nodes[n].demand, 0.0) or 0.0) for n in self.nodes if n not in self.cores
-        }
+        self.demand = {n: max(0.0, as_float(g.nodes[n].demand, 0.0) or 0.0) for n in self.nodes if n not in self.cores}
         self.endpoints = [n for n in self.nodes if t[n] in ENDPOINT_TYPES or (self.demand.get(n, 0.0) > 0)]
+        self.endpoint_set = frozenset(n for n in self.endpoints if t[n] in ENDPOINT_TYPES)
         self.edges: list[str] = [
             e
             for e in g.physical_edges_by_system.get("telecom", [])
@@ -107,7 +108,21 @@ class TelecomModel:
         alive_cores = [c for c in self.cores if c in H]
         paths: dict[str, list[str]] = {}
         if alive_cores:
-            _, paths = nx.multi_source_dijkstra(H, alive_cores, weight="w")
+            # endpoints (access nodes, cell sites) terminate traffic: no transit through them
+            core_graph = H.subgraph([n for n in H if n not in self.endpoint_set])
+            dist, paths = nx.multi_source_dijkstra(core_graph, alive_cores, weight="w")
+            paths = dict(paths)
+            for ep in self.endpoints:
+                if ep not in H or ep in paths:
+                    continue
+                best: tuple[float, str] | None = None
+                for nb in H.neighbors(ep):
+                    if nb in dist:
+                        cand = (dist[nb] + H[ep][nb]["w"], nb)
+                        if best is None or cand < best:
+                            best = cand
+                if best is not None:
+                    paths[ep] = paths[best[1]] + [ep]
 
         base = getattr(self, "baseline", None)
         routes: dict[str, list[str]] = {}
@@ -159,6 +174,16 @@ class TelecomModel:
             for a, e in zip(p, ep):
                 load[e] += d
                 signed[e] += d if g.edges[e].source_node == a else -d
+        core_load: dict[str, float] = {}
+        for n in self.endpoints:
+            d = self.demand.get(n, 0.0)
+            if d > 0 and n in routes:
+                core_load[routes[n][-1]] = core_load.get(routes[n][-1], 0.0) + d
+        core_over: dict[str, float] = {}
+        for c, ld in core_load.items():
+            cap = as_float(g.nodes[c].capacity)
+            if cap and cap > 0 and ld > cap * (1 + 1e-6):
+                core_over[c] = ld / cap
         flows: dict[str, FlowRec] = {}
         overloaded: dict[str, float] = {}
         for e in self.edges:
@@ -174,7 +199,9 @@ class TelecomModel:
 
         def broken_text(x: str) -> str:
             if x in g.edges:
-                return f"fibre {g.label(x)} cut" + (f" (common-cause damage in {g.cc_phrase(cc[x])})" if x in cc else "")
+                return f"fibre {g.label(x)} cut" + (
+                    f" (common-cause damage in {g.cc_phrase(cc[x])})" if x in cc else ""
+                )
             if x in unpowered:
                 return f"{g.label(x)} out of service (no power)"
             return f"{g.label(x)} failed"
@@ -204,7 +231,26 @@ class TelecomModel:
                 continue
             out: NodeOutcome | None = None
             if n in inp.backup:
-                out = NodeOutcome("on_backup", "Running on backup power (battery/generator).", (), 1.0, dep="power_supply")
+                out = NodeOutcome(
+                    "on_backup", "Running on backup power (battery/generator).", (), 1.0, dep="power_supply"
+                )
+            if n in core_over:
+                out = NodeOutcome(
+                    "overloaded",
+                    f"{g.label(n)} handles {fmt_num(core_load[n], 1)} Gbps = {core_over[n] * 100:.0f}% of its "
+                    f"{fmt_num(as_float(g.nodes[n].capacity) or 0, 0)} Gbps capacity after failover.",
+                    (),
+                    round(1.0 / core_over[n], 4),
+                )
+            route_core = routes.get(n, [None])[-1]
+            if route_core in core_over and n in self.endpoints and self.demand.get(n, 0.0) > 0:
+                out = NodeOutcome(
+                    "degraded",
+                    f"{g.label(n)} congested: its core {g.label(route_core)} runs at "  # type: ignore[arg-type]
+                    f"{core_over[route_core] * 100:.0f}% of capacity.",  # type: ignore[index]
+                    (route_core,),  # type: ignore[arg-type]
+                    round(1.0 / core_over[route_core], 4),  # type: ignore[index]
+                )
             over = [e for e in route_edges.get(n, []) if e in overloaded]
             if over and self.demand.get(n, 0.0) > 0:
                 worst = max(over, key=lambda e: (overloaded[e], e))
@@ -230,7 +276,9 @@ class TelecomModel:
                 if out is None:
                     out = reroute_out
                 else:
-                    out = NodeOutcome(out.state, f"{out.cause} {txt}", out.caused_by + (br,), out.service_level, dep=out.dep)
+                    out = NodeOutcome(
+                        out.state, f"{out.cause} {txt}", out.caused_by + (br,), out.service_level, dep=out.dep
+                    )
                 if n in self.endpoints:
                     alternatives.append(
                         AlternativePath(
@@ -263,7 +311,9 @@ class TelecomModel:
             bad = [x for x in (u, v) if x in removed]
             if bad:
                 why = "no power" if bad[0] in unpowered else "failed"
-                edge_out[e] = EdgeOutcome("interrupted", f"No service: endpoint {g.label(bad[0])} out of service ({why})")
+                edge_out[e] = EdgeOutcome(
+                    "interrupted", f"No service: endpoint {g.label(bad[0])} out of service ({why})"
+                )
             elif u in disconnected and v in disconnected:
                 edge_out[e] = EdgeOutcome("interrupted", "No service: fibre section cut off from every core")
             elif e in overloaded:

@@ -70,8 +70,11 @@ def main(argv: list[str] | None = None) -> int:
 
     t0 = time.perf_counter()
     engine = get_engine(args.region)
-    print(f"engine ready in {(time.perf_counter() - t0) * 1000:.0f} ms — {engine.network.id}: "
-          f"{len(engine.network.nodes)} nodes, {len(engine.network.edges)} edges", file=sys.stderr)
+    print(
+        f"engine ready in {(time.perf_counter() - t0) * 1000:.0f} ms — {engine.network.id}: "
+        f"{len(engine.network.nodes)} nodes, {len(engine.network.edges)} edges",
+        file=sys.stderr,
+    )
     for w in engine.warnings:
         print(f"  data warning: {w}", file=sys.stderr)
     presets = {p.id: p for p in load_presets(args.region)}

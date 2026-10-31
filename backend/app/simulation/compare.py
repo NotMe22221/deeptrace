@@ -17,7 +17,13 @@ METRICS: list[tuple[str, str, str, Callable[[SimulationResult], float], bool]] =
         lambda r: len(r.impact_metrics.critical_facilities_affected),
         True,
     ),
-    ("population_affected", "Population affected", "people", lambda r: r.impact_metrics.population_affected_estimate, True),
+    (
+        "population_affected",
+        "Population affected",
+        "people",
+        lambda r: r.impact_metrics.population_affected_estimate,
+        True,
+    ),
     ("power_unserved_mw", "Power load unserved", "MW", lambda r: r.impact_metrics.power_load_unserved_mw, True),
     ("water_unserved_lps", "Water demand unserved", "L/s", lambda r: r.impact_metrics.water_demand_unserved_lps, True),
     (
@@ -34,9 +40,16 @@ METRICS: list[tuple[str, str, str, Callable[[SimulationResult], float], bool]] =
         lambda r: r.impact_metrics.transport_travel_time_increase_pct,
         True,
     ),
-    ("stations_closed", "Transit stations closed", "stations", lambda r: r.impact_metrics.transit_stations_closed, True),
+    (
+        "stations_closed",
+        "Transit stations closed",
+        "stations",
+        lambda r: r.impact_metrics.transit_stations_closed,
+        True,
+    ),
     ("redundancy_score", "Redundancy score", "share", lambda r: r.impact_metrics.redundancy_score, False),
-    ("alternative_paths", "Alternative paths used", "paths", lambda r: len(r.alternative_paths), True),
+    # restoration / reroute / detour options exercised: a resilience measure, like redundancy
+    ("alternative_paths", "Alternative paths available", "paths", lambda r: len(r.alternative_paths), False),
 ]
 
 
@@ -112,9 +125,14 @@ def compare_results(a: SimulationResult, b: SimulationResult) -> ScenarioCompari
             reasons.append(f"{m.label.lower()} {_fmt(hi, m.unit)} vs {_fmt(lo, m.unit)}")
         verdict = f"Scenario {W} is more severe than Scenario {L}: " + "; ".join(reasons) + "."
     red = by_key["redundancy_score"]
+
+    def failed(r: SimulationResult) -> str:
+        n = len(r.failed_nodes) + len(r.failed_edges)
+        return f"{n} failed element{'s' if n != 1 else ''}"
+
     summary = (
-        f"A = {name_a} ({len(a.failed_nodes) + len(a.failed_edges)} failed elements, severity {sev.a:.1f}); "
-        f"B = {name_b} ({len(b.failed_nodes) + len(b.failed_edges)} failed elements, severity {sev.b:.1f}). "
+        f"A = {name_a} ({failed(a)}, severity {sev.a:.1f}); "
+        f"B = {name_b} ({failed(b)}, severity {sev.b:.1f}). "
         f"{len(both)} affected nodes are common to both, {len(only_a)} only in A and {len(only_b)} only in B. "
         f"Redundancy recovered {red.a * 100:.0f}% of the cut service in A and {red.b * 100:.0f}% in B. {verdict}"
     )
