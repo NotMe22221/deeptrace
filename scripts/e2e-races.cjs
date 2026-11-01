@@ -2,9 +2,11 @@
 // trace / analyst responses after Restore world or Reset demo, demo steps that outlive Exit,
 // mid-session engine failover to the offline snapshot, and scenario-scoped analyst replays.
 // Needs both dev servers and Playwright:  NODE_PATH=$(npm root -g) node scripts/e2e-races.cjs
+// (DEEPTRACE_APP_URL points it at another front-end dev server; the engine stays on :8000).
 // Engine latency, stalls and outages are simulated with Playwright request routing.
 const { chromium } = require('playwright');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const APP = process.env.DEEPTRACE_APP_URL || 'http://localhost:3000/';
 const results = [];
 const check = (name, ok, info) => { results.push({ name, ok, info }); console.log(ok ? 'PASS' : 'FAIL', name, JSON.stringify(info ?? '')); };
 
@@ -14,7 +16,7 @@ async function open(routeFn) {
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   if (routeFn) await routeFn(page);
-  await page.goto('http://localhost:3000/', { waitUntil: 'domcontentloaded', timeout: 120000 });
+  await page.goto(APP, { waitUntil: 'domcontentloaded', timeout: 120000 });
   await page.waitForFunction(() => window.__deeptraceStore && ['live', 'snapshot', 'error'].includes(window.__deeptraceStore.getState().dataMode), null, { timeout: 120000 });
   await page.waitForFunction(() => window.__deeptraceStore.getState().snapshot, null, { timeout: 60000 });
   return { browser, page, errors };
@@ -27,9 +29,32 @@ let stallChat = false;
 let failSim = false; // /api/simulate answers HTTP 500
 let failCompare = false; // /api/compare answers HTTP 500
 let chatReply = null; // scripted SSE body for /api/analyst/chat (an LLM-style answer)
+// Held requests: the next request whose URL contains `url` waits until the check releases it, so a
+// check sets the exact order requests land in (no timing). `hit` resolves when the request is made;
+// set `fail` (HTTP 500: true, or the failure's message) or `reply` (an SSE body) before `release()`.
+const gates = [];
+function gate(url) {
+  const g = { url, taken: false, fail: false, reply: null };
+  g.open = new Promise((r) => (g.release = r));
+  g.hit = new Promise((r) => (g.made = r));
+  gates.push(g);
+  return g;
+}
+const within = (p, ms, what) => Promise.race([p, sleep(ms).then(() => { throw new Error('timeout: ' + what); })]);
 async function routes(page) {
   await page.route('http://localhost:8000/**', async (route) => {
     const url = route.request().url();
+    const held = gates.find((g) => !g.taken && url.includes(g.url));
+    if (held) {
+      held.taken = true;
+      held.made();
+      await held.open;
+      try {
+        if (held.fail) return await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: typeof held.fail === 'string' ? held.fail : 'injected failure' }) });
+        if (held.reply) return await route.fulfill({ status: 200, contentType: 'text/event-stream', body: held.reply });
+        return await route.continue();
+      } catch { return; }
+    }
     if (blockEngine) return route.abort('connectionrefused');
     if (stallChat && url.includes('/api/analyst/chat')) return; // never respond
     // decided when the request is made, not when its delay ends
@@ -52,7 +77,8 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
 (async () => {
   const { browser, page, errors } = await open(routes);
   const S = (fn, arg) => page.evaluate(fn, arg);
-  const reset = async () => { for (const k of Object.keys(delays)) delete delays[k]; for (const k of Object.keys(bodyDelays)) delete bodyDelays[k]; blockEngine = false; stallChat = false; failSim = false; failCompare = false; chatReply = null;
+  const reset = async () => { for (const g of gates.splice(0)) { g.taken = true; g.release(); }
+    for (const k of Object.keys(delays)) delete delays[k]; for (const k of Object.keys(bodyDelays)) delete bodyDelays[k]; blockEngine = false; stallChat = false; failSim = false; failCompare = false; chatReply = null;
     await S(() => { const s = window.__deeptraceStore.getState(); s.exitDemo(); s.clearChat(); s.restoreWorld(); }); await sleep(300); };
 
   // [0]/[32] Restore during a running simulation
@@ -715,6 +741,244 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
     return { result: s.result?.scenario_id ?? null, qs: s.messages.filter((m) => m.role === 'user').map((m) => m.content.slice(0, 24)), lastErr: last?.error ?? null, busy: s.demo.busy }; });
   check('R12 demo Ask the AI asks its question with scenario A on screen', st.result === 'A-DS-FIVEPOINTS' && st.qs.length === 2 && st.qs[1].startsWith('Why did this happen') && !st.lastErr && !st.busy, st);
   await S(() => window.__deeptraceStore.getState().exitDemo());
+
+  // R13: request-timeline checks with held requests. Each request is held at the network until the
+  // check releases it, so the order requests land in is exact. A pair check plays the SAME requests in
+  // the same order twice, landing in two orders: both must settle to the same state (and to `expect`).
+  {
+    const ops = {};
+    const H = {
+      /** run into a slot ('A' | 'B' | 'active'), held as `id` */
+      async run(id, slot, preset) {
+        const g = (ops[id] = gate('/api/simulate'));
+        await S(([id, slot, preset]) => { const s = window.__deeptraceStore.getState(); window.__ops[id] = s.runSimulation(s.presets.find((x) => x.id === preset).scenario, slot === 'active' ? undefined : slot); }, [id, slot, preset]);
+        await within(g.hit, 5000, 'run ' + id);
+      },
+      async cmp(id) {
+        const g = (ops[id] = gate('/api/compare'));
+        await S((id) => { window.__ops[id] = window.__deeptraceStore.getState().runComparison(); }, id);
+        await within(g.hit, 5000, 'Compare ' + id);
+      },
+      /** the inspector's Trace button on `node`, held as `id` */
+      async utrace(id, node) {
+        await S(async (node) => { await window.__deeptraceStore.getState().selectNode(node, { fly: false }); }, node);
+        const g = (ops[id] = gate('/api/trace'));
+        await S(([id, node]) => { window.__ops[id] = window.__deeptraceStore.getState().showTrace(node); }, [id, node]);
+        await within(g.hit, 5000, 'trace ' + id);
+      },
+      /** click `node` while a trace is shown: the inspector follows it with a trace, held as `id` */
+      async follow(id, node) {
+        const g = (ops[id] = gate('/api/trace'));
+        await S(([id, node]) => { window.__ops[id] = window.__deeptraceStore.getState().selectNode(node, { fly: false }); }, [id, node]);
+        await within(g.hit, 5000, 'trace ' + id);
+      },
+      /** the held request lands (fails with HTTP 500 when `fail`: true or the failure's message) and the store settles it */
+      async land(id, fail = false) {
+        ops[id].fail = fail;
+        ops[id].release();
+        await S((id) => Promise.resolve(window.__ops[id]).catch(() => {}), id);
+        await sleep(60);
+      },
+      async ask(id) {
+        const g = (ops['q' + id] = gate('/api/analyst/chat'));
+        await S((id) => { window.__ops['q' + id] = window.__deeptraceStore.getState().sendAnalystMessage('q' + id); }, id);
+        await within(g.hit, 5000, 'question ' + id);
+      },
+      /** the answer to question `id` streams its actions, then ends */
+      async answer(id, actions) {
+        const g = ops['q' + id];
+        g.reply = sse([{ type: 'status', mode: 'llm', model: 'scripted' }, ...actions.map((action) => ({ type: 'ui_action', action })), { type: 'message', text: 'ok' }, { type: 'done', tool_calls: actions.length, mode: 'llm' }]);
+        g.release();
+        await S((id) => Promise.resolve(window.__ops['q' + id]).catch(() => {}), id);
+        await sleep(60);
+      },
+      async startDemo() { await S(async () => { window.__deeptraceStore.getState().startDemo(); await new Promise((r) => setTimeout(r, 200)); }); },
+      /** go to a demo step (not awaited); `holds` names the gate of each engine request it makes */
+      async demo(step, holds = {}) {
+        const gs = Object.entries(holds).map(([id, url]) => (ops[id] = gate(url)));
+        await S((step) => { window.__ops['demo' + step] = window.__deeptraceStore.getState().demoGoto(step); }, step);
+        for (const g of gs) await within(g.hit, 5000, 'demo step ' + step);
+        await sleep(60);
+      },
+      done: (step) => S((step) => window.__ops['demo' + step], step),
+      async exitDemo() { await S(() => window.__deeptraceStore.getState().exitDemo()); await sleep(60); },
+      /** A and B already landed */
+      async ab() { await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK'); },
+    };
+    const rTel13 = await S(async () => { const sc = window.__deeptraceStore.getState().presets.find((x) => x.id === 'D-TELECOM-56MARIETTA').scenario;
+      return (await fetch('http://localhost:8000/api/simulate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(sc) })).json(); });
+    const cmpAB = await S(async () => { const P = (id) => window.__deeptraceStore.getState().presets.find((x) => x.id === id).scenario;
+      return (await fetch('http://localhost:8000/api/compare', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scenario_a: P('A-DS-FIVEPOINTS'), scenario_b: P('B-EDGEWOOD-DUCTBANK') }) })).json(); });
+    const trace13 = await S(async () => (await fetch('http://localhost:8000/api/trace/PWR-DS-FIVEPOINTS?max_depth=8')).json());
+    const act = {
+      sim: (result, slot) => ({ kind: 'show_simulation', result, slot, node_ids: [], edge_ids: [] }),
+      hl: (label) => ({ kind: 'highlight', node_ids: ['PWR-DS-FIVEPOINTS'], edge_ids: [], label, tone: 'info' }),
+      trace: () => ({ kind: 'show_trace', trace: trace13, node_ids: [], edge_ids: [] }),
+      cmp: () => ({ kind: 'show_comparison', comparison: cmpAB, node_ids: [], edge_ids: [] }),
+    };
+    const start13 = async () => {
+      await reset();
+      // record what is on screen whenever a question is actually sent (the user's or the demo's)
+      await S(() => { const st = window.__deeptraceStore; window.__ops = {}; window.__asked = [];
+        if (!window.__origAsk) window.__origAsk = st.getState().sendAnalystMessage;
+        st.setState({ sendAnalystMessage: (text, opts) => { const s = st.getState();
+          if (text.trim() && !s.analystPending) window.__asked.push({ text, result: s.result?.scenario_id ?? null, view: s.compareView });
+          return window.__origAsk(text, opts); } }); });
+    };
+    const state13 = async () => { await sleep(150); return S(() => { const s = window.__deeptraceStore.getState(); const diff = s.compareView === 'diff' && !!s.comparison;
+      return { map: diff ? 'D:' + s.comparison.scenario_a.scenario_id + '/' + s.comparison.scenario_b.scenario_id : 'R:' + (s.result?.scenario_id ?? null),
+        hl: s.highlight ? (diff ? 'hidden:' : '') + s.highlight.label : null, A: s.slots.A?.scenario_id ?? null, B: s.slots.B?.scenario_id ?? null,
+        cmp: s.comparison ? s.comparison.scenario_a.scenario_id + '/' + s.comparison.scenario_b.scenario_id : null,
+        trace: s.traceVisible, sim: s.simStatus, cmpSt: s.compareStatus, analyst: s.analystPending, demoBusy: s.demo.busy, err: s.simError,
+        sel: s.selectedNodeId, traceOf: s.traceVisible ? s.trace?.node_id ?? null : null,
+        // the demo's own question: what was on screen when it was sent (it must be scenario A, not the diff)
+        demoAsked: window.__asked.filter((a) => !/^q\d+$/.test(a.text)).map((a) => (a.view === 'diff' ? 'diff' : a.result)) }; }); };
+    /** every landing order settles to the same state (and to `expect`) */
+    const pair13 = async (name, plays, expect) => {
+      const out = [];
+      try { for (const play of plays) { await start13(); await play(); out.push(await state13()); } } catch (e) { return check(name, false, { error: e.message, out }); }
+      check(name, out.every((f) => JSON.stringify(f) === JSON.stringify(out[0])) && (!expect || out.every(expect)), out);
+    };
+    /** every order of the steps in `last` after `first` */
+    const orders13 = (first, last) => {
+      const perms = (xs) => (xs.length <= 1 ? [xs] : xs.flatMap((x, i) => perms([...xs.slice(0, i), ...xs.slice(i + 1)]).map((p) => [x, ...p])));
+      return perms(last).map((p) => async () => { await first(); for (const step of p) await step(); });
+    };
+    const single13 = async (name, play, expect) => {
+      try { await start13(); await play(); } catch (e) { return check(name, false, { error: e.message }); }
+      const f = await state13();
+      check(name, expect(f), f);
+    };
+    const AB = 'D:A-DS-FIVEPOINTS/B-EDGEWOOD-DUCTBANK';
+    const onlyA = (f) => f.demoAsked.every((x) => x === 'A-DS-FIVEPOINTS');
+
+    await pair13('R13 a Compare held back by a later answer\'s trace owns the map: an older run does not take it', [
+      async () => { await H.ab(); await H.run('r5', 'active', 'F-TS-SOUTH'); await H.cmp('c7'); await H.ask(8); await H.answer(8, [act.trace()]); await H.land('c7'); await H.land('r5'); },
+      async () => { await H.ab(); await H.run('r5', 'active', 'F-TS-SOUTH'); await H.cmp('c7'); await H.ask(8); await H.land('c7'); await H.answer(8, [act.trace()]); await H.land('r5'); },
+    ], (f) => f.map === 'R:B-EDGEWOOD-DUCTBANK' && f.trace && f.cmp === 'A-DS-FIVEPOINTS/B-EDGEWOOD-DUCTBANK' && f.sim === 'idle');
+
+    await pair13('R13 a Compare held back by a later answer\'s trace clears an earlier answer\'s highlight', [
+      async () => { await H.ab(); await H.ask(1); await H.answer(1, [act.hl('L1')]); await H.cmp('c4'); await H.ask(5); await H.answer(5, [act.trace()]); await H.land('c4'); },
+      async () => { await H.ab(); await H.ask(1); await H.answer(1, [act.hl('L1')]); await H.cmp('c4'); await H.ask(5); await H.land('c4'); await H.answer(5, [act.trace()]); },
+    ], (f) => f.hl === null && f.trace);
+
+    await pair13('R13 an older slot run landing after a later Compare does not release the answer\'s write to that slot', [
+      async () => { await H.ab(); await H.run('r3', 'A', 'C-WATER-MAIN-DECATUR'); await H.ask(4); await H.cmp('c5'); await H.land('c5'); await H.land('r3'); await H.answer(4, [act.sim(rTel13, 'A')]); },
+      async () => { await H.ab(); await H.run('r3', 'A', 'C-WATER-MAIN-DECATUR'); await H.ask(4); await H.cmp('c5'); await H.land('c5'); await H.answer(4, [act.sim(rTel13, 'A')]); await H.land('r3'); },
+    ]);
+
+    await single13('R13 an analyst comparison that takes the map clears an earlier answer\'s highlight',
+      async () => { await H.ab(); await H.ask(1); await H.answer(1, [act.hl('L1')]); await H.ask(3); await H.answer(3, [act.cmp()]); },
+      (f) => f.map === AB && f.hl === null);
+
+    await pair13('R13 a Compare is not kept off the map by a newer slot run that never took it (a later run failed)', [
+      async () => { await H.ab(); await H.cmp('c3'); await H.run('r4', 'A', 'E-ROADS-FIVEPOINTS'); await H.run('r5', 'active', 'F-TS-SOUTH'); await H.land('r5', true); await H.land('r4'); await H.land('c3'); },
+      async () => { await H.ab(); await H.cmp('c3'); await H.run('r4', 'A', 'E-ROADS-FIVEPOINTS'); await H.run('r5', 'active', 'F-TS-SOUTH'); await H.land('r5', true); await H.land('c3'); await H.land('r4'); },
+    ], (f) => f.map === AB && f.A === 'E-ROADS-FIVEPOINTS' && f.cmpSt === 'idle');
+
+    await pair13('R13 the answer\'s comparison is not held back by a slot run after asking that never took the map', [
+      async () => { await H.ab(); await H.ask(3); await H.run('r4', 'A', 'E-ROADS-FIVEPOINTS'); await H.run('r5', 'active', 'F-TS-SOUTH'); await H.land('r5', true); await H.land('r4'); await H.answer(3, [act.cmp()]); },
+      async () => { await H.ab(); await H.ask(3); await H.run('r4', 'A', 'E-ROADS-FIVEPOINTS'); await H.run('r5', 'active', 'F-TS-SOUTH'); await H.land('r5', true); await H.answer(3, [act.cmp()]); await H.land('r4'); },
+    ], (f) => f.map === AB && f.A === 'E-ROADS-FIVEPOINTS' && !f.analyst);
+
+    await pair13('R13 demo: a Compare is not kept off the map by Run as A when a later step\'s run was cancelled by Exit', [false, true].map((cmpFirst) => async () => {
+      await H.startDemo(); await H.demo(5, { dA: '/api/simulate' }); await H.land('dA'); await H.done(5); await H.demo(8, { dB: '/api/simulate' }); await H.land('dB'); await H.done(8);
+      await H.cmp('c4'); await H.run('r5', 'A', 'E-ROADS-FIVEPOINTS'); await H.demo(8, { dB2: '/api/simulate' }); await H.exitDemo();
+      if (cmpFirst) { await H.land('c4'); await H.land('r5'); } else { await H.land('r5'); await H.land('c4'); }
+      await H.land('dB2');
+    }), (f) => f.map === AB && f.A === 'E-ROADS-FIVEPOINTS' && f.sim !== 'running' && f.cmpSt === 'idle' && !f.demoBusy);
+
+    // the demo's Ask the AI step asks about scenario A only with A on screen (R5)
+    await single13('R13 demo Ask the AI is not asked over an answer that took the map while its run for A was in flight',
+      async () => { await H.startDemo(); await H.demo(7, { dA: '/api/simulate' }); await H.ask(3); await H.answer(3, [act.sim(rTel13, 'active')]); await H.land('dA'); await H.done(7); },
+      (f) => onlyA(f) && f.map === 'R:D-TELECOM-56MARIETTA' && !f.demoBusy);
+    await single13('R13 demo Ask the AI is not asked over a newer run you requested while its run for A was in flight',
+      async () => { await H.startDemo(); await H.demo(7, { dA: '/api/simulate' }); await H.run('r3', 'B', 'C-WATER-MAIN-DECATUR'); await H.land('dA'); await H.land('r3'); await H.done(7); },
+      (f) => onlyA(f) && f.map === 'R:C-WATER-MAIN-DECATUR' && !f.demoBusy);
+    await single13('R13 demo Ask the AI is not asked when its run for A fails',
+      async () => { await H.startDemo(); await H.demo(7, { dA: '/api/simulate' }); await H.land('dA', true); await H.done(7); },
+      (f) => onlyA(f) && !f.demoBusy && f.sim !== 'running');
+    await single13('R13 demo Ask the AI is not asked over a Compare you started while it waited for an answer',
+      async () => { await H.startDemo(); await H.demo(5, { dA: '/api/simulate' }); await H.land('dA'); await H.done(5); await H.demo(8, { dB: '/api/simulate' }); await H.land('dB'); await H.done(8);
+        await H.ask(5); await H.demo(7); await sleep(150); await H.cmp('c7'); await H.land('c7'); await H.answer(5, []); await H.done(7); },
+      (f) => onlyA(f) && f.map === AB && !f.demoBusy);
+
+    // An analyst answer supersedes a request made before asking (a Compare, a slot run, the inspector's
+    // trace): if it fails after the answer its failure is dropped, so one that failed before the answer
+    // is taken off the error toast (and compareStatus) too. A failure the answer does not supersede stays.
+    await pair13('R13 a Compare made before asking that fails is not reported once the answer\'s comparison superseded it', orders13(
+      async () => { await H.ab(); await H.cmp('c3'); await H.ask(4); },
+      [() => H.land('c3', 'engine 500'), () => H.answer(4, [act.cmp()])],
+    ), (f) => f.err === null && f.cmpSt === 'idle' && f.map === AB);
+    await pair13('R13 a slot run made before asking that fails is not reported once the answer wrote that slot', orders13(
+      async () => { await H.ab(); await H.run('r3', 'A', 'C-WATER-MAIN-DECATUR'); await H.run('r4', 'active', 'E-ROADS-FIVEPOINTS'); await H.land('r4'); await H.ask(5); },
+      [() => H.land('r3', 'engine 500'), () => H.answer(5, [act.sim(rTel13, 'A')])],
+    ), (f) => f.err === null && f.A === 'D-TELECOM-56MARIETTA' && f.sim === 'idle');
+    await pair13('R13 an inspector trace that fails is not reported once the answer\'s trace superseded it', orders13(
+      async () => { await H.ab(); await H.utrace('t3', 'PWR-TS-SOUTH'); await H.ask(4); },
+      [() => H.land('t3', 'trace 500'), () => H.answer(4, [act.trace()])],
+    ), (f) => f.err === null && f.trace);
+    await pair13('R13 taking a superseded failure off the toast keeps a failure the answer did not supersede (all 6 orders)', orders13(
+      async () => { await H.ab(); await H.run('r3', 'A', 'C-WATER-MAIN-DECATUR'); await H.run('r4', 'active', 'E-ROADS-FIVEPOINTS'); await H.land('r4'); await H.cmp('c5'); await H.ask(6); },
+      [() => H.land('r3', 'p3 down'), () => H.land('c5', 'cmp down'), () => H.answer(6, [act.cmp()])],
+    ), (f) => f.err === 'Scenario A failed: p3 down' && f.cmpSt === 'idle' && f.sim === 'idle');
+    // ...and so is a trace superseded by another selection or Hide trace (the analyst's or yours)
+    const traced13 = (ask) => async () => { await H.ab(); await H.utrace('t1', 'PWR-TS-SOUTH'); await H.land('t1'); if (ask) await H.ask(2); await H.follow('t3', 'PWR-DS-FIVEPOINTS'); };
+    await pair13('R13 a trace that fails is not reported once the answer selected another component', orders13(traced13(true),
+      [() => H.land('t3', 'trace 500'), async () => { await H.answer(2, [{ kind: 'select_node', node_id: 'PWR-SW-CEN1', node_ids: [], edge_ids: [] }]); await sleep(400); }],
+    ), (f) => f.err === null && f.sel === 'PWR-SW-CEN1');
+    await pair13('R13 a trace that fails is not reported once you selected another component', orders13(traced13(false),
+      [() => H.land('t3', 'trace 500'), async () => { await S(async () => { await window.__deeptraceStore.getState().selectNode('PWR-SW-CEN1', { fly: false }); }); await sleep(200); }],
+    ), (f) => f.err === null && f.sel === 'PWR-SW-CEN1' && f.traceOf === 'PWR-SW-CEN1');
+    await pair13('R13 a trace that fails is not reported once you hid the trace', orders13(traced13(false),
+      [() => H.land('t3', 'trace 500'), async () => { await S(() => window.__deeptraceStore.getState().hideTrace()); await sleep(60); }],
+    ), (f) => f.err === null && f.traceOf === null);
+    await pair13('R13 a trace that fails is not reported once you deselected the component', orders13(traced13(false),
+      [() => H.land('t3', 'trace 500'), async () => { await S(() => window.__deeptraceStore.getState().selectNode(null)); await sleep(60); }],
+    ), (f) => f.err === null && f.sel === null && f.traceOf === null);
+    // The demo's Compare step waits for a run you requested for an empty slot instead of running the
+    // demo's preset over it, so it compares the same scenarios whichever lands first
+    await pair13('R13 demo Compare step waits for your Run as B still in flight (either landing order)', [false, true].map((stepFirst) => async () => {
+      await H.startDemo(); await H.run('r2', 'B', 'C-WATER-MAIN-DECATUR'); await H.demo(9, { dA: '/api/simulate' });
+      if (stepFirst) { await H.land('dA'); await H.land('r2'); } else { await H.land('r2'); await H.land('dA'); }
+      await H.done(9);
+    }), (f) => f.map === 'D:A-DS-FIVEPOINTS/C-WATER-MAIN-DECATUR' && f.B === 'C-WATER-MAIN-DECATUR' && f.err === null && !f.demoBusy);
+    await pair13('R13 demo Compare step waits for a newer Run as B that replaced its own run for B (either landing order)', [false, true].map((stepFirst) => async () => {
+      await H.startDemo(); await H.demo(9, { dA: '/api/simulate' }); const dB = (ops.dB = gate('/api/simulate')); await H.land('dA'); await within(dB.hit, 5000, 'demo run for B');
+      await H.run('r3', 'active', 'F-TS-SOUTH'); await H.land('r3'); await H.run('r4', 'B', 'C-WATER-MAIN-DECATUR');
+      if (stepFirst) { await H.land('dB'); await H.land('r4'); } else { await H.land('r4'); await H.land('dB'); }
+      await H.done(9);
+    }), (f) => f.map === 'D:A-DS-FIVEPOINTS/C-WATER-MAIN-DECATUR' && f.err === null && f.cmpSt === 'idle' && !f.demoBusy);
+    // a Compare that failed before Start demo (or Restore world) is not settled by a later answer
+    await pair13('R13 a Compare that failed before Start demo does not let a later answer settle the demo\'s Compare error', [false, true].map((beforeDemo) => async () => {
+      await H.ab(); await H.cmp('c1'); if (beforeDemo) await H.land('c1', 'engine 500');
+      await H.startDemo(); if (!beforeDemo) await H.land('c1', 'engine 500');
+      await S(async () => { const s = window.__deeptraceStore.getState(); await s.runSimulation(s.presets.find((x) => x.id === 'E-ROADS-FIVEPOINTS').scenario, 'A'); });
+      await H.ask(5); await H.demo(9, { dB: '/api/simulate' }); await H.land('dB', 'engine 500'); await H.done(9);
+      await H.answer(5, [act.cmp()]);
+    }), (f) => f.cmpSt === 'error' && f.err === 'Run two scenarios (A and B) before comparing.');
+    // With several failed requests the toast reports the newest request's failure, whichever lands last.
+    // An inspector trace sits on the request timeline after the requests made before it.
+    await pair13('R13 Run as A and a newer Run both fail: the toast reports the newer Run in either landing order', orders13(
+      async () => { await H.run('r1', 'A', 'C-WATER-MAIN-DECATUR'); await H.run('r2', 'active', 'E-ROADS-FIVEPOINTS'); },
+      [() => H.land('r1', 'timeout'), () => H.land('r2', 'bad scenario')],
+    ), (f) => f.err === 'bad scenario' && f.sim === 'error');
+    await pair13('R13 Run as A and a newer Compare both fail: the toast reports the Compare in either landing order', orders13(
+      async () => { await H.ab(); await H.run('r3', 'A', 'C-WATER-MAIN-DECATUR'); await H.cmp('c4'); },
+      [() => H.land('r3', 'timeout'), () => H.land('c4', 'bad scenario')],
+    ), (f) => f.err === 'bad scenario' && f.sim === 'error' && f.cmpSt === 'error');
+    await pair13('R13 a Run and a newer inspector trace both fail: the toast reports the trace in either landing order', orders13(
+      async () => { await H.run('r1', 'active', 'A-DS-FIVEPOINTS'); await H.utrace('t2', 'PWR-TS-SOUTH'); },
+      [() => H.land('r1', 'engine 500'), () => H.land('t2', 'trace 500')],
+    ), (f) => f.err === 'Trace failed: trace 500' && f.sim === 'error');
+    await pair13('R13 an inspector trace and a newer Run both fail: the toast reports the Run in either landing order', orders13(
+      async () => { await H.utrace('t1', 'PWR-TS-SOUTH'); await H.run('r2', 'active', 'B-EDGEWOOD-DUCTBANK'); },
+      [() => H.land('t1', 'trace 500'), () => H.land('r2', 'engine 500')],
+    ), (f) => f.err === 'engine 500' && f.sim === 'error');
+
+    await reset();
+    await S(() => { if (window.__origAsk) window.__deeptraceStore.setState({ sendAnalystMessage: window.__origAsk }); });
+  }
 
   // R2: a live result keeps its provenance after a failover (not relabelled "precomputed")
   await reset();

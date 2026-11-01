@@ -297,13 +297,23 @@ Every async step is cancellable: **Exit demo**, **Reset demo** and **Restore wor
 step, simulation, trace or analyst answer in flight, so a slow response can never re-apply
 state the presenter just cleared; exiting mid-reveal turns every layer back on. Steps can be
 reached in any order (step chips, ← →): a step that is about scenario A, such as the analyst
-question, puts A on screen first. Runs, comparisons and analyst questions share one timeline,
-and an analyst answer counts as asked when its question was sent. Nothing started before asking
-takes the map back from the answer when it lands later (an older slot run still fills its slot,
-and the analyst's comparison then shows "Slots changed since this comparison"). The answer is
-held back only by something started after asking that has already landed: the map, the
-comparison or that slot, including the answer's highlights and traces. A newer request still in flight
-replaces the answer when it lands, and one that failed or was cancelled never counts. A streaming analyst answer can be stopped at any time, and the
+question, puts A on screen first, and skips its question when A cannot be shown (its run failed,
+or a run, Compare or answer you started meanwhile took the map); the Compare step waits for a run
+you started for an empty slot instead of running its preset over it. Runs, comparisons and analyst
+questions share one timeline, and an analyst answer counts as asked when its question was sent.
+Nothing started before asking takes the map back from the answer when it lands later (an older
+slot run still fills its slot, and the analyst's comparison then shows "Slots changed since this
+comparison"). The answer is held back only by something started after asking that has already
+landed: the map, the comparison or that slot, including the answer's highlights and traces. A
+newer request still in flight replaces the answer when it lands, and one that failed or was
+cancelled never counts. A Compare that lands owns the map even while a later answer's trace keeps
+the diff closed, so an older run cannot take the map from it; it stays off the diff only when
+something requested after it took the map, or a run requested before it took the map since with
+another scenario in a compared slot. The error message reports the newest failed request,
+whichever failure lands last, and a failure of a request the answer superseded is dropped whether
+it lands before or after the answer (as is a failed trace once another selection, Hide trace or a
+newer trace replaced it). All of this is checked with held requests landing in every
+order (`scripts/e2e-races.cjs`, R13). A streaming analyst answer can be stopped at any time, and the
 backend sends SSE heartbeats so a stalled connection is detected (90 s without data) rather
 than hanging.
 
