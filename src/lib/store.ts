@@ -390,8 +390,8 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
    */
   let displaySeq = 0;
   /**
-   * Request number of the analyst answer whose trace last moved the map off the A/B diff. A
-   * comparison requested before it lands without taking the diff back over the trace.
+   * Request number of the latest analyst answer whose trace is on the map. A comparison requested
+   * before it lands without taking the diff view over that trace.
    */
   let viewSeq = 0;
   /** Slot k holds an analyst answer's write (question + 0.5) for a question asked before request `seq`. */
@@ -598,6 +598,10 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
 
   /** A highlight the user made for the previously shown result no longer applies to a new one. */
   const dropUserHighlight = (h: Highlight | null) => (h && h.source === "user" ? null : h);
+  /** The analyst answer that set each AI highlight (by identity: two questions can share a request number). */
+  const highlightTurn = new WeakMap<Highlight, AnalystTurn>();
+  /** A new result an answer shows: only a highlight this same answer set describes it. */
+  const keepTurnHighlight = (h: Highlight | null, t: AnalystTurn) => (h && highlightTurn.get(h) === t ? h : null);
 
   /**
    * State for a new comparison. Slot objects the UI already holds are kept when they are the
@@ -639,7 +643,10 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       const cur = s.slots[k];
       return keep[k] && holdView[k] && !!cur && !sameScenario(cur.scenario, compared[k].scenario);
     });
-    const result = s.result && s.result === s.slots.A ? A : s.result && s.result === s.slots.B ? B : s.result;
+    const followed = s.result && s.result === s.slots.A ? A : s.result && s.result === s.slots.B ? B : s.result;
+    // Something requested later owns the map: this comparison stores its data (slots, comparison)
+    // and the shown result stays, with its highlight and trace. An A/B chip follows its slot.
+    const result = keepView ? s.result : followed;
     const moved = result !== s.result && result !== null;
     // don't swap the map from a newer run to the diff of an older comparison
     const tookView = !superseded && !keepView;
@@ -647,7 +654,11 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       tookView,
       patch: {
         comparison: c,
-        compareView: tookView ? "diff" : s.compareView,
+        compareView: tookView
+          ? "diff"
+          : keepView && (s.compareView === "A" || s.compareView === "B")
+            ? viewOutsideDiff({ result, slots: { A, B } })
+            : s.compareView,
         slots: { A, B },
         result,
         panels: { ...s.panels, comparison: true },
@@ -1017,7 +1028,7 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       try {
         const comparison = await compare(A, B);
         if (stale()) return null;
-        let tookView = false;
+        let owns = false;
         set((s) => {
           const r = adoptComparison(
             s,
@@ -1027,19 +1038,23 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
               A: newerSlot(startSlots.A, s.slots.A) && !olderAnswerWrite("A", seq),
               B: newerSlot(startSlots.B, s.slots.B) && !olderAnswerWrite("B", seq),
             },
-            // something requested after this Compare (a run, an analyst answer or its trace) already took the map
+            // something requested after this Compare (a run, an analyst answer or its trace) already
+            // took the map: store the comparison, leave the map (and the shown result) alone
             seq < Math.max(displaySeq, viewSeq),
           );
-          tookView = r.tookView;
           // The shown result moved to another scenario (it followed a slot this comparison took back
           // from an older answer, or one another comparison filled): highlights, the analyst's too,
           // described the result it replaced. (A run taking the map clears them the same way.)
           const nr = r.patch.result;
           const replaced = !!nr && !!s.result && nr !== s.result && !sameScenario(nr.scenario, s.result.scenario);
+          // The map now shows this comparison if it took the diff view, if the diff was already on
+          // (it now draws this comparison), or if it moved the shown result: requests made before it
+          // must no longer take the map back.
+          owns = r.tookView || s.compareView === "diff" || replaced;
           return { ...r.patch, ...(replaced ? { highlight: null } : {}), compareStatus: "idle" as const };
         });
         comparisonSeq = seq;
-        if (tookView) displaySeq = seq;
+        if (owns && seq > displaySeq) displaySeq = seq;
         return comparison;
       } catch (e) {
         if (stale()) return null;
@@ -1250,15 +1265,17 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
         case "highlight":
           // a highlight describes what this answer shows; a newer result on the map is not that
           if (!mayShow()) break;
-          set({
-            highlight: {
+          {
+            const h: Highlight = {
               node_ids: a.node_ids,
               edge_ids: a.edge_ids,
               label: a.label ?? null,
               tone: a.tone ?? "info",
               source: "ai",
-            },
-          });
+            };
+            highlightTurn.set(h, t);
+            set({ highlight: h });
+          }
           break;
         case "clear_highlights":
           if (!mayShow()) break;
@@ -1305,8 +1322,9 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
                 ? {
                     result: r,
                     compareView: null,
-                    // keep analyst highlights (this same turn may have just set one); user ones are stale
-                    highlight: dropUserHighlight(s.highlight),
+                    // only a highlight this same answer set describes the new result (earlier answers'
+                    // and the user's described the result it replaces)
+                    highlight: keepTurnHighlight(s.highlight, t),
                     playback: { step: 0, maxStep: maxStepOf(r), playing: true, runId: s.playback.runId + 1 },
                   }
                 : {}),
@@ -1326,7 +1344,8 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
               compareSeq = at;
               latestCompareGuard = undefined;
             }
-            let tookView = false;
+            const show = mayShow();
+            let owns = false;
             set((s) => {
               const r = adoptComparison(
                 s,
@@ -1334,20 +1353,25 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
                 // slots changed since the analyst was given them belong to the newer write
                 { A: newerSlot(t.slots.A, s.slots.A), B: newerSlot(t.slots.B, s.slots.B) },
                 // something started after asking already took the map: store this without its diff view
-                !mayShow(),
+                !show,
                 // ...and only a slot written by something started after asking keeps the map off this
                 // diff (an older run that landed in between keeps its slot as data; the diff shows stale)
                 { A: slotWriteSeq.A > at, B: slotWriteSeq.B > at },
               );
-              tookView = r.tookView;
+              const nr = r.patch.result;
+              const replaced = !!nr && !!s.result && nr !== s.result && !sameScenario(nr.scenario, s.result.scenario);
+              // the map now shows this answer's comparison (its diff, or a result it moved)
+              owns = show && (r.tookView || s.compareView === "diff" || replaced);
               return {
                 ...r.patch,
+                // only a highlight this same answer set describes a result it moved to
+                ...(replaced ? { highlight: keepTurnHighlight(s.highlight, t) } : {}),
                 compareStatus: supersede && s.compareStatus === "running" ? ("idle" as const) : s.compareStatus,
               };
             });
             comparisonSeq = at;
-            if (tookView) {
-              displaySeq = at;
+            if (owns) {
+              displaySeq = Math.max(displaySeq, at);
               settleRunsBehindAnswer();
             }
           }

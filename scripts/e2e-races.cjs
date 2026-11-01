@@ -21,6 +21,7 @@ async function open(routeFn) {
 }
 
 const delays = {}; // url-substring -> ms (mutable from tests)
+const bodyDelays = {}; // request-body substring (e.g. a preset's scenario_id) -> ms, checked first
 let blockEngine = false;
 let stallChat = false;
 let failSim = false; // /api/simulate answers HTTP 500
@@ -34,7 +35,10 @@ async function routes(page) {
     // decided when the request is made, not when its delay ends
     const fail = (failSim && url.includes('/api/simulate')) || (failCompare && url.includes('/api/compare'));
     const reply = chatReply && url.includes('/api/analyst/chat') ? chatReply : null;
-    for (const [k, ms] of Object.entries(delays)) if (url.includes(k)) { await sleep(ms); break; }
+    const body = route.request().postData() || '';
+    const byBody = Object.entries(bodyDelays).find(([k]) => body.includes(k));
+    if (byBody) await sleep(byBody[1]);
+    else for (const [k, ms] of Object.entries(delays)) if (url.includes(k)) { await sleep(ms); break; }
     try {
       if (fail) return await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'injected failure' }) });
       if (reply) return await route.fulfill({ status: 200, contentType: 'text/event-stream', body: reply });
@@ -47,7 +51,7 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
 (async () => {
   const { browser, page, errors } = await open(routes);
   const S = (fn, arg) => page.evaluate(fn, arg);
-  const reset = async () => { for (const k of Object.keys(delays)) delete delays[k]; blockEngine = false; stallChat = false; failSim = false; failCompare = false; chatReply = null;
+  const reset = async () => { for (const k of Object.keys(delays)) delete delays[k]; for (const k of Object.keys(bodyDelays)) delete bodyDelays[k]; blockEngine = false; stallChat = false; failSim = false; failCompare = false; chatReply = null;
     await S(() => { const s = window.__deeptraceStore.getState(); s.exitDemo(); s.clearChat(); s.restoreWorld(); }); await sleep(300); };
 
   // [0]/[32] Restore during a running simulation
@@ -610,6 +614,50 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
     else
       check('R9 ...but a slot showing what the newer Compare compared keeps it', st.slotA === 'A-DS-FIVEPOINTS' && st.view === 'diff' && st.cmpA === 'A-DS-FIVEPOINTS', st);
   }
+  chatReply = null;
+
+  // R10: a later answer that shows a new result does not keep an earlier answer's highlight
+  await reset();
+  await S(async () => { const s = window.__deeptraceStore.getState(); await s.runSimulation(s.presets.find((x) => x.id === 'A-DS-FIVEPOINTS').scenario); });
+  await S(() => window.__deeptraceStore.getState().sendAnalystMessage('Why did this happen, and what could we do differently?'));
+  const hl1 = await S(() => window.__deeptraceStore.getState().highlight?.source ?? null);
+  await S(() => window.__deeptraceStore.getState().sendAnalystMessage('What happens if PWR-TS-SOUTH fails?'));
+  st = { hl1, ...(await S(() => { const s = window.__deeptraceStore.getState(); return { failed: s.result?.scenario.failed_nodes ?? [], hl: s.highlight?.label ?? null }; })) };
+  check('R10 a later answer\'s new result does not keep the earlier answer\'s highlight', st.hl1 === 'ai' && st.failed.includes('PWR-TS-SOUTH') && st.hl === null, st);
+
+  // R10: a stale Compare drawn into the diff already on screen owns the map: an older run does not take it
+  await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+  await S(() => window.__deeptraceStore.getState().runComparison());
+  bodyDelays['C-WATER-MAIN-DECATUR'] = 1000; bodyDelays['D-TELECOM-56MARIETTA'] = 5000; delays['/api/compare'] = 2500;
+  await S(() => { const s = window.__deeptraceStore.getState(); const P = (id) => s.presets.find((x) => x.id === id).scenario;
+    window.__px = s.runSimulation(P('C-WATER-MAIN-DECATUR'), 'A'); window.__py = s.runSimulation(P('D-TELECOM-56MARIETTA')); window.__pc = s.runComparison(); });
+  await S(() => Promise.all([window.__px, window.__py, window.__pc]));
+  st = await snap();
+  check('R10 a run requested before a Compare that redrew the diff does not take the map', st.view === 'diff' && st.result === 'B-EDGEWOOD-DUCTBANK' && st.slotA === 'C-WATER-MAIN-DECATUR' && st.simStatus === 'idle', st);
+
+  // R10: a Compare started before a later answer's trace leaves that answer's result, trace and highlight alone
+  await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+  const trDs = await S(async () => (await fetch('http://localhost:8000/api/trace/PWR-DS-FIVEPOINTS?max_depth=8')).json());
+  delays['/api/compare'] = 5000;
+  chatReply = sse([
+    { type: 'status', mode: 'llm', model: 'scripted' },
+    { type: 'ui_action', action: { kind: 'show_simulation', result: rCw, slot: 'A', node_ids: [], edge_ids: [] } },
+    { type: 'message', text: 'ok' }, { type: 'done', tool_calls: 1, mode: 'llm' },
+  ]);
+  await S(() => { window.__pq = window.__deeptraceStore.getState().sendAnalystMessage('Put the Decatur main break in slot A'); });
+  await S(() => { window.__pc = window.__deeptraceStore.getState().runComparison(); });
+  await S(() => window.__pq);
+  chatReply = sse([
+    { type: 'status', mode: 'llm', model: 'scripted' },
+    { type: 'ui_action', action: { kind: 'select_node', node_id: 'PWR-DS-FIVEPOINTS', node_ids: [], edge_ids: [] } },
+    { type: 'ui_action', action: { kind: 'show_trace', trace: trDs, node_ids: [], edge_ids: [] } },
+    { type: 'ui_action', action: { kind: 'highlight', node_ids: ['PWR-DS-FIVEPOINTS'], edge_ids: [], label: 'Connections of DS-2', tone: 'info' } },
+    { type: 'message', text: 'ok' }, { type: 'done', tool_calls: 1, mode: 'llm' },
+  ]);
+  await S(() => window.__deeptraceStore.getState().sendAnalystMessage('Trace DS-2 Five Points'));
+  await S(() => window.__pc);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { result: s.result?.scenario_id, view: s.compareView, trace: s.trace?.node_id ?? null, hl: s.highlight?.label ?? null, slotA: s.slots.A?.scenario_id, cmpA: s.comparison?.scenario_a.scenario_id ?? null, status: s.compareStatus }; });
+  check('R10 an older Compare leaves a later answer\'s result, trace and highlight', st.result === 'C-WATER-MAIN-DECATUR' && st.view !== 'diff' && st.trace === 'PWR-DS-FIVEPOINTS' && st.hl === 'Connections of DS-2' && st.slotA === 'A-DS-FIVEPOINTS' && st.cmpA === 'A-DS-FIVEPOINTS' && st.status === 'idle', st);
   chatReply = null;
 
   // R2: a live result keeps its provenance after a failover (not relabelled "precomputed")
