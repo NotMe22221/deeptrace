@@ -638,7 +638,8 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
   // R10: a Compare started before a later answer's trace leaves that answer's result, trace and highlight alone
   await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
   const trDs = await S(async () => (await fetch('http://localhost:8000/api/trace/PWR-DS-FIVEPOINTS?max_depth=8')).json());
-  delays['/api/compare'] = 5000;
+  // Q1 asked, then Compare (in flight); Q1's answer lands; Q2 asked and answered; then the Compare lands
+  delays['/api/compare'] = 6000; delays['/api/analyst/chat'] = 1500;
   chatReply = sse([
     { type: 'status', mode: 'llm', model: 'scripted' },
     { type: 'ui_action', action: { kind: 'show_simulation', result: rCw, slot: 'A', node_ids: [], edge_ids: [] } },
