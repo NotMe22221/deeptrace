@@ -21,7 +21,7 @@ async function open(routeFn) {
 }
 
 const delays = {}; // url-substring -> ms (mutable from tests)
-const bodyDelays = {}; // request-body substring (e.g. a preset's scenario_id) -> ms, checked first
+const bodyDelays = {}; // engine request-body substring (e.g. a preset's scenario_id) -> ms, checked first
 let blockEngine = false;
 let stallChat = false;
 let failSim = false; // /api/simulate answers HTTP 500
@@ -36,7 +36,8 @@ async function routes(page) {
     const fail = (failSim && url.includes('/api/simulate')) || (failCompare && url.includes('/api/compare'));
     const reply = chatReply && url.includes('/api/analyst/chat') ? chatReply : null;
     const body = route.request().postData() || '';
-    const byBody = Object.entries(bodyDelays).find(([k]) => body.includes(k));
+    // engine requests only: an analyst request's body names scenarios too (its context)
+    const byBody = url.includes('/api/analyst/') ? undefined : Object.entries(bodyDelays).find(([k]) => body.includes(k));
     if (byBody) await sleep(byBody[1]);
     else for (const [k, ms] of Object.entries(delays)) if (url.includes(k)) { await sleep(ms); break; }
     try {
@@ -679,6 +680,41 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
   await S(() => Promise.all([window.__pr, window.__pq]));
   st = await S(() => { const s = window.__deeptraceStore.getState(); const m = s.messages[s.messages.length - 1]; return { result: s.result?.scenario_id, hl: s.highlight?.label ?? null, sim: s.simStatus, answered: !!m?.content && !m?.pending }; });
   check('R11 an answer\'s highlight is not drawn on a newer scenario an older run showed', st.result === 'C-WATER-MAIN-DECATUR' && st.hl === null && st.sim === 'idle' && st.answered, st);
+
+  // R12: a run of the same scenario requested before asking keeps the answer's highlight when it lands
+  await reset();
+  await S(async () => { const s = window.__deeptraceStore.getState(); await s.runSimulation(s.presets.find((x) => x.id === 'A-DS-FIVEPOINTS').scenario); });
+  bodyDelays['A-DS-FIVEPOINTS'] = 4000;
+  await S(() => { const s = window.__deeptraceStore.getState(); window.__pr = s.runSimulation(s.presets.find((x) => x.id === 'A-DS-FIVEPOINTS').scenario, 'A'); });
+  await sleep(150);
+  await S(() => window.__deeptraceStore.getState().sendAnalystMessage('Why did this happen, and what could we do differently?'));
+  const r12a = await S(() => window.__deeptraceStore.getState().highlight?.source ?? null);
+  await S(() => window.__pr);
+  st = { hlAfterAnswer: r12a, ...(await S(() => { const s = window.__deeptraceStore.getState(); return { result: s.result?.scenario_id, slotA: s.slots.A?.scenario_id, hl: s.highlight?.source ?? null }; })) };
+  check('R12 a same-scenario run requested before asking keeps the answer\'s highlight', r12a === 'ai' && st.result === 'A-DS-FIVEPOINTS' && st.slotA === 'A-DS-FIVEPOINTS' && st.hl === 'ai', st);
+
+  // R12: a Compare started after asking drops that answer's highlight whichever lands first
+  await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+  delays['/api/compare'] = 6000;
+  await S(() => { const s = window.__deeptraceStore.getState(); window.__pq = s.sendAnalystMessage('Why did this happen, and what could we do differently?'); window.__pc = s.runComparison(); });
+  await S(() => window.__pq);
+  const r12b = await S(() => window.__deeptraceStore.getState().highlight?.source ?? null);
+  await S(() => window.__pc);
+  st = { hlAfterAnswer: r12b, ...(await S(() => { const s = window.__deeptraceStore.getState(); return { view: s.compareView, hl: s.highlight?.label ?? null }; })) };
+  check('R12 a Compare started after asking replaces that answer\'s highlight', r12b === 'ai' && st.view === 'diff' && st.hl === null, st);
+
+  // R12: the demo's 'Ask the AI' step puts A back on screen after waiting for an earlier answer
+  await reset();
+  await S(async () => { const s = window.__deeptraceStore.getState(); s.startDemo(); await new Promise((r) => setTimeout(r, 200)); await window.__deeptraceStore.getState().demoGoto(5); });
+  delays['/api/analyst/chat'] = 1500;
+  await S(() => { window.__pq = window.__deeptraceStore.getState().sendAnalystMessage('What happens if PWR-TS-SOUTH fails?'); });
+  await sleep(100);
+  await S(() => window.__deeptraceStore.getState().demoGoto(7));
+  await S(() => window.__pq);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); const last = s.messages[s.messages.length - 1];
+    return { result: s.result?.scenario_id ?? null, qs: s.messages.filter((m) => m.role === 'user').map((m) => m.content.slice(0, 24)), lastErr: last?.error ?? null, busy: s.demo.busy }; });
+  check('R12 demo Ask the AI asks its question with scenario A on screen', st.result === 'A-DS-FIVEPOINTS' && st.qs.length === 2 && st.qs[1].startsWith('Why did this happen') && !st.lastErr && !st.busy, st);
+  await S(() => window.__deeptraceStore.getState().exitDemo());
 
   // R2: a live result keeps its provenance after a failover (not relabelled "precomputed")
   await reset();
