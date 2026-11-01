@@ -661,6 +661,25 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
   check('R10 an older Compare leaves a later answer\'s result, trace and highlight', st.result === 'C-WATER-MAIN-DECATUR' && st.view !== 'diff' && st.trace === 'PWR-DS-FIVEPOINTS' && st.hl === 'Connections of DS-2' && st.slotA === 'A-DS-FIVEPOINTS' && st.cmpA === 'A-DS-FIVEPOINTS' && st.status === 'idle', st);
   chatReply = null;
 
+  // R11: switching the shown slot drops an analyst highlight that described the other slot's result
+  await reset(); await P2('A-DS-FIVEPOINTS', 'C-WATER-MAIN-DECATUR');
+  await S(() => window.__deeptraceStore.getState().sendAnalystMessage('Why did this happen, and what could we do differently?'));
+  const r11a = await S(() => { const s = window.__deeptraceStore.getState(); return { result: s.result?.scenario_id, hl: s.highlight?.source ?? null }; });
+  await S(() => window.__deeptraceStore.getState().showSlot('A'));
+  st = { onB: r11a, ...(await S(() => { const s = window.__deeptraceStore.getState(); return { result: s.result?.scenario_id, hl: s.highlight?.label ?? null }; })) };
+  check('R11 switching to slot A drops the AI highlight about slot B', r11a.result === 'C-WATER-MAIN-DECATUR' && r11a.hl === 'ai' && st.result === 'A-DS-FIVEPOINTS' && st.hl === null, st);
+
+  // R11: an answer's highlight is not drawn on a result of another scenario that an older run put on the map meanwhile
+  await reset();
+  await S(async () => { const s = window.__deeptraceStore.getState(); await s.runSimulation(s.presets.find((x) => x.id === 'A-DS-FIVEPOINTS').scenario); });
+  bodyDelays['C-WATER-MAIN-DECATUR'] = 1500; delays['/api/analyst/chat'] = 5000;
+  await S(() => { const s = window.__deeptraceStore.getState(); window.__pr = s.runSimulation(s.presets.find((x) => x.id === 'C-WATER-MAIN-DECATUR').scenario); });
+  await sleep(150);
+  await S(() => { window.__pq = window.__deeptraceStore.getState().sendAnalystMessage('Why did this happen, and what could we do differently?'); });
+  await S(() => Promise.all([window.__pr, window.__pq]));
+  st = await S(() => { const s = window.__deeptraceStore.getState(); const m = s.messages[s.messages.length - 1]; return { result: s.result?.scenario_id, hl: s.highlight?.label ?? null, sim: s.simStatus, answered: !!m?.content && !m?.pending }; });
+  check('R11 an answer\'s highlight is not drawn on a newer scenario an older run showed', st.result === 'C-WATER-MAIN-DECATUR' && st.hl === null && st.sim === 'idle' && st.answered, st);
+
   // R2: a live result keeps its provenance after a failover (not relabelled "precomputed")
   await reset();
   st = await S(async () => { const s = window.__deeptraceStore.getState(); const r = await s.runSimulation({ failed_nodes: ['PWR-DS-FIVEPOINTS'], failed_edges: [], horizon_hours: 6, enable_restoration: true });

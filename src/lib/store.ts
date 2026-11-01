@@ -234,6 +234,10 @@ export interface AnalystTurn {
   seq: number;
   /** The slots the analyst was given (its comparisons were computed from these). */
   slots: { A: SimulationResult | null; B: SimulationResult | null };
+  /** The result the answer is about: the one on screen when asked, then the last one it put on the map. */
+  result: SimulationResult | null;
+  /** Results this answer produced (its simulations, and the slots holding what its comparisons compared). */
+  own: WeakSet<SimulationResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -602,6 +606,26 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
   const highlightTurn = new WeakMap<Highlight, AnalystTurn>();
   /** A new result an answer shows: only a highlight this same answer set describes it. */
   const keepTurnHighlight = (h: Highlight | null, t: AnalystTurn) => (h && highlightTurn.get(h) === t ? h : null);
+  /** The result each AI highlight was drawn on (the result it describes). */
+  const highlightBase = new WeakMap<Highlight, SimulationResult | null>();
+  /** `r` is what answer `t` is about: the result it was asked about (or last showed), or one it produced. */
+  const answerDescribes = (t: AnalystTurn, r: SimulationResult) =>
+    r === t.result || (!!t.result && sameScenario(r.scenario, t.result.scenario)) || t.own.has(r);
+  /**
+   * The user switches the map from `prev` to `r` (a slot chip, Show A / Show B, the demo's replay of
+   * A). A user highlight described `prev`; an analyst highlight still describes `r` only if it was
+   * drawn on that scenario or its answer produced `r`. Other highlights (search, demo) are not tied
+   * to a result.
+   */
+  const highlightForView = (h: Highlight | null, prev: SimulationResult | null, r: SimulationResult) => {
+    if (!h || r === prev) return h;
+    if (h.source === "user") return null;
+    if (h.source !== "ai") return h;
+    const base = highlightBase.get(h);
+    if (base && sameScenario(base.scenario, r.scenario)) return h;
+    const t = highlightTurn.get(h);
+    return t && t.own.has(r) ? h : null;
+  };
 
   /**
    * State for a new comparison. Slot objects the UI already holds are kept when they are the
@@ -994,7 +1018,7 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       set((s) => ({
         result: r,
         compareView: s.comparison ? slot : null,
-        highlight: r === s.result ? s.highlight : dropUserHighlight(s.highlight),
+        highlight: highlightForView(s.highlight, s.result, r),
         playback: { step: maxStepOf(r), maxStep: maxStepOf(r), playing: false, runId: s.playback.runId + 1 },
       }));
     },
@@ -1068,7 +1092,7 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
         set((s) => ({
           compareView: v,
           result: r ?? s.result,
-          highlight: r && r !== s.result ? dropUserHighlight(s.highlight) : s.highlight,
+          highlight: r ? highlightForView(s.highlight, s.result, r) : s.highlight,
           playback: r
             ? { step: maxStepOf(r), maxStep: maxStepOf(r), playing: false, runId: s.playback.runId + 1 }
             : s.playback,
@@ -1125,7 +1149,7 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       const trimmed = text.trim();
       if (!trimmed || get().analystPending) return;
       const s0 = get();
-      const turn: AnalystTurn = { seq: reqSeq, slots: { ...s0.slots } };
+      const turn: AnalystTurn = { seq: reqSeq, slots: { ...s0.slots }, result: s0.result, own: new WeakSet() };
       const history = s0.messages
         .filter((m) => !m.pending && !m.error && m.content)
         .slice(-10)
@@ -1249,7 +1273,7 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       set((s) => ({ messages: [], highlight: s.highlight?.source === "ai" ? null : s.highlight }));
     },
     applyUIAction: (a, turn) => {
-      const t: AnalystTurn = turn ?? { seq: reqSeq, slots: { ...get().slots } };
+      const t: AnalystTurn = turn ?? { seq: reqSeq, slots: { ...get().slots }, result: get().result, own: new WeakSet() };
       /** Where this answer sits on the request timeline: after its question, before anything later. */
       const at = t.seq + 0.5;
       /** Nothing started after the question has taken the map yet (one still in flight replaces this when it lands). */
@@ -1262,9 +1286,13 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
           if (a.node_id) world().flyToNode(a.node_id);
           else if (a.node_ids.length) world().flyToNodes(a.node_ids);
           break;
-        case "highlight":
+        case "highlight": {
           // a highlight describes what this answer shows; a newer result on the map is not that
           if (!mayShow()) break;
+          // ...nor is a result of another scenario that an older request (or the user, switching
+          // slots) put on the map while the answer was coming: it was never asked about
+          const cur = get().result;
+          if (cur && !answerDescribes(t, cur)) break;
           {
             const h: Highlight = {
               node_ids: a.node_ids,
@@ -1274,13 +1302,18 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
               source: "ai",
             };
             highlightTurn.set(h, t);
+            highlightBase.set(h, cur);
             set({ highlight: h });
           }
           break;
-        case "clear_highlights":
+        }
+        case "clear_highlights": {
           if (!mayShow()) break;
+          const cur = get().result;
+          if (cur && !answerDescribes(t, cur)) break; // not this answer's result: its highlight is not ours
           set({ highlight: null });
           break;
+        }
         case "show_trace":
           if (a.trace) {
             traceSeq++;
@@ -1309,7 +1342,11 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
             // comparison merely kept there is not that comparison's, and the answer may replace it).
             const fill = k !== null && slotWriteSeq[k] <= at && !(comparisonSeq > at && showsComparedScenario(k));
             if (!show && !fill) break;
-            if (show) displaySeq = at; // earlier runs and comparisons no longer take the map when they land
+            t.own.add(r); // the answer produced this result (wherever it ends up)
+            if (show) {
+              displaySeq = at; // earlier runs and comparisons no longer take the map when they land
+              t.result = r; // ...and the answer is now about it
+            }
             if (k && fill) {
               // earlier runs for this slot no longer overwrite it; a later one still in flight does
               if (slotSeq[k] <= t.seq) slotSeq[k] = at;
@@ -1362,6 +1399,11 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
               const replaced = !!nr && !!s.result && nr !== s.result && !sameScenario(nr.scenario, s.result.scenario);
               // the map now shows this answer's comparison (its diff, or a result it moved)
               owns = show && (r.tookView || s.compareView === "diff" || replaced);
+              // the slots holding what it compared are this answer's results too
+              const ps = r.patch.slots;
+              if (ps?.A && sameScenario(ps.A.scenario, c.scenario_a.scenario)) t.own.add(ps.A);
+              if (ps?.B && sameScenario(ps.B.scenario, c.scenario_b.scenario)) t.own.add(ps.B);
+              if (show && nr && nr !== s.result) t.result = nr;
               return {
                 ...r.patch,
                 // only a highlight this same answer set describes a result it moved to
@@ -1453,7 +1495,7 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
                 set((s) => ({
                   result: existing,
                   compareView: null,
-                  highlight: existing === s.result ? s.highlight : dropUserHighlight(s.highlight),
+                  highlight: highlightForView(s.highlight, s.result, existing),
                   playback: { step: 0, maxStep: maxStepOf(existing), playing: true, runId: s.playback.runId + 1 },
                 }));
               } else {
