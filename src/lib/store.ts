@@ -449,9 +449,17 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
   let traceSeq = 0;
   /**
    * A failure the error toast (`simError`) reports: `seq` places its request on the request timeline
-   * (a trace takes no request number: it sits after the requests made before it).
+   * (a trace takes no request number: it sits after the requests made before it). Kind "check" is the
+   * demo Compare step's "Run two scenarios" message: it sits where the step's Compare would have.
    */
-  type ReportedError = { seq: number; kind: "run" | "slot" | "compare" | "trace"; message: string };
+  type ReportedError = {
+    seq: number;
+    kind: "run" | "slot" | "compare" | "trace" | "check";
+    message: string;
+    /** A slot run's failure: its slot, and (kind "run") the engine's message without the slot prefix. */
+    slot?: "A" | "B";
+    raw?: string;
+  };
   /**
    * The failures the toast reports, oldest request first: it shows the newest request's failure,
    * whichever landed last. All are forgotten once the toast no longer shows that one (dismissed,
@@ -474,10 +482,11 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
     kind: ReportedError["kind"],
     message: string,
     patch: Partial<DeeptraceState> = {},
+    about: Pick<ReportedError, "slot" | "raw"> = {},
   ) => {
     syncReportedErrors();
     // a stable sort: of two failures at the same point on the timeline, the one that landed last shows
-    reportedErrors = [...reportedErrors, { seq, kind, message }].sort((x, y) => x.seq - y.seq);
+    reportedErrors = [...reportedErrors, { seq, kind, message, ...about }].sort((x, y) => x.seq - y.seq);
     set({ ...patch, simError: reportedErrors[reportedErrors.length - 1].message });
   };
   /**
@@ -490,6 +499,33 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
     if (!reportedErrors.some(drop)) return {};
     reportedErrors = reportedErrors.filter((e) => !drop(e));
     return { simError: reportedErrors[reportedErrors.length - 1]?.message ?? null };
+  };
+  /**
+   * A demo step's run or Compare does not clear the toast: the step cleared it at the click, and when
+   * it makes the request depends on what landed while it waited. It settles only the failures the new
+   * request supersedes, as they would have been had they failed after it was made: an older run's
+   * failure is dropped, or becomes its slot's failure while that run still owns its slot (a slot's
+   * failure is dropped once a newer run took the slot); an older Compare's failure is dropped. Call it
+   * once the request has taken its numbers (simSeq and slotSeq, or compareSeq). Returns the patch for
+   * the caller's set().
+   */
+  const settleErrorsBehindDemoRequest = (kind: "run" | "compare"): Partial<DeeptraceState> => {
+    syncReportedErrors();
+    if (!reportedErrors.length) return {};
+    /** The failed run is still the newest request for its slot. */
+    const ownsSlot = (e: ReportedError) => !!e.slot && slotSeq[e.slot] === e.seq;
+    const next: ReportedError[] = [];
+    for (const e of reportedErrors) {
+      if (kind === "compare") {
+        if (e.kind !== "compare") next.push(e);
+      } else if (e.kind === "run") {
+        if (ownsSlot(e)) next.push({ ...e, kind: "slot", message: `Scenario ${e.slot} failed: ${e.raw}` });
+      } else if (e.kind !== "slot" || ownsSlot(e)) next.push(e);
+    }
+    const shown = reportedErrors[reportedErrors.length - 1].message;
+    reportedErrors = next;
+    const now = next[next.length - 1]?.message ?? null;
+    return now === shown ? {} : { simError: now };
   };
   /**
    * A newer trace request, Hide trace, a deselection or an analyst trace supersedes the traces before
@@ -1062,7 +1098,8 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       latestSimGuard = isCurrent;
       if (slot === "A" || slot === "B") slotSeq[slot] = seq;
       liveRuns.set(seq, { slot, alive: () => epoch === simEpoch && (!isCurrent || isCurrent()) });
-      set({ simStatus: "running", simError: null });
+      // a new request clears the error toast; a demo step's settles only what it supersedes
+      set({ simStatus: "running", ...(isCurrent ? settleErrorsBehindDemoRequest("run") : { simError: null }) });
       /** The world was restored / cleared, or the caller (a demo step) was superseded or exited. */
       const cancelled = () => {
         if (epoch !== simEpoch) return true;
@@ -1117,11 +1154,13 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
         if (cancelled()) return null;
         const message = (e as Error).message;
         if (seq === simSeq) {
-          reportError(seq, "run", message, { simStatus: "error" });
+          // (a demo step's run requested after it makes this its slot's failure: see settleErrorsBehindDemoRequest)
+          const about = slot === "A" || slot === "B" ? { slot, raw: message } : {};
+          reportError(seq, "run", message, { simStatus: "error" }, about);
         } else if ((slot === "A" || slot === "B") && slotSeq[slot] === seq) {
           // A newer run owns simStatus / result, but this slot was not filled: say so, so a later
           // Compare is not silently run against the slot's previous scenario.
-          reportError(seq, "slot", `Scenario ${slot} failed: ${message}`);
+          reportError(seq, "slot", `Scenario ${slot} failed: ${message}`, {}, { slot });
         }
         return null;
       } finally {
@@ -1148,7 +1187,12 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       const B = b ?? get().slots.B?.scenario;
       if (!A || !B) {
         compareErrorSeq = 0; // this "error" is no request's failure: no analyst answer settles it
-        set({ simError: "Run two scenarios (A and B) before comparing.", compareStatus: "error" });
+        const message = "Run two scenarios (A and B) before comparing.";
+        // The demo's Compare step gets here after waiting (its run for a slot failed or was dropped). The
+        // message takes the place on the request timeline its Compare would have taken, so a failure of a
+        // request made before it does not replace it, whether that lands before or after it.
+        if (opts?.isCurrent) reportError(++reqSeq, "check", message, { compareStatus: "error" });
+        else set({ simError: message, compareStatus: "error" });
         return null;
       }
       const isCurrent = opts?.isCurrent;
@@ -1164,7 +1208,8 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       const startSlots = get().slots;
       /** What the map showed when this Compare was requested: a run that takes it since may hold the diff back. */
       const displayAtRequest = displaySeq;
-      set({ compareStatus: "running", simError: null });
+      // a new request clears the error toast; a demo step's settles only what it supersedes
+      set({ compareStatus: "running", ...(isCurrent ? settleErrorsBehindDemoRequest("compare") : { simError: null }) });
       const stale = () => {
         if (seq !== compareSeq) return true; // a newer comparison owns compareStatus
         if (epoch !== simEpoch || (isCurrent && !isCurrent())) {
@@ -1640,7 +1685,10 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       const guard = { isCurrent: current };
       const i = Math.max(0, Math.min(stepIndex, script.steps.length - 1));
       const step = script.steps[i];
-      set({ demo: { active: true, step: i, busy: true } });
+      // A step that can run a simulation or a comparison clears the error toast at the click, like Run or
+      // Compare (the requests it makes, some only after waiting, settle only what they supersede).
+      const clearsToast = ["simulate", "cascade", "simulate_b", "compare", "ask_ai"].includes(step.action);
+      set({ demo: { active: true, step: i, busy: true }, ...(clearsToast ? { simError: null } : {}) });
       const st = get();
       const presetA = st.presets.find((p) => p.id === script.scenario_a_preset);
       const presetB = st.presets.find((p) => p.id === script.scenario_b_preset);
@@ -1678,6 +1726,8 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
             // question asked before it), whether that lands before or after the node details below,
             // but not against something started after it that took the map.
             const stepSeq = ++reqSeq;
+            /** Trace actions so far (as selectNode's follow-trace counts them from the click). */
+            const tracesAtStep = traceSeq;
             if (get().selectedNodeId !== focus) await get().selectNode(focus, { fly: true });
             if (!current()) return;
             // reached by a step chip from the compare step: the diff view would hide the trace (a diff
@@ -1685,6 +1735,15 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
             if (get().compareView === "diff" && displaySeq < stepSeq) set((s) => ({ compareView: viewOutsideDiff(s) }));
             // ...and a comparison started before the step that is still in flight lands without its diff
             viewSeq = Math.max(viewSeq, stepSeq);
+            {
+              // The step traces its focus as of the click: a trace requested, shown or hidden since (yours
+              // or an answer's), or another selection, is newer than the step and stays, whether it landed
+              // before the focus node's details or after. (The selection's own follow-trace of the focus,
+              // already landed, is the step's trace.)
+              const s = get();
+              const ownFollow = s.traceVisible && s.trace?.node_id === focus;
+              if (s.selectedNodeId !== focus || (traceSeq !== tracesAtStep && !ownFollow)) break;
+            }
             await get().showTrace(focus);
             break;
           }
@@ -1795,20 +1854,31 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
             break;
           case "compare": {
             // Fill the empty slots with the presets, then compare. First wait for everything requested
-            // before this step that can still write a slot, filled or empty: a run you requested that is
-            // still the newest request for slot A or B (an earlier step's own runs were cancelled when
-            // this step started), a streaming analyst answer (its slot writes) and a Compare in flight
-            // (it takes slots back). Then run a preset only into a slot still empty, and wait again after
-            // each of this step's runs (for any of those started meanwhile). Compare only once all of
-            // them have settled, so what the step runs and compares does not depend on the order the
-            // responses land in.
+            // before this step that can still write a slot, filled or empty, or take the map: a run you
+            // requested that is still the newest request for slot A or B (an earlier step's own runs were
+            // cancelled when this step started), your newest run while it can still take the map (the
+            // step's own runs would be newer and keep it off), a streaming analyst answer (its slot
+            // writes) and a Compare in flight (it takes slots back). Then run a preset only into a slot
+            // still empty, and wait again after each of this step's runs (for any of those started
+            // meanwhile). Compare only once all of them have settled, so what the step runs and compares,
+            // and what the map shows, does not depend on the order the responses land in.
             // (Exit, Reset, Restore world or another step ends each wait: each makes current() false, then
             // updates the store, which re-checks it. Stop / Clear chat end an answer's.)
             /** The newest request for slot k is a run still in flight. */
             const owed = (k: "A" | "B") => !!liveRuns.get(slotSeq[k])?.alive();
+            /**
+             * The newest run (a Run of yours too, not only Run as A / B) is still in flight and nothing
+             * requested after it took the map: it puts its result there when it lands, unless this step
+             * runs a preset first. (False for an earlier step's cancelled runs, and for this step's own
+             * once they have landed or failed.)
+             */
+            const mapOwed = () => simSeq > displaySeq && !!liveRuns.get(simSeq)?.alive();
             const unsettled = () =>
-              owed("A") || owed("B") || get().analystPending || get().compareStatus === "running";
-            /** Resolves once nothing can still write a slot: true, or false once this step is no longer current. */
+              owed("A") || owed("B") || mapOwed() || get().analystPending || get().compareStatus === "running";
+            /**
+             * Resolves once nothing can still write a slot or take the map: true, or false once this step is
+             * no longer current.
+             */
             const settled = async () => {
               if (unsettled()) await waitUntil(() => !current() || !unsettled());
               return current();

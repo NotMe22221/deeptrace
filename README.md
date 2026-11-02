@@ -299,9 +299,10 @@ state the presenter just cleared; exiting mid-reveal turns every layer back on. 
 reached in any order (step chips, ← →): a step that is about scenario A, such as the analyst
 question, puts A on screen first, and skips its question when A cannot be shown (its run failed,
 or a run, Compare or answer you started meanwhile took the map); it waits for a run or Compare you
-started after it to land or fail before it decides. The Compare step first waits for what can still change a slot (your runs, an answer still
-streaming, a Compare in flight) and runs its presets only into slots still empty; the Trace step
-keeps its trace on screen against a Compare started before it. Runs, comparisons and analyst
+started after it to land or fail before it decides. The Compare step first waits for what can still change a slot or the map (your runs, an answer
+still streaming, a Compare in flight) and runs its presets only into slots still empty; the Trace
+step keeps its trace on screen against a Compare started before it, and traces its component only
+if no trace or selection of yours or an answer's came after the click. Runs, comparisons and analyst
 questions share one timeline, and an analyst answer counts as asked when its question was sent.
 Nothing started before asking takes the map back from the answer when it lands later (an older
 slot run still fills its slot, and the analyst's comparison then shows "Slots changed since this

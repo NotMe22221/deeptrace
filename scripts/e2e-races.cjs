@@ -830,11 +830,12 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
       return (await fetch('http://localhost:8000/api/compare', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scenario_a: P('A-DS-FIVEPOINTS'), scenario_b: P('B-EDGEWOOD-DUCTBANK') }) })).json(); });
     const cmpAC = await S(async () => { const P = (id) => window.__deeptraceStore.getState().presets.find((x) => x.id === id).scenario;
       return (await fetch('http://localhost:8000/api/compare', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scenario_a: P('A-DS-FIVEPOINTS'), scenario_b: P('C-WATER-MAIN-DECATUR') }) })).json(); });
+    const traceTS13 = await S(async () => (await fetch('http://localhost:8000/api/trace/PWR-TS-SOUTH?max_depth=8')).json());
     const trace13 = await S(async () => (await fetch('http://localhost:8000/api/trace/PWR-DS-FIVEPOINTS?max_depth=8')).json());
     const act = {
       sim: (result, slot) => ({ kind: 'show_simulation', result, slot, node_ids: [], edge_ids: [] }),
       hl: (label) => ({ kind: 'highlight', node_ids: ['PWR-DS-FIVEPOINTS'], edge_ids: [], label, tone: 'info' }),
-      trace: () => ({ kind: 'show_trace', trace: trace13, node_ids: [], edge_ids: [] }),
+      trace: (trace = trace13) => ({ kind: 'show_trace', trace, node_ids: [], edge_ids: [] }),
       cmp: (comparison = cmpAB) => ({ kind: 'show_comparison', comparison, node_ids: [], edge_ids: [] }),
     };
     const start13 = async () => {
@@ -1052,6 +1053,42 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
       if (detailsFirst) { await H.land('n1'); await H.answer(2, [act.trace()]); } else { await H.answer(2, [act.trace()]); await H.land('n1'); }
       await sleep(400);
     }), (f) => f.traceOf === 'PWR-DS-FIVEPOINTS');
+    // The demo's Compare step also waits for your newest run while it can still take the map (its own
+    // preset runs would be newer and keep it off), so your run takes the map, and its failure shows,
+    // whichever lands first
+    const yoursThenCompareStep13 = async () => { await H.startDemo(); await H.run('r2', 'B', 'C-WATER-MAIN-DECATUR'); await H.run('r3', 'active', 'E-ROADS-FIVEPOINTS'); await H.demo(9); H.maybe('dA', '/api/simulate'); };
+    await pair13('R13 demo Compare step: your newest run takes the map whether it lands before or after your Run as B (the step\'s run for A then fails)', [false, true].map((bFirst) => async () => {
+      await yoursThenCompareStep13();
+      if (bFirst) { await H.land('r2'); await H.land('r3'); } else { await H.land('r3'); await H.land('r2'); }
+      await within(ops.dA.hit, 5000, 'the step\'s run for A'); await H.land('dA', 'engine 500'); await H.done(9);
+    }), (f) => f.map === 'R:E-ROADS-FIVEPOINTS' && f.A === null && f.B === 'C-WATER-MAIN-DECATUR' && f.cmp === null && f.cmpSt === 'error' && f.err === 'Run two scenarios (A and B) before comparing.' && !f.demoBusy);
+    await pair13('R13 demo Compare step: your newest run takes the map whether it lands before or after your Run as B (then Exit demo)', [false, true].map((bFirst) => async () => {
+      await yoursThenCompareStep13();
+      if (bFirst) { await H.land('r2'); await H.land('r3'); } else { await H.land('r3'); await H.land('r2'); }
+      await within(ops.dA.hit, 5000, 'the step\'s run for A'); await H.exitDemo(); await H.land('dA');
+    }), (f) => f.map === 'R:E-ROADS-FIVEPOINTS' && f.A === null && f.B === 'C-WATER-MAIN-DECATUR' && f.sim === 'idle' && f.err === null && !f.demoBusy);
+    await pair13('R13 demo Compare step: your newest run\'s failure shows whether it fails before or after your Run as B lands', [false, true].map((bFirst) => async () => {
+      await H.startDemo(); await H.ran('A', 'C-WATER-MAIN-DECATUR'); await H.run('r4', 'B', 'E-ROADS-FIVEPOINTS'); await H.run('r5', 'active', 'F-TS-SOUTH'); await H.demo(9);
+      if (bFirst) { await H.land('r4'); await H.land('r5', 'engine 500'); } else { await H.land('r5', 'engine 500'); await H.land('r4'); }
+      await H.done(9);
+    }), (f) => f.map === 'D:C-WATER-MAIN-DECATUR/E-ROADS-FIVEPOINTS' && f.sim === 'error' && f.cmpSt === 'idle' && f.err === 'engine 500' && !f.demoBusy);
+    // ...and its Trace step traces its focus only if no trace or selection came after the click
+    await pair13('R13 demo Trace step keeps your trace of another component, requested while the focus details load', [false, true].map((detailsFirst) => async () => {
+      await H.startDemo(); await H.demo(4, { n5: '/api/nodes/' }); await H.utrace('t3', 'PWR-TS-SOUTH');
+      if (detailsFirst) { await H.land('n5'); await H.land('t3'); } else { await H.land('t3'); await H.land('n5'); }
+      await H.done(4); await sleep(300);
+    }), (f) => f.traceOf === 'PWR-TS-SOUTH' && f.sel === 'PWR-TS-SOUTH' && f.err === null && !f.demoBusy);
+    await pair13('R13 demo Trace step keeps an earlier answer\'s trace that lands while the focus details load', [false, true].map((detailsFirst) => async () => {
+      await H.startDemo(); await H.ask(2); await H.demo(4, { n5: '/api/nodes/' });
+      if (detailsFirst) { await H.land('n5'); await H.answer(2, [act.trace(traceTS13)]); } else { await H.answer(2, [act.trace(traceTS13)]); await H.land('n5'); }
+      await H.done(4); await sleep(300);
+    }), (f) => f.traceOf === 'PWR-TS-SOUTH' && f.sel === 'PWR-DS-FIVEPOINTS' && f.err === null && !f.analyst && !f.demoBusy);
+    // ...and a demo step's request made after waiting settles only the failures it supersedes
+    await pair13('R13 demo Compare step waiting for an answer keeps your trace\'s failure whether it fails before or after the answer ends', [false, true].map((answerFirst) => async () => {
+      await H.startDemo(); await H.ran('A', 'C-WATER-MAIN-DECATUR'); await H.ran('B', 'E-ROADS-FIVEPOINTS'); await H.ask(6); await H.utrace('t7', 'PWR-TS-SOUTH'); await H.demo(9);
+      if (answerFirst) { await H.answer(6, []); await H.land('t7', 'engine 500'); } else { await H.land('t7', 'engine 500'); await H.answer(6, []); }
+      await H.done(9);
+    }), (f) => f.map === 'D:C-WATER-MAIN-DECATUR/E-ROADS-FIVEPOINTS' && f.cmpSt === 'idle' && f.err === 'Trace failed: engine 500' && !f.analyst && !f.demoBusy);
     // With several failed requests the toast reports the newest request's failure, whichever lands last.
     // An inspector trace sits on the request timeline after the requests made before it.
     await pair13('R13 Run as A and a newer Run both fail: the toast reports the newer Run in either landing order', orders13(
