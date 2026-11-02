@@ -241,8 +241,14 @@ export interface AnalystTurn {
    * and, for a recorded replay after a failover, the result the replay was matched for.
    */
   shown: SimulationResult[];
-  /** Results this answer produced (its simulations, and the slots holding what its comparisons compared). */
+  /** Results this answer's simulations produced (by identity, wherever they ended up). */
   own: WeakSet<SimulationResult>;
+  /**
+   * Scenarios this answer's comparisons compared. Any result of one of them is what the answer is
+   * about, whichever object of it a slot holds (an older run of the same scenario that lands after
+   * the comparison fills its slot as data and is no less what the comparison compared).
+   */
+  compared: ScenarioInput[];
 }
 
 // ---------------------------------------------------------------------------
@@ -404,8 +410,9 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
    */
   let displaySlotRun: { slot: "A" | "B"; result: SimulationResult } | null = null;
   /**
-   * Request number of the latest analyst answer whose trace is on the map. A comparison requested
-   * before it lands without taking the diff view over that trace.
+   * Where the latest trace put on the map sits on the request timeline: an analyst answer's (its
+   * question + 0.5) or the demo's trace step's (its own number). A comparison requested before it
+   * lands without taking the diff view over that trace.
    */
   let viewSeq = 0;
   /** Slot k holds an analyst answer's write (question + 0.5) for a question asked before request `seq`. */
@@ -685,9 +692,12 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
   const keepTurnHighlight = (h: Highlight | null, t: AnalystTurn) => (h && highlightTurn.get(h) === t ? h : null);
   /** The result each AI highlight was drawn on (the result it describes). */
   const highlightBase = new WeakMap<Highlight, SimulationResult | null>();
+  /** `r` is a result answer `t` produced: one of its simulations, or a result of a scenario it compared. */
+  const answerProduced = (t: AnalystTurn, r: SimulationResult) =>
+    t.own.has(r) || t.compared.some((sc) => sameScenario(sc, r.scenario));
   /** `r` is what answer `t` is about: the scenario it was asked about or showed, or a result it produced. */
   const answerDescribes = (t: AnalystTurn, r: SimulationResult) =>
-    t.own.has(r) || [t.asked, ...t.shown].some((x) => !!x && (x === r || sameScenario(x.scenario, r.scenario)));
+    answerProduced(t, r) || [t.asked, ...t.shown].some((x) => !!x && (x === r || sameScenario(x.scenario, r.scenario)));
   /**
    * A run takes the map. An analyst highlight from an answer to a question asked after this run was
    * requested stays while that answer describes the run's result (nothing started before asking takes
@@ -700,8 +710,8 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
   /**
    * The user switches the map from `prev` to `r` (a slot chip, Show A / Show B, the demo's replay of
    * A). A user highlight described `prev`; an analyst highlight still describes `r` only if it was
-   * drawn on that scenario or its answer produced `r`. Other highlights (search, demo) are not tied
-   * to a result.
+   * drawn on that scenario or its answer produced `r` (a simulation of its own, or a result of a
+   * scenario it compared). Other highlights (search, demo) are not tied to a result.
    */
   const highlightForView = (h: Highlight | null, prev: SimulationResult | null, r: SimulationResult) => {
     if (!h || r === prev) return h;
@@ -710,7 +720,7 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
     const base = highlightBase.get(h);
     if (base && sameScenario(base.scenario, r.scenario)) return h;
     const t = highlightTurn.get(h);
-    return t && t.own.has(r) ? h : null;
+    return t && answerProduced(t, r) ? h : null;
   };
 
   /**
@@ -1180,8 +1190,9 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
               A: newerSlot(startSlots.A, s.slots.A) && !olderAnswerWrite("A", seq),
               B: newerSlot(startSlots.B, s.slots.B) && !olderAnswerWrite("B", seq),
             },
-            // something requested after this Compare (a run, an analyst answer or its trace) already
-            // took the map: store the comparison, leave the map (and the shown result) alone
+            // something requested after this Compare (a run, an analyst answer, or a trace: an answer's
+            // or the demo's trace step's) already took the map: store the comparison, leave the map (and
+            // the shown result) alone
             seq < Math.max(displaySeq, viewSeq),
             heldOff,
           );
@@ -1190,9 +1201,10 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
           // described the result it replaced. (A run taking the map clears them the same way.)
           const nr = r.patch.result;
           const replaced = !!nr && !!s.result && nr !== s.result && !sameScenario(nr.scenario, s.result.scenario);
-          // Held back only by the trace of an answer to a question asked after this Compare (nothing
-          // requested after it took the map): landing before that trace it drew its diff and owned
-          // the map, and the trace only left the diff. It owns the map all the same.
+          // Held back only by a trace shown since (an answer's to a question asked after this Compare,
+          // or the demo's trace step's; nothing requested after it took the map): landing before that
+          // trace it drew its diff and owned the map, and the trace only left the diff. It owns the map
+          // all the same.
           const heldByTrace = seq > displaySeq && seq < viewSeq && r.wouldDraw;
           // The map now shows this comparison if it took the diff view, if the diff was already on
           // (it now draws this comparison), or if it moved the shown result: requests made before it
@@ -1284,7 +1296,7 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       const trimmed = text.trim();
       if (!trimmed || get().analystPending) return;
       const s0 = get();
-      const turn: AnalystTurn = { seq: reqSeq, slots: { ...s0.slots }, asked: s0.result, shown: [], own: new WeakSet() };
+      const turn: AnalystTurn = { seq: reqSeq, slots: { ...s0.slots }, asked: s0.result, shown: [], own: new WeakSet(), compared: [] };
       const history = s0.messages
         .filter((m) => !m.pending && !m.error && m.content)
         .slice(-10)
@@ -1411,7 +1423,7 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       set((s) => ({ messages: [], highlight: s.highlight?.source === "ai" ? null : s.highlight }));
     },
     applyUIAction: (a, turn) => {
-      const t: AnalystTurn = turn ?? { seq: reqSeq, slots: { ...get().slots }, asked: get().result, shown: [], own: new WeakSet() };
+      const t: AnalystTurn = turn ?? { seq: reqSeq, slots: { ...get().slots }, asked: get().result, shown: [], own: new WeakSet(), compared: [] };
       /** Where this answer sits on the request timeline: after its question, before anything later. */
       const at = t.seq + 0.5;
       /** Nothing started after the question has taken the map yet (one still in flight replaces this when it lands). */
@@ -1539,7 +1551,10 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
               latestCompareGuard = undefined;
               retracted = retractErrors((e) => e.kind === "compare" && e.seq === old);
             }
-            const show = mayShow();
+            // The demo's trace step, reached after asking, holds the map for its trace (see demoGoto):
+            // this comparison then lands without its diff view. (An answer's own trace is at `at`.)
+            const traceHold = viewSeq > at;
+            const show = mayShow() && !traceHold;
             let owns = false;
             set((s) => {
               const r = adoptComparison(
@@ -1556,10 +1571,11 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
               const replaced = !!nr && !!s.result && nr !== s.result && !sameScenario(nr.scenario, s.result.scenario);
               // the map now shows this answer's comparison (its diff, or a result it moved)
               owns = show && (r.tookView || s.compareView === "diff" || replaced);
-              // the slots holding what it compared are this answer's results too
-              const ps = r.patch.slots;
-              if (ps?.A && sameScenario(ps.A.scenario, c.scenario_a.scenario)) t.own.add(ps.A);
-              if (ps?.B && sameScenario(ps.B.scenario, c.scenario_b.scenario)) t.own.add(ps.B);
+              // Held back only by that trace: landing before the step's trace, this comparison drew its
+              // diff and owned the map, and the step only left the diff. It owns the map all the same.
+              if (traceHold && mayShow()) owns = true;
+              // the scenarios it compared are this answer's results too (whichever object a slot holds)
+              t.compared.push(c.scenario_a.scenario, c.scenario_b.scenario);
               if (show && nr && nr !== s.result) t.shown.push(nr);
               // ...and, like a Compare that takes the map, it replaces an earlier answer's highlight
               // (one question streams at a time: another answer's highlight was asked before this one)
@@ -1652,13 +1668,22 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
             if (!get().deepMode) get().setDeepMode(true);
             await get().selectNode(focus, { fly: true });
             break;
-          case "trace":
+          case "trace": {
+            // The step has its own place on the request timeline (like the Ask the AI step): its trace
+            // holds the map against a comparison started before it (yours, or an analyst answer's to a
+            // question asked before it), whether that lands before or after the node details below,
+            // but not against something started after it that took the map.
+            const stepSeq = ++reqSeq;
             if (get().selectedNodeId !== focus) await get().selectNode(focus, { fly: true });
             if (!current()) return;
-            // reached by a step chip from the compare step: the diff view would hide the trace
-            if (get().compareView === "diff") set((s) => ({ compareView: viewOutsideDiff(s) }));
+            // reached by a step chip from the compare step: the diff view would hide the trace (a diff
+            // drawn by a comparison started after this step stays)
+            if (get().compareView === "diff" && displaySeq < stepSeq) set((s) => ({ compareView: viewOutsideDiff(s) }));
+            // ...and a comparison started before the step that is still in flight lands without its diff
+            viewSeq = Math.max(viewSeq, stepSeq);
             await get().showTrace(focus);
             break;
+          }
           case "simulate":
           case "cascade": {
             if (presetA) {
@@ -1691,21 +1716,28 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
             // only). Reached by Prev (after simulate_b) or a step chip, put A on screen first.
             // The step has its own place on the request timeline: it takes the map back from an answer
             // to a question asked before it (see the wait below), but not from something started after
-            // it that took the map (your run or Compare, or an answer to a question asked meanwhile).
+            // it that took the map (your run or Compare, or an answer to a question asked meanwhile),
+            // nor from a run started after it that is still in flight (it replaces A when it lands).
             const stepSeq = ++reqSeq;
             /** Request numbers of this step's own runs for A. */
             const ownRuns = new Set<number>();
-            const startedLaterTookMap = () => displaySeq > stepSeq && !ownRuns.has(displaySeq);
+            /** Something started after this step took the map, or a run started after it is still in flight. */
+            const yieldsToLater = () =>
+              (displaySeq > stepSeq && !ownRuns.has(displaySeq)) ||
+              (simSeq > stepSeq && !ownRuns.has(simSeq) && !!liveRuns.get(simSeq)?.alive());
             /** Scenario A is what the map shows (not under the A/B diff). */
             const aShown = () => {
               const { result: r, compareView } = get();
               return !presetA || (!!r && sameScenario(r.scenario, presetA.scenario) && compareView !== "diff");
             };
+            /** The step ran A once already: a run of its own that failed (or lost slot A) is not run again. */
+            let ranA = false;
             const showA = async () => {
-              if (!presetA || aShown() || startedLaterTookMap()) return;
+              if (!presetA || aShown() || yieldsToLater()) return;
               const existing = get().slots.A;
               if (existing && sameScenario(existing.scenario, presetA.scenario)) get().showSlot("A");
-              else {
+              else if (!ranA) {
+                ranA = true;
                 get().hideTrace();
                 const before = reqSeq;
                 const ran = get().runSimulation(presetA.scenario, "A", guard);
@@ -1715,13 +1747,18 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
             };
             // sendAnalystMessage ignores calls while another answer is streaming: wait for it instead
             // of silently skipping the scripted question. That answer (asked earlier) may put another
-            // result on the map, so A is put back on screen once it is done.
+            // result on the map, so A is put back on screen once it is done. The step's own run may land
+            // in slot A without taking the map (a run you started after it was newer and has failed
+            // since): A is then shown from its slot too, whether or not the step had to wait, so the
+            // decision does not depend on whether that run landed before or after the answer ended.
             for (;;) {
+              const ranBefore: boolean = ranA;
               await showA();
               if (!current()) return;
-              if (!get().analystPending) break;
-              await waitUntil(() => !get().analystPending || !current());
-              if (!current()) return;
+              if (get().analystPending) {
+                await waitUntil(() => !get().analystPending || !current());
+                if (!current()) return;
+              } else if (ranA === ranBefore) break; // A is on screen now, or this step will not put it there
             }
             // A is not on screen (its run failed or a newer run you requested replaces it, or something
             // started after this step took the map): the question is about A, so it is not asked.
@@ -1739,27 +1776,31 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
             }
             break;
           case "compare": {
-            // Fill the empty slots with the presets, then compare. An empty slot whose newest request is
-            // a run still in flight (yours, or one that superseded this step's own run for it) is about
-            // to be filled: wait for that run instead of running the preset over it, and run the preset
-            // only if the slot is still empty once that run has settled. Compare only once no empty slot
-            // is still owed to a live run, so the outcome does not depend on the order the runs land in.
+            // Fill the empty slots with the presets, then compare. First wait for everything requested
+            // before this step that can still write a slot, filled or empty: a run you requested that is
+            // still the newest request for slot A or B (an earlier step's own runs were cancelled when
+            // this step started), a streaming analyst answer (its slot writes) and a Compare in flight
+            // (it takes slots back). Then run a preset only into a slot still empty, and wait again after
+            // each of this step's runs (for any of those started meanwhile). Compare only once all of
+            // them have settled, so what the step runs and compares does not depend on the order the
+            // responses land in.
             // (Exit, Reset, Restore world or another step ends each wait: each makes current() false, then
-            // updates the store, which re-checks it.)
-            /** Slot k is empty and its newest request is a run still in flight. */
-            const owed = (k: "A" | "B") => !get().slots[k] && !!liveRuns.get(slotSeq[k])?.alive();
-            const fill = async (k: "A" | "B", preset: ScenarioPreset | undefined) => {
-              if (owed(k)) await waitUntil(() => !current() || !owed(k));
-              if (!current()) return;
-              if (!get().slots[k] && preset) await get().runSimulation(preset.scenario, k, guard);
+            // updates the store, which re-checks it. Stop / Clear chat end an answer's.)
+            /** The newest request for slot k is a run still in flight. */
+            const owed = (k: "A" | "B") => !!liveRuns.get(slotSeq[k])?.alive();
+            const unsettled = () =>
+              owed("A") || owed("B") || get().analystPending || get().compareStatus === "running";
+            /** Resolves once nothing can still write a slot: true, or false once this step is no longer current. */
+            const settled = async () => {
+              if (unsettled()) await waitUntil(() => !current() || !unsettled());
+              return current();
             };
-            await fill("A", presetA);
-            if (!current()) return;
-            await fill("B", presetB);
-            if (!current()) return;
-            // a run you requested for a slot while this step's own run for it was in flight
-            if (owed("A") || owed("B")) await waitUntil(() => !current() || (!owed("A") && !owed("B")));
-            if (!current()) return;
+            if (!(await settled())) return;
+            for (const [k, preset] of [["A", presetA], ["B", presetB]] as const) {
+              if (get().slots[k] || !preset) continue;
+              await get().runSimulation(preset.scenario, k, guard);
+              if (!(await settled())) return;
+            }
             await get().runComparison(undefined, undefined, guard);
             break;
           }

@@ -800,8 +800,11 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
         for (const g of gs) await within(g.hit, 5000, 'demo step ' + step);
         await sleep(60);
       },
-      done: (step) => S((step) => window.__ops['demo' + step], step),
+      /** the demo step has finished */
+      done: (step) => within(S((step) => window.__ops['demo' + step], step), 30000, 'demo step ' + step + ' to finish'),
       async exitDemo() { await S(() => window.__deeptraceStore.getState().exitDemo()); await sleep(60); },
+      /** a run into `slot` that has already landed */
+      async ran(slot, preset) { await S(async ([slot, preset]) => { const s = window.__deeptraceStore.getState(); await s.runSimulation(s.presets.find((x) => x.id === preset).scenario, slot === 'active' ? undefined : slot); }, [slot, preset]); },
       /** A and B already landed */
       async ab() { await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK'); },
     };
@@ -809,12 +812,14 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
       return (await fetch('http://localhost:8000/api/simulate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(sc) })).json(); });
     const cmpAB = await S(async () => { const P = (id) => window.__deeptraceStore.getState().presets.find((x) => x.id === id).scenario;
       return (await fetch('http://localhost:8000/api/compare', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scenario_a: P('A-DS-FIVEPOINTS'), scenario_b: P('B-EDGEWOOD-DUCTBANK') }) })).json(); });
+    const cmpAC = await S(async () => { const P = (id) => window.__deeptraceStore.getState().presets.find((x) => x.id === id).scenario;
+      return (await fetch('http://localhost:8000/api/compare', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scenario_a: P('A-DS-FIVEPOINTS'), scenario_b: P('C-WATER-MAIN-DECATUR') }) })).json(); });
     const trace13 = await S(async () => (await fetch('http://localhost:8000/api/trace/PWR-DS-FIVEPOINTS?max_depth=8')).json());
     const act = {
       sim: (result, slot) => ({ kind: 'show_simulation', result, slot, node_ids: [], edge_ids: [] }),
       hl: (label) => ({ kind: 'highlight', node_ids: ['PWR-DS-FIVEPOINTS'], edge_ids: [], label, tone: 'info' }),
       trace: () => ({ kind: 'show_trace', trace: trace13, node_ids: [], edge_ids: [] }),
-      cmp: () => ({ kind: 'show_comparison', comparison: cmpAB, node_ids: [], edge_ids: [] }),
+      cmp: (comparison = cmpAB) => ({ kind: 'show_comparison', comparison, node_ids: [], edge_ids: [] }),
     };
     const start13 = async () => {
       await reset();
@@ -938,11 +943,11 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
     ), (f) => f.err === null && f.sel === null && f.traceOf === null);
     // The demo's Compare step waits for a run you requested for an empty slot instead of running the
     // demo's preset over it, so it compares the same scenarios whichever lands first
-    await pair13('R13 demo Compare step waits for your Run as B still in flight (either landing order)', [false, true].map((stepFirst) => async () => {
-      await H.startDemo(); await H.run('r2', 'B', 'C-WATER-MAIN-DECATUR'); await H.demo(9, { dA: '/api/simulate' });
-      if (stepFirst) { await H.land('dA'); await H.land('r2'); } else { await H.land('r2'); await H.land('dA'); }
-      await H.done(9);
-    }), (f) => f.map === 'D:A-DS-FIVEPOINTS/C-WATER-MAIN-DECATUR' && f.B === 'C-WATER-MAIN-DECATUR' && f.err === null && !f.demoBusy);
+    // (it waits for everything requested before it that can still write a slot, so its own runs start
+    // only after yours have landed)
+    await single13('R13 demo Compare step waits for your Run as B still in flight and compares it',
+      async () => { await H.startDemo(); await H.run('r2', 'B', 'C-WATER-MAIN-DECATUR'); await H.demo(9); await sleep(300); await H.land('r2'); await H.done(9); },
+      (f) => f.map === 'D:A-DS-FIVEPOINTS/C-WATER-MAIN-DECATUR' && f.B === 'C-WATER-MAIN-DECATUR' && f.err === null && !f.demoBusy);
     await pair13('R13 demo Compare step waits for a newer Run as B that replaced its own run for B (either landing order)', [false, true].map((stepFirst) => async () => {
       await H.startDemo(); await H.demo(9, { dA: '/api/simulate' }); const dB = (ops.dB = gate('/api/simulate')); await H.land('dA'); await within(dB.hit, 5000, 'demo run for B');
       await H.run('r3', 'active', 'F-TS-SOUTH'); await H.land('r3'); await H.run('r4', 'B', 'C-WATER-MAIN-DECATUR');
@@ -954,9 +959,45 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
       await H.ab(); await H.cmp('c1'); if (beforeDemo) await H.land('c1', 'engine 500');
       await H.startDemo(); if (!beforeDemo) await H.land('c1', 'engine 500');
       await S(async () => { const s = window.__deeptraceStore.getState(); await s.runSimulation(s.presets.find((x) => x.id === 'E-ROADS-FIVEPOINTS').scenario, 'A'); });
-      await H.ask(5); await H.demo(9, { dB: '/api/simulate' }); await H.land('dB', 'engine 500'); await H.done(9);
-      await H.answer(5, [act.cmp()]);
+      await H.demo(9, { dB: '/api/simulate' }); await H.land('dB', 'engine 500'); await H.done(9);
+      await H.ask(5); await H.answer(5, [act.cmp()]);
     }), (f) => f.cmpSt === 'error' && f.err === 'Run two scenarios (A and B) before comparing.');
+    // The demo's Compare step compares the same scenarios whichever lands first: a run you started for a
+    // slot it already holds, or an answer's write to the slot its own run was filling
+    await single13('R13 demo Compare step waits for your Run as A into a filled slot and compares it',
+      async () => { await H.startDemo(); await H.demo(5, { dA: '/api/simulate' }); await H.land('dA'); await H.done(5);
+        await H.run('r3', 'A', 'C-WATER-MAIN-DECATUR'); await H.demo(9); await sleep(300); await H.land('r3'); await H.done(9); },
+      (f) => f.map === 'D:C-WATER-MAIN-DECATUR/B-EDGEWOOD-DUCTBANK' && f.A === 'C-WATER-MAIN-DECATUR' && f.err === null && !f.demoBusy);
+    await single13('R13 demo Compare step waits for a streaming answer that writes slot B and compares it',
+      async () => { await H.startDemo(); await H.demo(5, { dA: '/api/simulate' }); await H.land('dA'); await H.done(5);
+        await H.ask(6); await H.demo(9); await sleep(300); await H.answer(6, [act.sim(rTel13, 'B')]); await H.done(9); },
+      (f) => f.map === 'D:A-DS-FIVEPOINTS/D-TELECOM-56MARIETTA' && f.B === 'D-TELECOM-56MARIETTA' && f.cmpSt === 'idle' && f.err === null && !f.demoBusy);
+    // ...and its Ask the AI step decides whether to ask the same way whether its run for A lands before
+    // or after an earlier answer ends
+    await pair13('R13 demo Ask the AI decides the same way when its run for A lands before or after an earlier answer ends', [false, true].map((runFirst) => async () => {
+      await H.startDemo(); await H.ask(2); await H.demo(7, { dA: '/api/simulate' }); await H.run('r4', 'active', 'E-ROADS-FIVEPOINTS');
+      if (runFirst) { await H.land('dA'); await H.answer(2, []); } else { await H.answer(2, []); await H.land('dA'); }
+      await H.land('r4'); await H.done(7);
+    }), (f) => f.map === 'R:E-ROADS-FIVEPOINTS' && !f.demoBusy);
+    // ...and its Trace step keeps the trace on screen whether an earlier Compare lands before or after it
+    await pair13('R13 demo Trace step keeps its trace when an earlier Compare lands before or after its node details', [false, true].map((cmpFirst) => async () => {
+      await H.startDemo(); await H.ran('A', 'E-ROADS-FIVEPOINTS'); await H.ran('B', 'C-WATER-MAIN-DECATUR'); await H.cmp('c4'); await H.demo(4, { n5: '/api/nodes/' });
+      if (cmpFirst) { await H.land('c4'); await H.land('n5'); } else { await H.land('n5'); await H.land('c4'); }
+      await H.done(4);
+    }), (f) => f.trace && f.traceOf === 'PWR-DS-FIVEPOINTS' && !f.demoBusy);
+    await pair13('R13 demo Trace step keeps its trace when an earlier answer\'s comparison lands before or after its node details', [false, true].map((answerFirst) => async () => {
+      await H.startDemo(); await H.ran('A', 'A-DS-FIVEPOINTS'); await H.ran('B', 'B-EDGEWOOD-DUCTBANK'); await H.ask(4); await H.demo(4, { n5: '/api/nodes/' });
+      if (answerFirst) { await H.answer(4, [act.cmp()]); await H.land('n5'); } else { await H.land('n5'); await H.answer(4, [act.cmp()]); }
+      await H.done(4);
+    }), (f) => f.trace && f.traceOf === 'PWR-DS-FIVEPOINTS' && !f.demoBusy);
+    // An answer's highlight is kept on a slot holding the scenario it compared, whichever object of that
+    // scenario the slot holds (an older run of it landing before or after the answer's comparison)
+    await pair13('R13 an answer\'s highlight follows its compared scenario to a slot whichever run of it the slot holds', [false, true].map((runFirst) => async () => {
+      await H.ran('B', 'C-WATER-MAIN-DECATUR'); await H.run('r2', 'A', 'A-DS-FIVEPOINTS'); await H.ask(3);
+      const answer = () => H.answer(3, [act.sim(rTel13, 'active'), act.cmp(cmpAC), act.hl('L6')]);
+      if (runFirst) { await H.land('r2'); await answer(); } else { await answer(); await H.land('r2'); }
+      await S(() => window.__deeptraceStore.getState().showSlot('A')); await sleep(60);
+    }));
     // With several failed requests the toast reports the newest request's failure, whichever lands last.
     // An inspector trace sits on the request timeline after the requests made before it.
     await pair13('R13 Run as A and a newer Run both fail: the toast reports the newer Run in either landing order', orders13(
