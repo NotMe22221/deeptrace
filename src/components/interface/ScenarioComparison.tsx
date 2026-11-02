@@ -8,7 +8,7 @@ import { SCENARIO_TYPE_LABELS, connectionLabel } from "@/lib/systems";
 import type { ComparisonMetric, ScenarioInput, SimulationResult } from "@/types/infrastructure";
 import { closePanel, focusAny, focusNode, openPanel } from "./actions";
 import { severityColor } from "./SimulationResults";
-import { Button, cx, IconButton, SectionLabel, SystemDot } from "./ui";
+import { Button, cx, IconButton, SectionLabel, SystemDot, useFocusFallback } from "./ui";
 
 const sortedKey = (ids: string[]) => [...ids].sort().join("|");
 
@@ -210,6 +210,13 @@ export function ScenarioComparison() {
   const runComparison = useStore((s) => s.runComparison);
   const compareStatus = useStore((s) => s.compareStatus);
   const index = useStore((s) => s.index);
+  // "Compare A vs B" (the empty state) and the stale banner's "Re-run" go away when their comparison
+  // lands: keep focus on the map view the comparison shows (or Close)
+  const rootRef = useFocusFallback<HTMLDivElement>(
+    (root) =>
+      root.querySelector<HTMLElement>('[aria-label="Map view"] [aria-checked="true"]') ??
+      root.querySelector<HTMLElement>('[aria-label="Close comparison"]'),
+  );
 
   // A slot is stale when it now holds a different scenario than the one compared: different
   // failure targets, horizon or restoration (scenario ids alone can be reused by presets).
@@ -223,7 +230,7 @@ export function ScenarioComparison() {
         !sameScenario(slots.B.scenario, comparison.scenario_b.scenario)));
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
       <div className="flex h-11 shrink-0 items-center gap-2.5 border-b border-white/[0.07] pr-1.5 pl-3.5">
         <GitCompareArrows className="size-4 text-ink-300" />
         <div className="min-w-0 flex-1">

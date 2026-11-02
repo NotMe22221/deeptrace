@@ -20,9 +20,9 @@ import { useMemo } from "react";
 import { useStore } from "@/lib/store";
 import { connectionLabel, SCENARIO_TYPE_LABELS, SYSTEM_STYLES } from "@/lib/systems";
 import type { ScenarioPreset, ScenarioType, SimulationResult } from "@/types/infrastructure";
-import { closePanel, focusAny, openPanel, restoreWorld, runPreset, toggleDraftTarget } from "./actions";
+import { closePanel, focusAny, openPanel, restoreWorld, runPreset, surfacePanel, toggleDraftTarget } from "./actions";
 import { CascadeTimeline, PlaybackControls, ResultDetails, ResultOverview, severityColor } from "./SimulationResults";
-import { Button, cx, IconButton, SectionLabel, Slider, Spinner, Switch, SystemDot, Tooltip } from "./ui";
+import { Button, cx, IconButton, SectionLabel, Slider, Spinner, Switch, SystemDot, Tooltip, useFocusFallback } from "./ui";
 import { useUI } from "./uiStore";
 
 const TYPE_TABS: { type: ScenarioType; label: string; Icon: LucideIcon; color: string }[] = [
@@ -110,7 +110,7 @@ function SlotChips() {
           loading={compareStatus === "running"}
           onClick={async () => {
             const c = await runComparison();
-            if (c) openPanel("comparison");
+            if (c) surfacePanel("comparison");
           }}
         >
           Compare
@@ -185,7 +185,7 @@ function PresetCard({ p }: { p: ScenarioPreset }) {
         <Button
           size="xs"
           variant="outline"
-          disabled={busy}
+          busy={busy}
           onClick={() => void runPreset(p.id, "A")}
           aria-label={`Run ${p.name} as scenario A`}
         >
@@ -194,7 +194,7 @@ function PresetCard({ p }: { p: ScenarioPreset }) {
         <Button
           size="xs"
           variant="outline"
-          disabled={busy}
+          busy={busy}
           onClick={() => void runPreset(p.id, "B")}
           aria-label={`Run ${p.name} as scenario B`}
         >
@@ -204,7 +204,7 @@ function PresetCard({ p }: { p: ScenarioPreset }) {
           size="xs"
           variant="primary"
           icon={<Play className="size-3" />}
-          disabled={busy}
+          busy={busy}
           onClick={() => void runPreset(p.id, "active")}
         >
           Run
@@ -404,10 +404,10 @@ function DraftBuilder() {
         >
           Run
         </Button>
-        <Button size="sm" variant="outline" disabled={empty || busy} onClick={() => run("A")}>
+        <Button size="sm" variant="outline" disabled={empty} busy={busy} onClick={() => run("A")}>
           Run as A
         </Button>
-        <Button size="sm" variant="outline" disabled={empty || busy} onClick={() => run("B")}>
+        <Button size="sm" variant="outline" disabled={empty} busy={busy} onClick={() => run("B")}>
           Run as B
         </Button>
       </div>
@@ -431,6 +431,10 @@ export function SimulationPanel({ narrow }: { narrow?: boolean }) {
   const scenarioTab = useScenarioTab();
   const slot = useSlotOf(result);
   const effectiveTab = result ? tab : "build";
+  // a run that lands swaps the Scenarios tab (and its Run buttons) for Results: keep focus on the tabs
+  const rootRef = useFocusFallback<HTMLElement>((root) =>
+    root.querySelector<HTMLElement>('[aria-label="Simulation view"] [aria-selected="true"]'),
+  );
 
   if (!open) {
     return (
@@ -492,6 +496,7 @@ export function SimulationPanel({ narrow }: { narrow?: boolean }) {
   return (
     <motion.section
       key="sim-open"
+      ref={rootRef}
       aria-label="Simulation center"
       initial={{ opacity: 0, y: 16 }}
       animate={{ opacity: 1, y: 0 }}

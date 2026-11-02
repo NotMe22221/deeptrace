@@ -8,7 +8,8 @@ import { renderMarkdown } from "@/lib/markdown";
 import { SYSTEM_STYLES } from "@/lib/systems";
 import { closePanel, focusEdge, focusNode } from "./actions";
 import { prettyModel } from "./MainToolbar";
-import { cx, IconButton, Spinner, SystemDot, Tooltip } from "./ui";
+import { useUI } from "./uiStore";
+import { cx, IconButton, Spinner, SystemDot, Tooltip, useFocusFallback } from "./ui";
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -221,9 +222,13 @@ export function AIAnalyst() {
   const selectedName = useStore((s) => (s.selectedNodeId ? s.index?.nodes.get(s.selectedNodeId)?.name : null));
   const re = useIdMatcher(index);
   const suggestions = useSuggestions();
-  const [text, setText] = useState("");
+  const text = useUI((s) => s.analystDraft);
+  const setText = useUI((s) => s.setAnalystDraft);
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  // Stop is swapped for Send when the answer ends, Clear is disabled once the chat is empty and a
+  // suggestion goes away once asked: keep keyboard focus in the analyst, on the question box
+  const rootRef = useFocusFallback<HTMLDivElement>(() => taRef.current);
 
   const live = dataMode === "live";
   const last = messages[messages.length - 1];
@@ -272,7 +277,7 @@ export function AIAnalyst() {
   );
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
       <div className="flex h-11 shrink-0 items-center gap-2.5 border-b border-white/[0.07] pr-1.5 pl-3.5">
         <Bot className="size-4 text-ink-300" />
         <div className="min-w-0 flex-1">

@@ -16,7 +16,7 @@ import {
   Waypoints,
   type LucideIcon,
 } from "lucide-react";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useIsPresent } from "framer-motion";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "@/lib/store";
 import { LAYER_ORDER, SCENARIO_TYPE_LABELS, SYSTEM_STYLES, typeLabel } from "@/lib/systems";
@@ -212,12 +212,38 @@ function PaletteDialog() {
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  // false while AnimatePresence plays the exit animation (the palette is already closed then)
+  const isPresent = useIsPresent();
 
   const close = () => closePanel("search");
 
+  // Modal focus: on open (also when reopened during the exit animation) focus the search field and
+  // remember the control that had keyboard focus; while open keep focus inside the dialog; once it
+  // closes (Esc, Ctrl/Cmd+K, a chosen command, a backdrop click) give focus back to that control,
+  // unless the command moved focus somewhere on purpose. A control focused by a pointer press is not
+  // handed focus back (as with the highlight chip), so Space still plays and no focus ring appears.
   useEffect(() => {
+    if (!isPresent) return;
+    const dialog = dialogRef.current;
+    const prev = document.activeElement;
+    const opener =
+      prev instanceof HTMLElement && prev !== document.body && !dialog?.contains(prev) && prev.matches(":focus-visible")
+        ? prev
+        : null;
     inputRef.current?.focus();
-  }, []);
+    const keepInside = (e: FocusEvent) => {
+      if (!useStore.getState().panels.search) return; // closing: a chosen command may move focus
+      if (dialog && e.target instanceof Node && !dialog.contains(e.target)) inputRef.current?.focus();
+    };
+    document.addEventListener("focusin", keepInside);
+    return () => {
+      document.removeEventListener("focusin", keepInside);
+      const now = document.activeElement;
+      if (opener?.isConnected && (!now || now === document.body || dialog?.contains(now)))
+        opener.focus({ preventScroll: true });
+    };
+  }, [isPresent]);
 
   const items: Item[] = useMemo(() => {
     const nodes = network?.nodes ?? [];
@@ -286,8 +312,16 @@ function PaletteDialog() {
       }}
     >
       <motion.div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
+        onKeyDown={(e) => {
+          // aria-modal: Tab / Shift+Tab stay in the palette (the list is driven from the field).
+          if (e.key === "Tab") {
+            e.preventDefault();
+            inputRef.current?.focus();
+          }
+        }}
         aria-label="Search components and commands"
         initial={{ opacity: 0, y: -8, scale: 0.985 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}

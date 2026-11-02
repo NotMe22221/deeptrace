@@ -70,9 +70,10 @@ export function HighlightChip() {
                 // (Pointer tracking, not e.detail: some screen readers send clicks with detail 1.)
                 const keyboard = document.activeElement === e.currentTarget && !pointerPress.current;
                 pointerPress.current = false;
-                leaveDiff();
+                leaveDiff({ showHighlight: true });
                 const root = rootRef.current;
-                if (keyboard && root) {
+                // (an analyst highlight that describes no result left to show is dropped: the chip goes)
+                if (keyboard && root && useStore.getState().highlight) {
                   root.tabIndex = -1;
                   root.focus();
                 }

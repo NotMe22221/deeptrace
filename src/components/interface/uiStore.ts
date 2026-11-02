@@ -4,6 +4,7 @@
  * Kept out of the main store because nothing in the 3D world depends on it.
  */
 import { create } from "zustand";
+import { isTypingTarget } from "@/lib/format";
 import type { ScenarioType } from "@/types/infrastructure";
 
 export type RightPanel = "inspector" | "analyst" | "comparison" | "provenance";
@@ -25,7 +26,23 @@ interface UIState {
   simTab: "build" | "results";
   /** Scenario-type tab in the simulation library (null = follow the draft). */
   scenarioTab: ScenarioType | null;
+  /**
+   * The unsent analyst question. Kept here, not in the analyst's component state, so it survives the
+   * analyst panel unmounting while another right panel is in front.
+   */
+  analystDraft: string;
+  /** Right panels that came forward behind a field the user was typing in (a dot on their tab). */
+  rightAttention: RightPanel[];
+  /** A click or key: bring the panel to the front. */
   focusRight: (p: RightPanel) => void;
+  /**
+   * Something that landed (a comparison, a demo step) brings its panel forward. While the user is typing
+   * in a field of the front right panel, that panel keeps the front and its field keeps keyboard focus
+   * (unmounting it would drop focus to <body> and send the next keys to the single-key shortcuts); the
+   * new panel goes right behind it with a dot on its tab.
+   */
+  surfaceRight: (p: RightPanel) => void;
+  setAnalystDraft: (v: string) => void;
   setShortcutsOpen: (v: boolean) => void;
   pushToast: (t: Omit<Toast, "id">, ttlMs?: number) => void;
   dismissToast: (id: string) => void;
@@ -43,7 +60,24 @@ export const useUI = create<UIState>((set, get) => ({
   deepFx: 0,
   simTab: "build",
   scenarioTab: null,
-  focusRight: (p) => set((s) => ({ rightOrder: [...s.rightOrder.filter((x) => x !== p), p] })),
+  analystDraft: "",
+  rightAttention: [],
+  focusRight: (p) =>
+    set((s) => ({
+      rightOrder: [...s.rightOrder.filter((x) => x !== p), p],
+      rightAttention: s.rightAttention.filter((x) => x !== p),
+    })),
+  surfaceRight: (p) => {
+    const a = typeof document === "undefined" ? null : document.activeElement;
+    const typingIn = a && isTypingTarget(a) ? (a.closest("[data-right-panel]")?.getAttribute("data-right-panel") ?? null) : null;
+    if (!typingIn || typingIn === p) return get().focusRight(p);
+    const keep = typingIn as RightPanel;
+    set((s) => ({
+      rightOrder: [...s.rightOrder.filter((x) => x !== p && x !== keep), p, keep],
+      rightAttention: s.rightAttention.includes(p) ? s.rightAttention : [...s.rightAttention, p],
+    }));
+  },
+  setAnalystDraft: (v) => set({ analystDraft: v }),
   setShortcutsOpen: (v) => set({ shortcutsOpen: v }),
   pushToast: (t, ttlMs = 3200) => {
     const id = `t${++toastSeq}`;

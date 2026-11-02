@@ -5,7 +5,7 @@
  */
 import { emptyScenario } from "@/lib/api";
 import { SCENARIO_FOR_SYSTEM } from "@/lib/format";
-import { useStore, viewOutsideDiff, type PanelKey } from "@/lib/store";
+import { useStore, type PanelKey } from "@/lib/store";
 import { connectionLabel } from "@/lib/systems";
 import { world } from "@/engine/worldBridge";
 import { useUI, type RightPanel } from "./uiStore";
@@ -32,6 +32,12 @@ export function openPanel(key: PanelKey) {
   if (SHEETS.includes(key) && rightSheetCovers()) for (const k of RIGHT) if (S().panels[k]) S().setPanel(k, false);
   S().setPanel(key, true);
   if (RIGHT.includes(key)) useUI.getState().focusRight(key as RightPanel);
+}
+
+/** Open a right panel for something that landed rather than a click (see surfaceRight). */
+export function surfacePanel(key: RightPanel) {
+  S().setPanel(key, true);
+  useUI.getState().surfaceRight(key);
 }
 
 export function closePanel(key: PanelKey) {
@@ -110,12 +116,12 @@ export async function simulateEdgeFailure(id: string) {
  * The A/B diff view draws neither cascade playback, highlights nor traces. When the user drives
  * playback, turns on a highlight or traces a component while the map shows the diff, switch the
  * map to the slot that holds `result` (matched by identity or scenario id) without touching
- * result, playback, highlight or trace.
+ * result, playback or trace. An analyst highlight about its own comparison stays only if its answer
+ * describes `result`; the highlight chip's "show" (`showHighlight`) shows it on a slot of a scenario
+ * that answer compared instead (see the store's leaveDiff).
  */
-export function leaveDiff() {
-  const s = S();
-  if (s.compareView !== "diff") return;
-  useStore.setState({ compareView: viewOutsideDiff(s) });
+export function leaveDiff(opts?: { showHighlight?: boolean }) {
+  S().leaveDiff(opts);
 }
 
 /**

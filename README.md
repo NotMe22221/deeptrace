@@ -294,32 +294,48 @@ deterministic simulations, so it plays out identically every time. It makes no e
 API calls apart from optional Cesium streaming and the optional LLM. If the backend fails
 mid-presentation, the app switches to the precomputed snapshot on the next engine call.
 Every async step is cancellable: **Exit demo**, **Reset demo** and **Restore world** stop the
-step, simulation, trace or analyst answer in flight, so a slow response can never re-apply
-state the presenter just cleared; exiting mid-reveal turns every layer back on. Steps can be
-reached in any order (step chips, ← →): a step that is about scenario A, such as the analyst
-question, puts A on screen first, and skips its question when A cannot be shown (its run failed,
-or a run, Compare or answer you started meanwhile took the map); it waits for a run or Compare you
-started after it to land or fail before it decides. The Compare step first waits for what can still change a slot or the map (your runs, an answer
-still streaming, a Compare in flight) and runs its presets only into slots still empty; the Trace
-step keeps its trace on screen against a Compare started before it, and traces its component only
-if no trace or selection of yours or an answer's came after the click. Runs, comparisons and analyst
-questions share one timeline, and an analyst answer counts as asked when its question was sent.
-Nothing started before asking takes the map back from the answer when it lands later (an older
-slot run still fills its slot, and the analyst's comparison then shows "Slots changed since this
-comparison"). The answer is held back only by something started after asking that has already
-landed: the map, the comparison or that slot, including the answer's highlights and traces. A
-newer request still in flight replaces the answer when it lands, and one that failed or was
-cancelled never counts. A Compare that lands owns the map even while a later answer's trace keeps
-the diff closed, so an older run cannot take the map from it; it stays off the diff only when
-something requested after it took the map, or a run requested before it took the map since with
-another scenario in a compared slot. The error message reports the newest failed request,
-whichever failure lands last, and a failure of a request the answer superseded is dropped whether
-it lands before or after the answer (as is a failed trace once another selection, Hide trace or a
-newer trace replaced it). A clicked component's trace follows the click only if no trace was
-requested, shown or hidden after the click, whenever its details arrive. All of this is checked with held requests landing in every
-order (`scripts/e2e-races.cjs`, R13). A streaming analyst answer can be stopped at any time, and the
-backend sends SSE heartbeats so a stalled connection is detected (90 s without data) rather
-than hanging.
+demo's steps and the simulation, trace or analyst answer they have in flight (Reset demo and
+Restore world stop yours too), so a slow response can never re-apply state the presenter just
+cleared; exiting mid-reveal turns every layer back on. A streaming analyst answer can be
+stopped at any time, and the backend sends SSE heartbeats so a stalled connection is detected
+(90 s without data) rather than hanging. A tool call that an answer never got the result of
+(it was stopped, or its connection dropped mid-tool) is marked as stopped or interrupted, not
+left spinning.
+
+Runs, comparisons, traces, demo steps and analyst questions share one request timeline, and an
+analyst answer counts as asked when its question was sent:
+
+- Nothing started before asking takes the map back from the answer when it lands later. An older
+  slot run still fills its slot, and the analyst's comparison then shows "Slots changed since this
+  comparison".
+- The answer is held back only by something started after asking that has already landed: the
+  map, the comparison or that slot, including the answer's highlights and traces. A newer request
+  still in flight replaces the answer when it lands, and one that failed or was cancelled never
+  counts.
+- A Compare that lands owns the map, even while a later answer's trace keeps the diff closed, so
+  an older run cannot take the map from it. It stays off the diff only when something requested
+  after it took the map, or when a run requested before it took the map since with another
+  scenario in a compared slot.
+- The error message reports the newest failed request, whichever failure lands last. The failure
+  of a request that something newer superseded (an answer, another selection, Hide trace, a newer
+  trace) is dropped whether it lands before or after.
+- A clicked component's trace follows the click only if no trace was requested, shown or hidden
+  after the click, whenever its details arrive. Of two clicks on the same component, only the
+  newer one's details count, whichever arrives last.
+- Demo steps can be reached in any order (step chips, ← →) and take their own place on the
+  timeline:
+  - **Ask the AI** puts scenario A on screen first. It skips its question when A cannot be shown
+    (its run failed, or a run, Compare or answer you started meanwhile took the map), and waits
+    for a run or Compare of yours still in flight (a Run as B too: the question carries scenario
+    B), or an answer to a question you asked meanwhile, to land, end or fail before it decides:
+    a run or Compare started before the step that lands is taken back like an earlier answer.
+  - **Compare** first waits for what can still change a slot or the map (your runs, an answer
+    still streaming, a Compare in flight), then runs its presets only into slots still empty.
+  - **Trace** keeps its trace on screen against a Compare started before it, and traces its
+    component only if no trace or selection (yours or an answer's, also one that came back to
+    that component) came after the click.
+
+All of this is checked with held requests landing in every order (`scripts/e2e-races.cjs`, R13).
 
 ## 9. Limitations
 

@@ -13,6 +13,13 @@ export function DemoBar() {
   const demoPrev = useStore((s) => s.demoPrev);
   const resetDemo = useStore((s) => s.resetDemo);
   const exitDemo = useStore((s) => s.exitDemo);
+  // While a step runs (and Previous at the first step), the controls are unavailable but keep keyboard
+  // focus: aria-disabled plus an ignored activation, not `disabled` (a focused button that becomes
+  // disabled drops focus to <body>, so a keyboard user's next Enter does nothing). `busy` is read at the
+  // event, not from the render; demoPrev itself does nothing at the first step.
+  const whenIdle = (fn: () => unknown) => () => {
+    if (!useStore.getState().demo.busy) void fn();
+  };
 
   return (
     <AnimatePresence>
@@ -39,9 +46,9 @@ export function DemoBar() {
                     role="tab"
                     aria-selected={i === demo.step}
                     aria-label={`Step ${i + 1}: ${s.title}`}
-                    disabled={demo.busy}
-                    onClick={() => void demoGoto(i)}
-                    className="group flex h-4 items-center px-[1px] disabled:cursor-wait"
+                    aria-disabled={demo.busy || undefined}
+                    onClick={whenIdle(() => demoGoto(i))}
+                    className="group flex h-4 items-center px-[1px] aria-disabled:cursor-wait"
                   >
                     <span
                       className={cx(
@@ -71,8 +78,9 @@ export function DemoBar() {
               label="Previous step"
               shortcut="←"
               size="sm"
-              disabled={demo.step === 0 || demo.busy}
-              onClick={() => void demoPrev()}
+              aria-disabled={demo.busy || demo.step === 0 || undefined}
+              onClick={whenIdle(demoPrev)}
+              className="aria-disabled:pointer-events-none aria-disabled:opacity-35"
             >
               <ChevronLeft className="size-4" />
             </IconButton>
@@ -102,9 +110,9 @@ export function DemoBar() {
                 <Button
                   size="sm"
                   variant="primary"
-                  disabled={demo.busy}
-                  onClick={() => void demoNext()}
-                  className="min-w-[78px]"
+                  aria-disabled={demo.busy || undefined}
+                  onClick={whenIdle(demoNext)}
+                  className="min-w-[78px] aria-disabled:pointer-events-none aria-disabled:opacity-40"
                 >
                   Next
                   <ChevronRight className="size-3.5" />
@@ -112,7 +120,13 @@ export function DemoBar() {
               </Tooltip>
             ) : (
               <Tooltip label="End the walkthrough and keep exploring">
-                <Button size="sm" variant="subtle" disabled={demo.busy} onClick={exitDemo} className="min-w-[78px]">
+                <Button
+                  size="sm"
+                  variant="subtle"
+                  aria-disabled={demo.busy || undefined}
+                  onClick={whenIdle(exitDemo)}
+                  className="min-w-[78px] aria-disabled:pointer-events-none aria-disabled:opacity-40"
+                >
                   Finish
                 </Button>
               </Tooltip>

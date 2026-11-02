@@ -1,9 +1,12 @@
 // Regression checks for async state races in the store (src/lib/store.ts): stale simulate /
 // trace / analyst responses after Restore world or Reset demo, demo steps that outlive Exit,
-// mid-session engine failover to the offline snapshot, and scenario-scoped analyst replays.
+// mid-session engine failover to the offline snapshot, and scenario-scoped analyst replays; and for
+// keyboard focus and typed text in the interface while requests land (R15, R16).
 // Needs both dev servers and Playwright:  NODE_PATH=$(npm root -g) node scripts/e2e-races.cjs
 // (DEEPTRACE_APP_URL points it at another front-end dev server; the engine stays on :8000).
-// Engine latency, stalls and outages are simulated with Playwright request routing.
+// Engine latency, stalls and outages are simulated with Playwright request routing (and a local SSE
+// server for analyst answers that stream event by event or are cut off mid-answer).
+const http = require('http');
 const { chromium } = require('playwright');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const APP = process.env.DEEPTRACE_APP_URL || 'http://localhost:3000/';
@@ -30,16 +33,44 @@ let failSim = false; // /api/simulate answers HTTP 500
 let failCompare = false; // /api/compare answers HTTP 500
 let chatReply = null; // scripted SSE body for /api/analyst/chat (an LLM-style answer)
 // Held requests: the next request whose URL contains `url` waits until the check releases it, so a
-// check sets the exact order requests land in (no timing). `hit` resolves when the request is made;
-// set `fail` (HTTP 500: true, or the failure's message) or `reply` (an SSE body) before `release()`.
+// check sets the exact order requests land in (no timing). `hit` resolves when the request is made
+// (`body` then holds its request body);
+// set `fail` (HTTP 500: true, or the failure's message; 'refused': the connection is refused, as when
+// the engine is down), `reply` (an SSE body) or `stream` (an id of `liveStreams`: the analyst answer
+// streams from the local SSE server, event by event as the check sends them) before `release()`.
 const gates = [];
 function gate(url) {
-  const g = { url, taken: false, fail: false, reply: null };
+  const g = { url, taken: false, fail: false, reply: null, stream: null };
   g.open = new Promise((r) => (g.release = r));
   g.hit = new Promise((r) => (g.made = r));
   gates.push(g);
   return g;
 }
+// A local SSE server for analyst answers a check streams event by event (`send`), ends (`end`) or cuts
+// off mid-answer (`drop`: the TCP connection is destroyed, as when the engine dies).
+const liveStreams = new Map(); // id -> { res, queue, opened }
+const streamServer = http.createServer((req, res) => {
+  const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*', 'Access-Control-Allow-Methods': 'POST, OPTIONS' };
+  if (req.method === 'OPTIONS') { res.writeHead(204, cors); return res.end(); }
+  req.resume();
+  const s = liveStreams.get(decodeURIComponent(req.url.split('/').pop()));
+  if (!s) { res.writeHead(404, cors); return res.end(); }
+  res.writeHead(200, { ...cors, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+  s.res = res;
+  for (const chunk of s.queue.splice(0)) res.write(chunk);
+  s.openedNow();
+});
+const liveStream = (id) => {
+  const s = { res: null, queue: [] };
+  s.opened = new Promise((r) => (s.openedNow = r));
+  liveStreams.set(id, s);
+  return {
+    send(events) { const chunk = events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join(''); if (s.res) s.res.write(chunk); else s.queue.push(chunk); },
+    end() { if (s.res) s.res.end(); },
+    drop() { s.res?.socket?.destroy(); },
+    opened: s.opened,
+  };
+};
 const within = (p, ms, what) => Promise.race([p, sleep(ms).then(() => { throw new Error('timeout: ' + what); })]);
 async function routes(page) {
   await page.route('http://localhost:8000/**', async (route) => {
@@ -47,11 +78,14 @@ async function routes(page) {
     const held = gates.find((g) => !g.taken && url.includes(g.url));
     if (held) {
       held.taken = true;
+      held.body = route.request().postData();
       held.made();
       await held.open;
       try {
+        if (held.fail === 'refused') return await route.abort('connectionrefused');
         if (held.fail) return await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: typeof held.fail === 'string' ? held.fail : 'injected failure' }) });
         if (held.reply) return await route.fulfill({ status: 200, contentType: 'text/event-stream', body: held.reply });
+        if (held.stream) return await route.continue({ url: `http://127.0.0.1:${streamServer.address().port}/stream/${encodeURIComponent(held.stream)}` });
         return await route.continue();
       } catch { return; }
     }
@@ -75,9 +109,11 @@ async function routes(page) {
 const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join('');
 
 (async () => {
+  await new Promise((r) => streamServer.listen(0, '127.0.0.1', r));
   const { browser, page, errors } = await open(routes);
   const S = (fn, arg) => page.evaluate(fn, arg);
   const reset = async () => { for (const g of gates.splice(0)) { g.taken = true; g.release(); }
+    for (const s of liveStreams.values()) s.res?.socket?.destroy(); liveStreams.clear();
     for (const k of Object.keys(delays)) delete delays[k]; for (const k of Object.keys(bodyDelays)) delete bodyDelays[k]; blockEngine = false; stallChat = false; failSim = false; failCompare = false; chatReply = null;
     await S(() => { const s = window.__deeptraceStore.getState(); s.exitDemo(); s.clearChat(); s.restoreWorld(); }); await sleep(300); };
 
@@ -795,10 +831,40 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
         await S((id) => Promise.resolve(window.__ops[id]).catch(() => {}), id);
         await sleep(ops[id].settle ?? 60);
       },
-      async ask(id) {
+      /** ask question `id` (its text: 'q<id>', or `text`), held */
+      async ask(id, text) {
         const g = (ops['q' + id] = gate('/api/analyst/chat'));
-        await S((id) => { window.__ops['q' + id] = window.__deeptraceStore.getState().sendAnalystMessage('q' + id); }, id);
+        await S(([id, text]) => { window.__ops['q' + id] = window.__deeptraceStore.getState().sendAnalystMessage(text ?? 'q' + id); }, [id, text]);
         await within(g.hit, 5000, 'question ' + id);
+      },
+      /** ask question `id`; its answer streams from the local SSE server as the check sends it (H.send / H.end / H.drop) */
+      async askLive(id, text) {
+        await H.ask(id, text);
+        const st = (ops['s' + id] = liveStream('q' + id));
+        ops['q' + id].stream = 'q' + id;
+        ops['q' + id].release();
+        await within(st.opened, 5000, 'answer stream ' + id);
+        st.send([{ type: 'status', mode: 'llm', model: 'scripted' }]);
+        await sleep(100);
+      },
+      /** the streaming answer to question `id` sends these events (ui_actions: `action` objects) */
+      async send(id, events) {
+        ops['s' + id].send(events.map((e) => (e.type ? e : { type: 'ui_action', action: e })));
+        await sleep(250);
+      },
+      /** the streaming answer to question `id` is cut off mid-answer (its connection drops) */
+      drop(id) { ops['s' + id].drop(); },
+      /** the streaming answer to question `id` ends */
+      async end(id) {
+        ops['s' + id].send([{ type: 'message', text: 'ok' }, { type: 'done', mode: 'llm' }]);
+        ops['s' + id].end();
+        await S((id) => Promise.resolve(window.__ops['q' + id]).catch(() => {}), id);
+        await sleep(60);
+      },
+      /** the engine is up and the app is live: after a failover, the recovery poll (every 15 s) finds it back */
+      async live() {
+        blockEngine = false;
+        await page.waitForFunction(() => window.__deeptraceStore.getState().dataMode === 'live', null, { timeout: 40000 });
       },
       /** the answer to question `id` streams its actions, then ends */
       async answer(id, actions) {
@@ -855,20 +921,25 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
         sel: s.selectedNodeId, traceOf: s.traceVisible ? s.trace?.node_id ?? null : null,
         // the demo's own question: what was on screen when it was sent (it must be scenario A, not the diff)
         demoAsked: window.__asked.filter((a) => !/^q\d+$/.test(a.text)).map((a) => (a.view === 'diff' ? 'diff' : a.result)) }; }); };
-    /** every landing order settles to the same state (and to `expect`) */
-    const pair13 = async (name, plays, expect) => {
+    /** every landing order settles to the same state (and to `expect`); `more` adds fields to the state */
+    const pair13 = async (name, plays, expect, more) => {
       const out = [];
-      try { for (const play of plays) { await start13(); await play(); out.push(await state13()); } } catch (e) { return check(name, false, { error: e.message, out }); }
+      try { for (const play of plays) { await start13(); await play(); out.push({ ...(await state13()), ...(more ? await more() : {}) }); } } catch (e) { return check(name, false, { error: e.message, out }); }
       check(name, out.every((f) => JSON.stringify(f) === JSON.stringify(out[0])) && (!expect || out.every(expect)), out);
     };
+    /** the last analyst answer (its text, error and tool rows) and the data mode */
+    const answer13 = () => S(() => { const s = window.__deeptraceStore.getState(); const m = [...s.messages].reverse().find((x) => x.role === 'assistant');
+      return { answer: (m?.content ?? '').slice(0, 40), answerErr: (m?.error ?? '').slice(0, 40), tools: m ? m.tools.map((t) => t.status).join(',') : null, mode: s.dataMode }; });
+    /** the inspector's details */
+    const details13 = () => S(() => { const s = window.__deeptraceStore.getState(); return { details: s.details?.node.id ?? null, detailsLoading: s.detailsLoading }; });
     /** every order of the steps in `last` after `first` */
     const orders13 = (first, last) => {
       const perms = (xs) => (xs.length <= 1 ? [xs] : xs.flatMap((x, i) => perms([...xs.slice(0, i), ...xs.slice(i + 1)]).map((p) => [x, ...p])));
       return perms(last).map((p) => async () => { await first(); for (const step of p) await step(); });
     };
-    const single13 = async (name, play, expect) => {
+    const single13 = async (name, play, expect, more) => {
       try { await start13(); await play(); } catch (e) { return check(name, false, { error: e.message }); }
-      const f = await state13();
+      const f = { ...(await state13()), ...(more ? await more() : {}) };
       check(name, expect(f), f);
     };
     const AB = 'D:A-DS-FIVEPOINTS/B-EDGEWOOD-DUCTBANK';
@@ -971,7 +1042,10 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
       if (stepFirst) { await H.land('dB'); await H.land('r4'); } else { await H.land('r4'); await H.land('dB'); }
       await H.done(9);
     }), (f) => f.map === 'D:A-DS-FIVEPOINTS/C-WATER-MAIN-DECATUR' && f.err === null && f.cmpSt === 'idle' && !f.demoBusy);
-    // a Compare that failed before Start demo (or Restore world) is not settled by a later answer
+    // A Compare that failed before Start demo (or Restore world) is not settled by a later answer. Each half
+    // guards its own line: failing before Start demo, its failure is forgotten by Restore world (which
+    // resets compareStatus and the Compare it names); failing after it, it is dropped as stale. (The "Run
+    // two scenarios" check does not reset that bookkeeping itself, so it masks neither regression.)
     await pair13('R13 a Compare that failed before Start demo does not let a later answer settle the demo\'s Compare error', [false, true].map((beforeDemo) => async () => {
       await H.ab(); await H.cmp('c1'); if (beforeDemo) await H.land('c1', 'engine 500');
       await H.startDemo(); if (!beforeDemo) await H.land('c1', 'engine 500');
@@ -1014,7 +1088,7 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
       const answer = () => H.answer(3, [act.sim(rTel13, 'active'), act.cmp(cmpAC), act.hl('L6')]);
       if (runFirst) { await H.land('r2'); await answer(); } else { await answer(); await H.land('r2'); }
       await S(() => window.__deeptraceStore.getState().showSlot('A')); await sleep(60);
-    }));
+    }), (f) => f.hl === 'L6' && f.map === 'R:A-DS-FIVEPOINTS' && f.A === 'A-DS-FIVEPOINTS');
     // The demo's Ask the AI step decides only once your run or Compare started after it has settled
     // (one that lands holds the map: no question; one that fails never counts)
     await pair13('R13 demo Ask the AI asks when your newer run fails, before or after its run for A lands', [false, true].map((stepFirst) => async () => {
@@ -1108,8 +1182,452 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
       [() => H.land('t1', 'trace 500'), () => H.land('r2', 'engine 500')],
     ), (f) => f.err === 'engine 500' && f.sim === 'error');
 
+    // The demo's Ask the AI step also waits for a run or Compare of yours requested BEFORE it, and takes
+    // the map back from it like from an earlier answer, whether it lands before or after that answer ends
+    await pair13('R13 demo Ask the AI takes the map back from your run requested before it, whether it lands before or after an earlier answer ends', [false, true].map((runFirst) => async () => {
+      await H.startDemo(); await H.demo(5, { dA: '/api/simulate' }); await H.land('dA'); await H.done(5);
+      await H.run('r2', 'active', 'C-WATER-MAIN-DECATUR'); await H.ask(3); await H.demo(7);
+      if (runFirst) { await H.land('r2'); await H.answer(3, []); } else { await H.answer(3, []); await H.land('r2'); }
+      await H.done(7);
+    }), (f) => f.demoAsked.length === 1 && f.demoAsked[0] === 'A-DS-FIVEPOINTS' && f.map === 'R:A-DS-FIVEPOINTS' && f.A === 'A-DS-FIVEPOINTS' && !f.analyst && !f.demoBusy);
+    await pair13('R13 demo Ask the AI takes the map back from your Compare requested before it, whether it lands before or after an earlier answer ends', [false, true].map((cmpFirst) => async () => {
+      await H.startDemo(); await H.demo(5, { dA: '/api/simulate' }); await H.land('dA'); await H.done(5); await H.demo(8, { dB: '/api/simulate' }); await H.land('dB'); await H.done(8);
+      await H.cmp('c3'); await H.ask(4); await H.demo(7);
+      if (cmpFirst) { await H.land('c3'); await H.answer(4, []); } else { await H.answer(4, []); await H.land('c3'); }
+      await H.done(7);
+    }), (f) => f.demoAsked.length === 1 && f.demoAsked[0] === 'A-DS-FIVEPOINTS' && f.map === 'R:A-DS-FIVEPOINTS' && f.cmp === 'A-DS-FIVEPOINTS/B-EDGEWOOD-DUCTBANK' && !f.analyst && !f.demoBusy);
+    // An answer's highlight that comes before its own result is held, not dropped, while a run requested
+    // before asking shows a result the answer does not describe: it comes back with the answer's result
+    await pair13('R13 an answer\'s highlight before its own show_simulation stays whether your earlier Run as B lands before it, between or after', [0, 1, 2].map((when) => async () => {
+      await H.run('r1', 'B', 'C-WATER-MAIN-DECATUR'); await H.askLive(2);
+      if (when === 0) await H.land('r1');
+      await H.send(2, [act.hl('H2')]);
+      if (when === 1) await H.land('r1');
+      await H.send(2, [act.sim(rTel13, 'A')]); await H.end(2);
+      if (when === 2) await H.land('r1');
+    }), (f) => f.hl === 'H2' && f.map === 'R:D-TELECOM-56MARIETTA' && f.A === 'D-TELECOM-56MARIETTA' && f.B === 'C-WATER-MAIN-DECATUR' && f.sim === 'idle');
+    await pair13('R13 an answer\'s highlight after its own comparison stays whether your earlier Run as A lands before or after the answer', [false, true].map((runFirst) => async () => {
+      await H.run('r1', 'A', 'E-ROADS-FIVEPOINTS'); await H.ask(2);
+      if (runFirst) await H.land('r1');
+      await H.answer(2, [act.cmp(), act.hl('H4')]);
+      if (!runFirst) await H.land('r1');
+    }), (f) => f.hl === 'hidden:H4' && f.map === AB && f.A === 'E-ROADS-FIVEPOINTS');
+    // The demo's Trace step takes only its selection's own follow-trace for its trace: your trace of the
+    // component (or an answer's) that lands before its details stays, as it does landing after them
+    await pair13('R13 demo Trace step keeps your trace of its component, requested while its details load (no failing re-trace)', [false, true].map((detailsFirst) => async () => {
+      await H.startDemo(); await H.demo(4, { n5: '/api/nodes/' }); await H.trace('t3', 'PWR-DS-FIVEPOINTS'); H.maybe('t6', '/api/trace');
+      if (detailsFirst) { await H.land('n5'); await H.land('t3'); } else { await H.land('t3'); await H.land('n5'); }
+      await sleep(400); await H.landIfMade('t6', 'trace 500'); await H.done(4);
+    }), (f) => f.traceOf === 'PWR-DS-FIVEPOINTS' && f.sel === 'PWR-DS-FIVEPOINTS' && f.err === null && !f.demoBusy);
+    await pair13('R13 demo Trace step keeps an earlier answer\'s trace of its component that lands while its details load (no failing re-trace)', [false, true].map((detailsFirst) => async () => {
+      await H.startDemo(); await H.ask(2); await H.demo(4, { n5: '/api/nodes/' }); H.maybe('t6', '/api/trace');
+      if (detailsFirst) { await H.land('n5'); await sleep(300); await H.answer(2, [act.trace()]); } else { await H.answer(2, [act.trace()]); await H.land('n5'); }
+      await sleep(400); await H.landIfMade('t6', 'trace 500'); await H.done(4);
+    }), (f) => f.traceOf === 'PWR-DS-FIVEPOINTS' && f.sel === 'PWR-DS-FIVEPOINTS' && f.err === null && !f.analyst && !f.demoBusy);
+    // Clicking the same component twice: only the newer click's details count, whichever lands last
+    await pair13('R13 clicking a component twice: the newer click\'s details count whichever lands last (the newer request fails)', [false, true].map((newerFirst) => async () => {
+      await H.click('n1', 'PWR-SW-CEN1'); await H.click('n2', 'PWR-SW-CEN1');
+      if (newerFirst) { await H.land('n2', 'engine 500'); await H.land('n1'); } else { await H.land('n1'); await H.land('n2', 'engine 500'); }
+    }), (f) => f.details === null && !f.detailsLoading && f.sel === 'PWR-SW-CEN1' && f.err === null, details13);
+    await pair13('R13 clicking a component twice: the newer click\'s details count whichever lands last (the older request fails)', [false, true].map((newerFirst) => async () => {
+      await H.click('n1', 'PWR-SW-CEN1'); await H.click('n2', 'PWR-SW-CEN1');
+      if (newerFirst) { await H.land('n2'); await H.land('n1', 'engine 500'); } else { await H.land('n1', 'engine 500'); await H.land('n2'); }
+    }), (f) => f.details === 'PWR-SW-CEN1' && !f.detailsLoading && f.sel === 'PWR-SW-CEN1' && f.err === null, details13);
+    // A Compare that lands takes the map before its update reaches the demo steps' waits: the Compare step
+    // compares at once (your older run can no longer take the map), so your newest run keeps the map
+    // whether the older run lands before or after you start it
+    await pair13('R13 demo Compare step compares once your Compare lands: your newest run keeps the map whether your older run lands before or after it', [false, true].map((olderFirst) => async () => {
+      await H.startDemo(); await H.demo(5, { dA: '/api/simulate' }); await H.land('dA'); await H.done(5); await H.demo(8, { dB: '/api/simulate' }); await H.land('dB'); await H.done(8);
+      await S(() => window.__deeptraceStore.getState().setPlaying(false)); // (a playing cascade updates the store as it steps)
+      await H.run('r3', 'active', 'F-TS-SOUTH'); await H.cmp('c4'); await H.demo(9); H.maybe('c6', '/api/compare');
+      await H.land('c4');
+      if (olderFirst) { await H.land('r3'); await H.run('r5', 'active', 'E-ROADS-FIVEPOINTS'); } else { await H.run('r5', 'active', 'E-ROADS-FIVEPOINTS'); await H.land('r3'); }
+      await H.land('r5'); await within(ops.c6.hit, 5000, 'the step\'s Compare'); await H.land('c6'); await H.done(9);
+    }), (f) => f.map === 'R:E-ROADS-FIVEPOINTS' && f.cmp === 'A-DS-FIVEPOINTS/B-EDGEWOOD-DUCTBANK' && f.sim === 'idle' && f.cmpSt === 'idle' && f.err === null && !f.demoBusy);
+    // A trace is superseded once the selection moves off its component (also with no trace on screen, so no
+    // follow-trace): its failure is not reported, whether it lands before or after
+    const edgeF1 = await S(() => [...window.__deeptraceStore.getState().index.edges.keys()][0]);
+    await pair13('R13 a trace that fails is not reported once you selected another component (no trace was on screen)', orders13(
+      async () => { await H.utrace('t1', 'PWR-TS-SOUTH'); },
+      [() => H.land('t1', 'trace 500'), async () => { await S(async () => { await window.__deeptraceStore.getState().selectNode('PWR-SW-CEN1', { fly: false }); }); await sleep(200); }],
+    ), (f) => f.err === null && f.sel === 'PWR-SW-CEN1' && f.traceOf === null);
+    await pair13('R13 a trace that fails is not reported once you clicked a connection (no trace was on screen)', orders13(
+      async () => { await H.utrace('t1', 'PWR-TS-SOUTH'); },
+      [() => H.land('t1', 'trace 500'), async () => { await S((e) => window.__deeptraceStore.getState().selectEdge(e), edgeF1); await sleep(60); }],
+    ), (f) => f.err === null && f.sel === null && f.traceOf === null);
+    // Exit demo stops what the demo steps started: the Ask the AI step's answer and the Trace step's trace
+    await single13('R13 Exit demo stops the Ask the AI step\'s answer in flight', async () => {
+      await H.startDemo(); await H.demo(5, { dA: '/api/simulate' }); await H.land('dA'); await H.done(5);
+      const dq = (ops.dq = gate('/api/analyst/chat')); await H.demo(7); await within(dq.hit, 5000, 'the step\'s question');
+      await H.exitDemo();
+      dq.reply = sse([{ type: 'status', mode: 'llm', model: 'scripted' }, { type: 'ui_action', action: act.sim(rTel13, 'A') }, { type: 'ui_action', action: act.hl('After exit') }, { type: 'message', text: 'late' }, { type: 'done', mode: 'llm' }]);
+      dq.release(); await H.done(7); await sleep(300);
+    }, (f) => f.map === 'R:A-DS-FIVEPOINTS' && f.A === 'A-DS-FIVEPOINTS' && f.hl === null && !f.analyst && f.answerErr === 'Stopped: you exited the demo.' && !f.demoBusy, answer13);
+    await single13('R13 Exit demo drops the Trace step\'s trace in flight', async () => {
+      await H.startDemo(); await H.demo(3); await H.done(3);
+      await H.demo(4, { t5: '/api/trace' }); await H.exitDemo(); await H.land('t5'); await sleep(200);
+    }, (f) => f.traceOf === null && f.sel === 'PWR-DS-FIVEPOINTS' && f.err === null && !f.demoBusy);
+    // Mid-session failover with requests in flight (each play starts live: the recovery poll brings the app
+    // back from the snapshot within 15 s). After the engine dies mid-answer, the recorded answer is the
+    // answer to the question as it was asked: about the result on screen then, whichever failure lands first.
+    const DQ13 = 'Why did this happen, and what could we do differently?';
+    await pair13('R13 the engine dies mid-answer: the recorded answer follows what was on screen when asking, whichever failure lands first', [false, true].map((runFirst) => async () => {
+      await H.live(); await H.ran('active', 'C-WATER-MAIN-DECATUR'); await H.run('r1', 'active', 'A-DS-FIVEPOINTS'); await H.ask(2, DQ13);
+      blockEngine = true; // the engine dies: /api/health is refused too
+      if (runFirst) { await H.land('r1', 'refused'); await H.land('q2', 'refused'); } else { await H.land('q2', 'refused'); await H.land('r1', 'refused'); }
+      await sleep(600);
+    }), (f) => f.mode === 'snapshot' && f.map === 'R:A-DS-FIVEPOINTS' && !f.answer && f.answerErr.startsWith('The engine stopped responding') && f.tools === '' && f.hl === null && !f.analyst, answer13);
+    // ...and Stop while the failover's health check runs keeps what the answer had shown
+    await single13('R13 Stop while the failover health check runs keeps the answer\'s text and tool rows', async () => {
+      await H.live(); await H.ran('active', 'A-DS-FIVEPOINTS'); await H.askLive(2, DQ13);
+      const health = (ops.h = gate('/api/health'));
+      await H.send(2, [{ type: 'tool_call', id: 't1', name: 'run_failure_simulation', input: {} }, { type: 'tool_result', id: 't1', name: 'run_failure_simulation', ok: true, summary: 'Simulated the outage' },
+        { type: 'message', text: 'Partial answer' }, { type: 'tool_call', id: 't2', name: 'evaluate_mitigation', input: {} }]);
+      H.drop(2); // the connection drops mid-answer: the store checks /api/health before failing over
+      await within(health.hit, 5000, 'the failover health check');
+      await S(() => window.__deeptraceStore.getState().stopAnalyst());
+      health.fail = 'refused'; health.release(); // the engine is down
+      await S(() => Promise.resolve(window.__ops.q2).catch(() => {})); await sleep(300);
+    }, (f) => f.mode === 'snapshot' && f.answer === 'Partial answer' && f.tools === 'ok,error' && f.answerErr === 'Stopped.' && !f.analyst, answer13);
+    // ...and a run you start after asking keeps its slot against the answer's comparison when it is answered
+    // from the snapshot, also when it reruns the scenario that slot held (each snapshot answer is a new result)
+    await single13('R13 Run as A after asking, answered from the snapshot, keeps slot A against the answer\'s comparison', async () => {
+      await H.live(); blockEngine = true; // the engine is down: Run as A and Run as B come from the snapshot
+      await H.ran('A', 'C-WATER-MAIN-DECATUR'); await H.ran('B', 'D-TELECOM-56MARIETTA');
+      await H.live(); await H.ask(3);
+      blockEngine = true; // the engine drops again (the answer's own connection stays open)
+      await H.ran('A', 'C-WATER-MAIN-DECATUR');
+      await H.answer(3, [act.cmp()]);
+    }, (f) => f.mode === 'snapshot' && f.A === 'C-WATER-MAIN-DECATUR' && f.map === 'R:C-WATER-MAIN-DECATUR' && f.B === 'B-EDGEWOOD-DUCTBANK' && f.cmp === 'A-DS-FIVEPOINTS/B-EDGEWOOD-DUCTBANK' && !f.analyst, answer13);
+    // An answer that ends while a tool call has no result yet (its connection drops while the tool runs, the
+    // engine dies, the backend reports an error) settles that tool row: no spinner is left once it is over.
+    // (Each check starts live: an earlier one may have failed over to the snapshot.)
+    const toolCut13 = [{ type: 'tool_call', id: 't1', name: 'get_criticality_ranking', input: {} }, { type: 'tool_result', id: 't1', name: 'get_criticality_ranking', ok: true, summary: 'Ranked' },
+      { type: 'tool_call', id: 't2', name: 'run_failure_simulation', input: {} }];
+    /** the last answer, and the spinners its tool rows draw in the analyst panel */
+    const toolRows13 = async () => ({ ...(await answer13()), ...(await S(() => { const panel = document.querySelector('#analyst-input')?.closest('aside');
+      return { analystShown: !!panel, spinners: panel ? panel.querySelectorAll('li svg.animate-spin').length : -1 }; })) });
+    const answerOver13 = async () => { await page.waitForFunction(() => !window.__deeptraceStore.getState().analystPending, null, { timeout: 30000 }); await sleep(300); };
+    await single13('R13 an answer whose connection drops while a tool runs settles its tool rows (the engine is still up)', async () => {
+      await H.live(); await H.askLive(2); await H.send(2, toolCut13);
+      H.drop(2); // /api/health still answers: the answer fails with the stream's error
+      await answerOver13();
+    }, (f) => f.mode === 'live' && !f.analyst && !!f.answerErr && f.tools === 'ok,error' && f.analystShown && f.spinners === 0, toolRows13);
+    await single13('R13 an answer that reports an error while a tool runs settles its tool rows', async () => {
+      await H.live(); await H.askLive(2); await H.send(2, [...toolCut13, { type: 'error', message: 'Analyst error: boom' }, { type: 'done', mode: 'llm' }]);
+      ops.s2.end();
+      await answerOver13();
+    }, (f) => !f.analyst && f.answerErr.startsWith('Analyst error') && f.tools === 'ok,error' && f.analystShown && f.spinners === 0, toolRows13);
+    // An answer's highlight made under its own A/B diff is about its comparison: when the diff is left for your
+    // run requested before asking, which took the map while the answer was coming, it is not drawn on that run
+    const diffOverRun13 = async () => { await H.live(); await H.ran('active', 'C-WATER-MAIN-DECATUR'); await H.run('r2', 'active', 'E-ROADS-FIVEPOINTS'); await H.ask(3); await H.land('r2'); };
+    await single13('R13 an answer\'s highlight under its own diff is not drawn on your earlier run when its trace leaves the diff', async () => {
+      await diffOverRun13(); await H.answer(3, [act.cmp(), act.hl('H8'), act.trace()]);
+    }, (f) => f.map === 'R:E-ROADS-FIVEPOINTS' && f.hl === null && f.trace && f.cmp === 'A-DS-FIVEPOINTS/B-EDGEWOOD-DUCTBANK' && !f.analyst);
+    await single13('R13 the highlight chip\'s show puts an answer\'s highlight under its own diff on a scenario it compared, not on your earlier run', async () => {
+      await diffOverRun13(); await H.answer(3, [act.cmp(), act.hl('H9')]);
+      await page.locator('button', { hasText: 'hidden in A/B diff' }).first().click(); await sleep(300);
+    }, (f) => f.map === 'R:A-DS-FIVEPOINTS' && f.hl === 'H9' && f.A === 'A-DS-FIVEPOINTS' && !f.analyst);
+    // The demo's Trace step does not trace once the selection moved after its click, also when it came back
+    // to its component, whichever node details land first
+    await pair13('R13 demo Trace step does not trace once you clicked a connection and its component again, whichever details land first', [false, true].map((stepFirst) => async () => {
+      await H.live(); await H.startDemo(); await H.demo(4, { n5: '/api/nodes/' });
+      await S((e) => window.__deeptraceStore.getState().selectEdge(e), edge13); await sleep(60);
+      if (stepFirst) { await H.land('n5'); await H.click('n6', 'PWR-DS-FIVEPOINTS'); await H.land('n6'); } else { await H.click('n6', 'PWR-DS-FIVEPOINTS'); await H.land('n6'); await H.land('n5'); }
+      await H.done(4); await sleep(400);
+    }), (f) => f.traceOf === null && f.sel === 'PWR-DS-FIVEPOINTS' && f.err === null && !f.demoBusy);
+    // The demo's Ask the AI step decides only once an answer to a question asked while it waited has ended: it
+    // does not run A over that answer when your Run as A lands first
+    await pair13('R13 demo Ask the AI does not take the map back from an answer asked while it waited for your Run as A, whichever lands first', [false, true].map((runFirst) => async () => {
+      await H.live(); await H.startDemo(); await H.run('r1', 'A', 'C-WATER-MAIN-DECATUR'); await H.demo(7); H.maybe('dA', '/api/simulate'); await H.askLive(2);
+      if (runFirst) { await H.land('r1'); await H.send(2, [act.sim(rTel13, 'active')]); } else { await H.send(2, [act.sim(rTel13, 'active')]); await H.land('r1'); }
+      await H.landIfMade('dA'); await H.end(2); await H.done(7);
+    }), (f) => f.demoAsked.length === 0 && f.map === 'R:D-TELECOM-56MARIETTA' && f.A === 'C-WATER-MAIN-DECATUR' && !f.analyst && !f.demoBusy);
+    // ...and waits for your Run as B still in flight too, so its question carries the same scenario B (the
+    // step runs A only once your run has landed)
+    let early13 = null;
+    await pair13('R13 demo Ask the AI asks with your Run as B in flight in its context, whether it lands before or after the step\'s run for A', [false, true].map((stepFirst) => async () => {
+      await H.live(); await H.startDemo(); await H.run('r1', 'B', 'C-WATER-MAIN-DECATUR'); await H.ran('active', 'E-ROADS-FIVEPOINTS');
+      H.maybe('dA', '/api/simulate'); H.maybe('dq', '/api/analyst/chat'); await H.demo(7); await sleep(300);
+      early13 = ops.dA.taken; // the step ran A before your Run as B landed
+      if (stepFirst && ops.dA.taken) { await H.land('dA'); await H.land('r1'); } else { await H.land('r1'); await within(ops.dA.hit, 5000, 'the step\'s run for A'); await H.land('dA'); }
+      await within(ops.dq.hit, 5000, 'the step\'s question');
+      ops.dq.reply = sse([{ type: 'status', mode: 'llm', model: 'scripted' }, { type: 'message', text: 'ok' }, { type: 'done', mode: 'llm' }]); ops.dq.release();
+      await H.done(7);
+    }), (f) => !f.early && f.qB === 'C-WATER-MAIN-DECATUR' && f.map === 'R:A-DS-FIVEPOINTS' && f.B === 'C-WATER-MAIN-DECATUR' && !f.demoBusy,
+    () => ({ early: early13, qB: JSON.parse(ops.dq.body || '{}').context?.scenario_b?.scenario_id ?? null }));
+    // An answer's highlight held off a result it does not describe comes back with your Run as B, requested
+    // before asking, of the scenario it was asked about, whether that lands before or after the answer ends
+    await pair13('R13 an answer\'s highlight held off slot A comes back with your earlier Run as B of what it was asked about, before or after the answer ends', [false, true].map((runFirst) => async () => {
+      await H.live(); await H.ran('A', 'A-DS-FIVEPOINTS'); await H.ran('active', 'C-WATER-MAIN-DECATUR');
+      await H.run('r1', 'B', 'C-WATER-MAIN-DECATUR'); await H.askLive(2);
+      await S(() => window.__deeptraceStore.getState().showSlot('A'));
+      await H.send(2, [act.hl('H6')]);
+      if (runFirst) { await H.land('r1'); await H.end(2); } else { await H.end(2); await H.land('r1'); }
+    }), (f) => f.hl === 'H6' && f.map === 'R:C-WATER-MAIN-DECATUR' && f.A === 'A-DS-FIVEPOINTS' && f.B === 'C-WATER-MAIN-DECATUR' && f.sim === 'idle' && !f.analyst);
+    // The answer's simulation supersedes your newest run made before asking that it took the map and the slot
+    // from: that run's failure is not reported, whether it fails before or after the answer
+    await pair13('R13 your newest run made before asking that fails is not reported once the answer\'s simulation took the map and its slot', orders13(
+      async () => { await H.live(); await H.run('r1', 'A', 'C-WATER-MAIN-DECATUR'); await H.ask(2); },
+      [() => H.land('r1', 'engine 500'), () => H.answer(2, [act.sim(rTel13, 'A')])],
+    ), (f) => f.err === null && f.sim === 'idle' && f.map === 'R:D-TELECOM-56MARIETTA' && f.A === 'D-TELECOM-56MARIETTA');
+    // A switch to the result already shown (the chip of the slot on screen) changes nothing: your highlight
+    // stays while an answer's highlight is held
+    await single13('R13 clicking the chip of the slot already shown keeps your highlight while an answer\'s highlight is held', async () => {
+      await H.live(); await H.ran('A', 'A-DS-FIVEPOINTS'); await H.ran('B', 'B-EDGEWOOD-DUCTBANK');
+      await S(() => window.__deeptraceStore.getState().showSlot('A')); await H.askLive(2);
+      await S(() => window.__deeptraceStore.getState().showSlot('B'));
+      await S(() => window.__deeptraceStore.getState().setHighlight({ node_ids: ['FAC-CITYHALL'], edge_ids: [], label: 'U1', tone: 'critical', source: 'user' }));
+      await H.send(2, [act.hl('H10')]); // held: the answer is about A, the map shows B
+      await S(() => window.__deeptraceStore.getState().showSlot('B')); // the B chip, already pressed
+      await H.end(2);
+    }, (f) => f.map === 'R:B-EDGEWOOD-DUCTBANK' && f.hl === 'U1' && !f.analyst);
+    // (the failover checks come last: after one, each check waits for the app to come back live)
+    // ...and so does an answer the engine dies under while a tool runs
+    await single13('R13 an answer the engine dies under while a tool runs settles its tool rows (no recorded answer to replay)', async () => {
+      await H.live(); await H.askLive(2); await H.send(2, toolCut13);
+      blockEngine = true; // the engine dies: /api/health is refused too
+      H.drop(2);
+      await answerOver13();
+    }, (f) => f.mode === 'snapshot' && !f.analyst && f.answerErr.startsWith('The engine stopped responding') && f.tools === 'ok,error' && f.analystShown && f.spinners === 0, toolRows13);
+    // After a failover the recorded answer replaces the partial one: it is about scenario A as asked, so it does
+    // not draw its highlights on another scenario the partial answer had put on the map
+    await single13('R13 the engine dies after the answer showed another scenario: the recorded answer does not draw its highlights on it', async () => {
+      await H.live(); await H.ran('active', 'A-DS-FIVEPOINTS'); await H.askLive(2, DQ13);
+      await H.send(2, [{ type: 'tool_call', id: 't1', name: 'run_failure_simulation', input: {} }, { type: 'tool_result', id: 't1', name: 'run_failure_simulation', ok: true, summary: 'Simulated' },
+        act.sim(rTel13, 'active'), { type: 'tool_call', id: 't2', name: 'evaluate_mitigation', input: {} }]);
+      blockEngine = true; H.drop(2);
+      await answerOver13();
+    }, (f) => f.mode === 'snapshot' && f.map === 'R:D-TELECOM-56MARIETTA' && !!f.answer && !f.answerErr && f.hl === null && !f.analyst, answer13);
+    await reset(); await H.live();
+
     await reset();
     await S(() => { if (window.__origAsk) window.__deeptraceStore.setState({ sendAnalystMessage: window.__origAsk }); });
+  }
+
+  // R15: demo steps in the interface. The Select, Trace, Ask the AI and Compare steps bring their panel to the
+  // front, also when it was already open behind another one (the step's inspector, question, answer or
+  // comparison would otherwise happen out of sight); a focused Next keeps keyboard focus while a step runs,
+  // and a focused Previous step keeps it at the first step.
+  {
+    /** runs a check that drives the interface: a step that never settles fails that check only */
+    const ui15 = async (name, play) => { try { await play(); } catch (e) { check(name, false, { error: e.message }); } };
+    /** the right-hand panel in front: the selected tab of the open panels (shown with two or more open) */
+    const frontPanel = () => S(() => document.querySelector('[role=tablist][aria-label="Open panels"] [role=tab][aria-selected=true]')?.textContent.trim() ?? null);
+    const askName = 'R15 the demo Ask the AI step brings the analyst to the front (it was open behind the inspector)';
+    const compareName = 'R15 the demo Compare step brings the comparison to the front (it was open behind the analyst)';
+    await ui15(askName, async () => {
+      await reset();
+      await S(() => window.__deeptraceStore.getState().setPanel('analyst', true)); await sleep(300); // the analyst opened before the demo
+      await S(async () => { window.__deeptraceStore.getState().startDemo(); await new Promise((r) => setTimeout(r, 200)); await window.__deeptraceStore.getState().demoGoto(3); });
+      await sleep(500);
+      const beforeAsk = await frontPanel();
+      await S(() => window.__deeptraceStore.getState().demoGoto(7)); await sleep(600);
+      st = { beforeAsk, front: await frontPanel(), input: await page.locator('#analyst-input').isVisible(),
+        asked: await S(() => window.__deeptraceStore.getState().messages.filter((m) => m.role === 'user').map((m) => m.content.slice(0, 20))) };
+      check(askName, st.beforeAsk === 'Inspector' && st.front === 'Analyst' && st.input && st.asked.length === 1, st);
+    });
+    await ui15(compareName, async () => {
+      await S(() => window.__deeptraceStore.getState().demoGoto(9)); await sleep(600);
+      const firstCompare = await frontPanel();
+      await page.getByRole('tablist', { name: 'Open panels' }).getByRole('tab', { name: 'Analyst', exact: true }).click(); await sleep(400);
+      const beforeReplay = await frontPanel();
+      await S(() => window.__deeptraceStore.getState().demoGoto(9)); await sleep(600);
+      st = { firstCompare, beforeReplay, front: await frontPanel(), view: await S(() => window.__deeptraceStore.getState().compareView) };
+      check(compareName, st.firstCompare === 'Compare' && st.beforeReplay === 'Analyst' && st.front === 'Compare' && st.view === 'diff', st);
+    });
+    // The Select and Trace steps show their component's inspector: it comes to the front, also when the
+    // component is already selected and the inspector is open behind the analyst
+    const selectName = 'R15 the demo Select and Trace steps bring the inspector to the front (it was behind the analyst)';
+    await ui15(selectName, async () => {
+      const tab = (n) => page.getByRole('tablist', { name: 'Open panels' }).getByRole('tab', { name: n, exact: true });
+      await reset();
+      await S(() => window.__deeptraceStore.getState().setPanel('analyst', true)); await sleep(300);
+      await S(async () => { window.__deeptraceStore.getState().startDemo(); await new Promise((r) => setTimeout(r, 200)); await window.__deeptraceStore.getState().demoGoto(3); });
+      await sleep(500);
+      await tab('Analyst').click(); await sleep(400);
+      const before = await frontPanel();
+      await S(() => window.__deeptraceStore.getState().demoGoto(3)); await sleep(600); // the step again: its component is selected already
+      const select = await frontPanel();
+      await tab('Analyst').click(); await sleep(400);
+      await S(() => window.__deeptraceStore.getState().demoGoto(4)); await sleep(600);
+      st = { before, select, trace: await frontPanel(), sel: await S(() => window.__deeptraceStore.getState().selectedNodeId) };
+      check(selectName, st.before === 'Analyst' && st.select === 'Inspector' && st.trace === 'Inspector' && st.sel === 'PWR-DS-FIVEPOINTS', st);
+    });
+
+    const focusName = 'R15 a focused Next keeps keyboard focus through a busy demo step, and the next Enter advances';
+    await ui15(focusName, async () => {
+      await reset();
+      await S(async () => { window.__deeptraceStore.getState().startDemo(); await new Promise((r) => setTimeout(r, 300)); });
+      const demoState = () => S(() => { const s = window.__deeptraceStore.getState(); const a = document.activeElement;
+        return { step: s.demo.step, busy: s.demo.busy, focus: !a || a === document.body ? 'BODY' : a.textContent.trim() }; });
+      await page.getByRole('region', { name: 'Guided demo' }).getByRole('button', { name: 'Next', exact: true }).focus();
+      await page.keyboard.press('Enter'); // step 1 -> 2 (Deep Mode)
+      await page.waitForFunction(() => { const d = window.__deeptraceStore.getState().demo; return d.step === 1 && !d.busy; }, null, { timeout: 60000 });
+      await page.keyboard.press('Enter'); // step 2 -> 3 (Reveal: busy while the layers appear one by one)
+      await sleep(400);
+      const during = await demoState();
+      await page.keyboard.press('Enter'); // ignored while the step runs
+      await page.waitForFunction(() => !window.__deeptraceStore.getState().demo.busy, null, { timeout: 60000 });
+      const afterStep = await demoState();
+      await page.keyboard.press('Enter'); // step 3 -> 4 (Select)
+      await sleep(400);
+      st = { during, afterStep, next: await demoState() };
+      check(focusName, during.step === 2 && during.busy && during.focus === 'Next' &&
+        afterStep.step === 2 && afterStep.focus === 'Next' && st.next.step === 3 && st.next.focus === 'Next', st);
+    });
+    const prevName = 'R15 a focused Previous step keeps keyboard focus when it reaches the first step';
+    await ui15(prevName, async () => {
+      const demoAt = () => S(() => { const s = window.__deeptraceStore.getState(); const a = document.activeElement;
+        return { step: s.demo.step, focus: !a || a === document.body ? 'BODY' : a.getAttribute('aria-label') || a.textContent.trim() }; });
+      if (!(await S(() => window.__deeptraceStore.getState().demo.active))) await S(async () => { window.__deeptraceStore.getState().startDemo(); await new Promise((r) => setTimeout(r, 300)); });
+      await S(() => window.__deeptraceStore.getState().demoGoto(1)); // step 2 (Deep Mode)
+      await page.waitForFunction(() => { const d = window.__deeptraceStore.getState().demo; return d.step === 1 && !d.busy; }, null, { timeout: 60000 });
+      await page.getByRole('region', { name: 'Guided demo' }).getByRole('button', { name: 'Previous step' }).focus();
+      await page.keyboard.press('Enter'); // step 2 -> 1: Previous is unavailable there
+      await page.waitForFunction(() => { const d = window.__deeptraceStore.getState().demo; return d.step === 0 && !d.busy; }, null, { timeout: 60000 });
+      await sleep(300);
+      const first = await demoAt();
+      await page.keyboard.press('Enter'); await sleep(300); // ignored at the first step
+      st = { first, again: await demoAt() };
+      check(prevName, first.step === 0 && first.focus === 'Previous step' && st.again.step === 0 && st.again.focus === 'Previous step', st);
+    });
+    await S(() => window.__deeptraceStore.getState().exitDemo());
+  }
+
+  // R16: keyboard focus and typed text survive what happens while you use the interface. A busy control keeps
+  // keyboard focus (or, when it goes away, hands it to its neighbour) instead of dropping it to the page, a
+  // comparison that lands while you type a question leaves the analyst, its draft and its focus alone, and
+  // the command palette gives focus back to what had it when it closes.
+  {
+    const ui16 = async (name, play) => { try { await play(); } catch (e) { check(name, false, { error: e.message }); } };
+    /** what has keyboard focus: '#id', else its label or text ('BODY' when focus fell to the page) */
+    const focused = () => S(() => { const a = document.activeElement; return !a || a === document.body ? 'BODY' : a.id ? '#' + a.id : a.getAttribute('aria-label') || a.textContent.trim().slice(0, 40); });
+    const frontPanel = () => S(() => document.querySelector('[role=tablist][aria-label="Open panels"] [role=tab][aria-selected=true]')?.textContent.trim() ?? null);
+    const tab = (n) => page.getByRole('tablist', { name: 'Open panels' }).getByRole('tab', { name: n, exact: true });
+    const simCenter = () => page.locator('section[aria-label="Simulation center"]');
+    const openSim = async () => { if (!(await S(() => window.__deeptraceStore.getState().panels.simulation))) await page.getByRole('button', { name: 'Open simulation center' }).first().click(); await sleep(400); };
+    const fillAB = () => S(async () => { const P = (id) => window.__deeptraceStore.getState().presets.find((x) => x.id === id).scenario;
+      await window.__deeptraceStore.getState().runSimulation(P('A-DS-FIVEPOINTS'), 'A'); await window.__deeptraceStore.getState().runSimulation(P('B-EDGEWOOD-DUCTBANK'), 'B'); });
+    const draft = async () => ((await page.locator('#analyst-input').count()) ? page.locator('#analyst-input').inputValue() : '(no analyst)');
+    let simulateRequests = 0;
+    page.on('request', (r) => { if (r.url().includes('/api/simulate')) simulateRequests++; });
+
+    const runName = 'R16 Run as scenario A keeps keyboard focus while it runs (Enter does nothing more), then hands it to the Results tab';
+    await ui16(runName, async () => {
+      await reset(); await openSim();
+      await simCenter().getByRole('tablist', { name: 'Simulation view' }).getByRole('tab', { name: 'Scenarios' }).click(); await sleep(300);
+      const name = await S(() => window.__deeptraceStore.getState().presets[0].name);
+      const g = gate('/api/simulate');
+      await page.keyboard.press('Shift'); // keyboard use
+      await page.getByRole('button', { name: `Run ${name} as scenario A`, exact: true }).focus();
+      await page.keyboard.press('Enter'); await within(g.hit, 5000, 'the run'); await sleep(300);
+      const during = await focused();
+      const before = simulateRequests;
+      await page.keyboard.press('Enter'); await sleep(400); // ignored while it runs
+      const extra = simulateRequests - before;
+      g.release();
+      await page.waitForFunction(() => { const s = window.__deeptraceStore.getState(); return !!s.slots.A && s.simStatus === 'idle'; }, null, { timeout: 60000 }); await sleep(1500);
+      st = { during, extra, after: await focused() };
+      check(runName, st.during === `Run ${name} as scenario A` && st.extra === 0 && st.after === 'Results', st);
+    });
+
+    const busyName = 'R16 Compare and the inspector\'s Trace keep keyboard focus while they run';
+    await ui16(busyName, async () => {
+      await reset(); await fillAB(); await openSim();
+      let g = gate('/api/compare');
+      await page.keyboard.press('Shift');
+      await simCenter().getByRole('button', { name: 'Compare', exact: true }).focus();
+      await page.keyboard.press('Enter'); await within(g.hit, 5000, 'the Compare'); await sleep(300);
+      const duringCompare = await focused();
+      g.release();
+      await page.waitForFunction(() => { const s = window.__deeptraceStore.getState(); return !!s.comparison && s.compareStatus === 'idle'; }, null, { timeout: 60000 }); await sleep(600);
+      const afterCompare = await focused();
+      await S(async () => { await window.__deeptraceStore.getState().selectNode('PWR-TS-SOUTH', { fly: false }); }); await sleep(600);
+      g = gate('/api/trace');
+      await page.keyboard.press('Shift');
+      await page.getByRole('button', { name: 'Trace', exact: true }).first().focus();
+      await page.keyboard.press('Enter'); await within(g.hit, 5000, 'the trace'); await sleep(300);
+      const duringTrace = await focused();
+      g.release();
+      await page.waitForFunction(() => window.__deeptraceStore.getState().traceVisible, null, { timeout: 60000 }); await sleep(600);
+      st = { duringCompare, afterCompare, duringTrace, afterTrace: await focused() };
+      check(busyName, st.duringCompare === 'Compare' && st.afterCompare === 'Compare' && st.duringTrace === 'Trace' && st.afterTrace === 'Hide trace', st);
+    });
+
+    const stopName = 'R16 Stop answer and Clear conversation leave keyboard focus on the question box';
+    await ui16(stopName, async () => {
+      await reset();
+      await S(() => window.__deeptraceStore.getState().setPanel('analyst', true)); await sleep(400);
+      const g = gate('/api/analyst/chat');
+      await S(() => { window.__deeptraceStore.getState().sendAnalystMessage('Which component is the most important in this network?'); });
+      await within(g.hit, 5000, 'the question'); await sleep(300);
+      await page.keyboard.press('Shift');
+      await page.getByRole('button', { name: 'Stop answer', exact: true }).focus();
+      const onStop = await focused();
+      await page.keyboard.press('Enter'); await sleep(500);
+      const afterStop = await focused();
+      g.fail = 'refused'; g.release();
+      await page.getByRole('button', { name: 'Clear conversation', exact: true }).focus();
+      const onClear = await focused();
+      await page.keyboard.press('Enter'); await sleep(500);
+      st = { onStop, afterStop, onClear, afterClear: await focused(), messages: await S(() => window.__deeptraceStore.getState().messages.length) };
+      check(stopName, st.onStop === 'Stop answer' && st.afterStop === '#analyst-input' && st.onClear === 'Clear conversation' && st.afterClear === '#analyst-input' && st.messages === 0, st);
+    });
+
+    const typingName = 'R16 a Compare that lands while you type a question leaves the analyst in front with your draft and keyboard focus';
+    await ui16(typingName, async () => {
+      await reset(); await fillAB(); await openSim();
+      await S(() => window.__deeptraceStore.getState().setPanel('analyst', true)); await sleep(400);
+      const g = gate('/api/compare');
+      await simCenter().getByRole('button', { name: 'Compare', exact: true }).click(); await within(g.hit, 5000, 'the Compare');
+      await page.locator('#analyst-input').fill(''); await page.locator('#analyst-input').click(); await page.keyboard.type('Why is B worse', { delay: 15 });
+      g.release();
+      await page.waitForFunction(() => { const s = window.__deeptraceStore.getState(); return !!s.comparison && s.compareStatus === 'idle'; }, null, { timeout: 60000 }); await sleep(800);
+      await page.keyboard.type(' downtown', { delay: 15 }); await sleep(300); // 'd' would turn Deep Mode on outside a text field
+      st = { focus: await focused(), draft: await draft(), front: await frontPanel(), view: await S(() => window.__deeptraceStore.getState().compareView),
+        deepMode: await S(() => window.__deeptraceStore.getState().deepMode), compareOpen: await S(() => window.__deeptraceStore.getState().panels.comparison) };
+      check(typingName, st.focus === '#analyst-input' && st.draft === 'Why is B worse downtown' && st.front === 'Analyst' && st.view === 'diff' && !st.deepMode && st.compareOpen, st);
+    });
+
+    const draftName = 'R16 the analyst keeps an unsent question while another panel is in front';
+    await ui16(draftName, async () => {
+      await reset();
+      await S(() => { const s = window.__deeptraceStore.getState(); s.setPanel('analyst', true); s.setPanel('provenance', true); }); await sleep(400);
+      await tab('Analyst').click(); await sleep(400);
+      await page.locator('#analyst-input').fill(''); await page.locator('#analyst-input').click(); await page.keyboard.type('draft one', { delay: 15 });
+      await tab('Provenance').click(); await page.locator('#analyst-input').waitFor({ state: 'detached', timeout: 10000 });
+      await tab('Analyst').click(); await page.locator('#analyst-input').waitFor({ timeout: 10000 }); await sleep(300);
+      st = { draft: await draft() };
+      await S(() => window.__deeptraceStore.getState().setPanel('provenance', false));
+      check(draftName, st.draft === 'draft one', st);
+    });
+
+    const paletteName = 'R16 the command palette keeps Tab inside and gives keyboard focus back to what had it when it closes';
+    await ui16(paletteName, async () => {
+      await reset();
+      const search = page.getByRole('button', { name: 'Search components and commands', exact: true }).first();
+      const inPalette = () => S(() => !!document.activeElement?.closest('[role=dialog][aria-label="Search components and commands"]'));
+      await page.keyboard.press('Shift');
+      await search.focus();
+      await page.keyboard.press('Enter'); await sleep(600); // opens the palette
+      const opened = await inPalette();
+      await page.keyboard.press('Shift+Tab'); await sleep(200);
+      const shiftTab = await inPalette();
+      await page.keyboard.press('Escape'); await sleep(800);
+      const afterEscape = await focused();
+      // a question being typed: Ctrl+K and Escape, and typing goes on in the question box
+      await S(() => window.__deeptraceStore.getState().setPanel('analyst', true)); await sleep(400);
+      await page.locator('#analyst-input').fill(''); await page.locator('#analyst-input').click(); await page.keyboard.type('why', { delay: 15 });
+      await page.keyboard.press('Control+k'); await sleep(600);
+      await page.keyboard.press('Escape'); await sleep(800);
+      await page.keyboard.type(' does it fail', { delay: 15 }); await sleep(300);
+      st = { opened, shiftTab, afterEscape, typing: await focused(), draft: await draft(), deepMode: await S(() => window.__deeptraceStore.getState().deepMode) };
+      check(paletteName, st.opened && st.shiftTab && st.afterEscape === 'Search components and commands' && st.typing === '#analyst-input' && st.draft === 'why does it fail' && !st.deepMode, st);
+    });
+    await page.locator('#analyst-input').fill('');
+    await reset();
+    await S(() => window.__deeptraceStore.getState().setPanel('analyst', false));
   }
 
   // R2: a live result keeps its provenance after a failover (not relabelled "precomputed")
@@ -1155,6 +1673,7 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
 
   check('no page errors', errors.length === 0, errors.slice(0, 5));
   await browser.close();
+  streamServer.close();
   const failed = results.filter((r) => !r.ok);
   console.log(`\n${results.length - failed.length}/${results.length} passed`);
   process.exit(failed.length ? 1 : 0);

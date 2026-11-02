@@ -20,6 +20,42 @@ import type { EdgeState, NodeState, ProvenanceCategory, SystemType } from "@/typ
 
 export const cx = clsx;
 
+/**
+ * When the focused control inside the returned ref's element is disabled or removed (Stop swapped for
+ * Send, Clear once the chat is empty, the Scenarios tab replaced by Results when a run lands, the stale
+ * banner's Re-run), the browser drops keyboard focus to <body>. Move it to `fallback(root)` instead.
+ * Focus that leaves for somewhere else (a click on the map: the control is still there and enabled)
+ * is left alone.
+ */
+export function useFocusFallback<T extends HTMLElement>(fallback: (root: T) => HTMLElement | null | undefined) {
+  const fallbackRef = useRef(fallback);
+  useEffect(() => {
+    fallbackRef.current = fallback;
+  });
+  // a callback ref, so a root that mounts later (the simulation center opening) is watched too
+  return useCallback((root: T | null) => {
+    if (!root) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onFocusOut = (e: FocusEvent) => {
+      const lost = e.target;
+      if (e.relatedTarget || !(lost instanceof HTMLElement)) return;
+      clearTimeout(timer);
+      // after the commit that disabled or removed it (not a frame: the map can hold frames back)
+      timer = setTimeout(() => {
+        const active = document.activeElement;
+        if (active && active !== document.body) return;
+        if (lost.isConnected && !lost.matches(":disabled")) return;
+        if (root.isConnected) fallbackRef.current(root)?.focus({ preventScroll: true });
+      }, 0);
+    };
+    root.addEventListener("focusout", onFocusOut);
+    return () => {
+      clearTimeout(timer);
+      root.removeEventListener("focusout", onFocusOut);
+    };
+  }, []);
+}
+
 // ---------------------------------------------------------------------------
 // Tooltip (portal, so it is never clipped by scroll containers)
 // ---------------------------------------------------------------------------
@@ -138,7 +174,12 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: Variant;
   size?: Size;
   icon?: ReactNode;
+  /** A request of this control is in flight: shows a spinner; like `busy` otherwise. */
   loading?: boolean;
+  /** Unavailable while a request runs: activation is ignored but the control keeps keyboard focus
+   *  (aria-disabled). `disabled` is for a control that cannot act at all: a focused button that becomes
+   *  `disabled` drops keyboard focus to <body>, so a keyboard user's next Enter does nothing. */
+  busy?: boolean;
 }
 
 export function Button({
@@ -146,19 +187,28 @@ export function Button({
   size = "sm",
   icon,
   loading,
+  busy,
   className,
   children,
   disabled,
   type = "button",
+  onClick,
   ...rest
 }: ButtonProps) {
+  const held = !disabled && !!(loading || busy);
   return (
     <button
       type={type}
-      disabled={disabled || loading}
+      disabled={disabled}
+      aria-disabled={held || undefined}
+      aria-busy={loading || undefined}
+      onClick={(e) => {
+        if (held) e.preventDefault();
+        else onClick?.(e);
+      }}
       className={cx(
         "inline-flex shrink-0 items-center justify-center whitespace-nowrap transition-colors duration-150 select-none",
-        "disabled:pointer-events-none disabled:opacity-40",
+        "disabled:pointer-events-none disabled:opacity-40 aria-disabled:pointer-events-none aria-disabled:opacity-40",
         VARIANTS[variant],
         SIZES[size],
         className,

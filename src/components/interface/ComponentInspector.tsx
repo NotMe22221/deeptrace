@@ -282,11 +282,16 @@ function ActionCell({
     <Tooltip label={title ?? label} side="bottom" className="flex-1">
       <button
         type="button"
-        onClick={onClick}
-        disabled={disabled || loading}
+        // while loading the cell keeps keyboard focus (aria-disabled), see Button's `busy`
+        onClick={() => {
+          if (!loading) onClick();
+        }}
+        disabled={disabled}
+        aria-disabled={(!disabled && loading) || undefined}
+        aria-busy={loading || undefined}
         aria-pressed={active}
         className={cx(
-          "flex h-[46px] w-full flex-col items-center justify-center gap-1 rounded-lg border text-[10.5px] leading-none transition-colors disabled:opacity-40",
+          "flex h-[46px] w-full flex-col items-center justify-center gap-1 rounded-lg border text-[10.5px] leading-none transition-colors disabled:opacity-40 aria-disabled:opacity-40",
           tone === "danger"
             ? "border-alert/30 bg-alert/[0.1] text-[#fda4af] hover:bg-alert/[0.18]"
             : active

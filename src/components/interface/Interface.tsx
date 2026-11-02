@@ -65,7 +65,7 @@ const GLASS_CSS = `.dt-ui .dt-panel{background:rgba(7,11,20,0.86)}.dt-ui .dt-pan
 
 /** Store → interface reactions that are not tied to a single component. */
 function useInterfaceReactions(narrow: boolean, compact: boolean) {
-  const focusRight = useUI((s) => s.focusRight);
+  const surfaceRight = useUI((s) => s.surfaceRight);
   const bumpDeepFx = useUI((s) => s.bumpDeepFx);
   const setSimTab = useUI((s) => s.setSimTab);
   const narrowRef = useRef(narrow);
@@ -86,14 +86,16 @@ function useInterfaceReactions(narrow: boolean, compact: boolean) {
         for (const k of RIGHT) {
           if (s.panels[k] && !prev.panels[k]) {
             if (k === "inspector" && s.analystPending) continue;
-            focusRight(k);
+            surfaceRight(k);
             // Laptop widths: give the map room by folding the explorer to its rail.
             if (compactRef.current && !narrowRef.current && s.panels.layers && window.innerWidth < 1360)
               s.setPanel("layers", false);
           }
         }
         const sel = s.selectedNodeId ?? s.selectedEdgeId;
-        if (sel && sel !== (prev.selectedNodeId ?? prev.selectedEdgeId) && !s.analystPending) focusRight("inspector");
+        if (sel && sel !== (prev.selectedNodeId ?? prev.selectedEdgeId) && !s.analystPending) surfaceRight("inspector");
+        // a demo step brings its panel to the front even when it was already open behind another one
+        if (s.panelFront && s.panelFront !== prev.panelFront) surfaceRight(s.panelFront.key);
         if (s.deepMode && !prev.deepMode) bumpDeepFx();
         if (s.result && s.result !== prev.result) setSimTab("results");
         if (narrowRef.current) {
@@ -103,12 +105,13 @@ function useInterfaceReactions(narrow: boolean, compact: boolean) {
           if (opened === "simulation" && s.panels.layers) s.setPanel("layers", false);
         }
       }),
-    [focusRight, bumpDeepFx, setSimTab],
+    [surfaceRight, bumpDeepFx, setSimTab],
   );
 }
 
 function RightTabs({ visible, front }: { visible: RightPanel[]; front: RightPanel }) {
   const focusRight = useUI((s) => s.focusRight);
+  const attention = useUI((s) => s.rightAttention);
   if (visible.length < 2) return null;
   return (
     <div role="tablist" aria-label="Open panels" className="dt-panel mb-2 flex shrink-0 gap-0.5 p-1">
@@ -129,6 +132,7 @@ function RightTabs({ visible, front }: { visible: RightPanel[]; front: RightPane
           >
             <Icon className="size-3.5" />
             {label}
+            {!active && attention.includes(k) && <span aria-hidden className="size-1.5 rounded-full bg-sky-300" />}
           </button>
         );
       })}
@@ -200,7 +204,7 @@ export function Interface() {
                 {sheet === "right" && front ? (
                   <>
                     <RightTabs visible={visible} front={front} />
-                    <aside className="dt-panel-strong flex h-[64vh] min-h-0 flex-col overflow-hidden">
+                    <aside data-right-panel={front} className="dt-panel-strong flex h-[64vh] min-h-0 flex-col overflow-hidden">
                       <RightBody k={front} />
                     </aside>
                   </>
@@ -273,6 +277,7 @@ export function Interface() {
               <AnimatePresence mode="wait" initial={false}>
                 <motion.aside
                   key={front}
+                  data-right-panel={front}
                   aria-label={RIGHT_META[front].label}
                   className="dt-panel pointer-events-auto flex min-h-0 flex-1 flex-col overflow-hidden"
                   initial={{ opacity: 0, y: 4 }}
