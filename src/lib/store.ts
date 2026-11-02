@@ -965,6 +965,8 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
         detailsLoading: true,
         panels: { ...s.panels, inspector: true },
       }));
+      /** Trace actions so far: the trace follows this selection only if none is taken before its details land. */
+      const tracesAtClick = traceSeq;
       if (opts?.fly) world().flyToNode(id);
       let details: NodeDetails | null = null;
       if (get().dataMode === "live") {
@@ -977,7 +979,9 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
       if (get().selectedNodeId !== id) return; // a newer selection superseded this one
       set({ details, detailsLoading: false });
       if (opts?.trace) await get().showTrace(id);
-      else if (get().traceVisible && get().trace?.node_id !== id) await get().showTrace(id);
+      // The trace on screen follows the selection as of the click: a trace requested, shown by an analyst
+      // answer or hidden since then is newer than the click, whether it landed before these details or after.
+      else if (traceSeq === tracesAtClick && get().traceVisible && get().trace?.node_id !== id) await get().showTrace(id);
     },
     selectEdge: (id) =>
       set((s) => ({
@@ -1717,14 +1721,22 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
             // The step has its own place on the request timeline: it takes the map back from an answer
             // to a question asked before it (see the wait below), but not from something started after
             // it that took the map (your run or Compare, or an answer to a question asked meanwhile),
-            // nor from a run started after it that is still in flight (it replaces A when it lands).
+            // nor from your run or Compare started after it that is still in flight (it replaces A when
+            // it lands; one that fails never counts).
             const stepSeq = ++reqSeq;
             /** Request numbers of this step's own runs for A. */
             const ownRuns = new Set<number>();
-            /** Something started after this step took the map, or a run started after it is still in flight. */
-            const yieldsToLater = () =>
-              (displaySeq > stepSeq && !ownRuns.has(displaySeq)) ||
-              (simSeq > stepSeq && !ownRuns.has(simSeq) && !!liveRuns.get(simSeq)?.alive());
+            /**
+             * A request you started after this step is still in flight and can still take the map: your
+             * newest run (not one of the step's own) that nothing newer has taken the map from, or your
+             * Compare. It replaces A when it lands, and a failed one never counts, so the step decides
+             * only once it has settled. (Each of these settling updates the store: the waits below wake.)
+             */
+            const newerInFlight = () =>
+              (simSeq > stepSeq && simSeq > displaySeq && !ownRuns.has(simSeq) && !!liveRuns.get(simSeq)?.alive()) ||
+              (compareSeq > stepSeq && get().compareStatus === "running");
+            /** Something started after this step took the map, or a request started after it is still in flight. */
+            const yieldsToLater = () => (displaySeq > stepSeq && !ownRuns.has(displaySeq)) || newerInFlight();
             /** Scenario A is what the map shows (not under the A/B diff). */
             const aShown = () => {
               const { result: r, compareView } = get();
@@ -1747,10 +1759,12 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
             };
             // sendAnalystMessage ignores calls while another answer is streaming: wait for it instead
             // of silently skipping the scripted question. That answer (asked earlier) may put another
-            // result on the map, so A is put back on screen once it is done. The step's own run may land
-            // in slot A without taking the map (a run you started after it was newer and has failed
-            // since): A is then shown from its slot too, whether or not the step had to wait, so the
-            // decision does not depend on whether that run landed before or after the answer ended.
+            // result on the map, so A is put back on screen once it is done. Wait the same way for your
+            // run or Compare started after this step that is still in flight: once it has landed it
+            // holds the map (no question), and once it has failed A is put on screen after all. The
+            // step's own run may land in slot A without taking the map (a run you started after it was
+            // newer): A is then shown from its slot too, whether or not the step had to wait. So the
+            // decision does not depend on the order the answer, the step's run and yours land in.
             for (;;) {
               const ranBefore: boolean = ranA;
               await showA();
@@ -1758,10 +1772,14 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
               if (get().analystPending) {
                 await waitUntil(() => !get().analystPending || !current());
                 if (!current()) return;
+              } else if (newerInFlight()) {
+                // decide once it has landed (it took the map: no question) or failed (it never counts)
+                await waitUntil(() => !newerInFlight() || !current());
+                if (!current()) return;
               } else if (ranA === ranBefore) break; // A is on screen now, or this step will not put it there
             }
-            // A is not on screen (its run failed or a newer run you requested replaces it, or something
-            // started after this step took the map): the question is about A, so it is not asked.
+            // A is not on screen (its run failed, or something started after this step took the map):
+            // the question is about A, so it is not asked.
             if (!aShown()) break;
             await get().sendAnalystMessage(step.question);
             break;

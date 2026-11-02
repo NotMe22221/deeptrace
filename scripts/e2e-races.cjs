@@ -772,12 +772,28 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
         await S(([id, node]) => { window.__ops[id] = window.__deeptraceStore.getState().selectNode(node, { fly: false }); }, [id, node]);
         await within(g.hit, 5000, 'trace ' + id);
       },
+      /** click `node` with its details held as `id` (landing it does not wait for a follow-trace it then makes) */
+      async click(id, node) {
+        const g = (ops[id] = gate('/api/nodes/'));
+        g.settle = 300; // the details only: their follow-trace may itself be held
+        await S((node) => { window.__deeptraceStore.getState().selectNode(node, { fly: false }); }, node);
+        await within(g.hit, 5000, 'details ' + id);
+      },
+      /** the inspector's Trace button on the selected `node` (not clicking it first), held as `id` */
+      async trace(id, node) {
+        const g = (ops[id] = gate('/api/trace'));
+        await S(([id, node]) => { window.__ops[id] = window.__deeptraceStore.getState().showTrace(node); }, [id, node]);
+        await within(g.hit, 5000, 'trace ' + id);
+      },
+      /** hold the next request to `url` as `id` if one is made (a request the store may or may not make) */
+      maybe(id, url) { ops[id] = gate(url); },
+      async landIfMade(id, fail = false) { if (ops[id].taken) await H.land(id, fail); },
       /** the held request lands (fails with HTTP 500 when `fail`: true or the failure's message) and the store settles it */
       async land(id, fail = false) {
         ops[id].fail = fail;
         ops[id].release();
         await S((id) => Promise.resolve(window.__ops[id]).catch(() => {}), id);
-        await sleep(60);
+        await sleep(ops[id].settle ?? 60);
       },
       async ask(id) {
         const g = (ops['q' + id] = gate('/api/analyst/chat'));
@@ -998,6 +1014,44 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
       if (runFirst) { await H.land('r2'); await answer(); } else { await answer(); await H.land('r2'); }
       await S(() => window.__deeptraceStore.getState().showSlot('A')); await sleep(60);
     }));
+    // The demo's Ask the AI step decides only once your run or Compare started after it has settled
+    // (one that lands holds the map: no question; one that fails never counts)
+    await pair13('R13 demo Ask the AI asks when your newer run fails, before or after its run for A lands', [false, true].map((stepFirst) => async () => {
+      await H.startDemo(); await H.demo(7, { dA: '/api/simulate' }); await H.run('r2', 'active', 'E-ROADS-FIVEPOINTS');
+      if (stepFirst) { await H.land('dA'); await H.land('r2', 'engine 500'); } else { await H.land('r2', 'engine 500'); await H.land('dA'); }
+      await H.done(7);
+    }), (f) => f.demoAsked.length === 1 && f.demoAsked[0] === 'A-DS-FIVEPOINTS' && !f.demoBusy);
+    await pair13('R13 demo Ask the AI does not ask over your newer run, whether it lands before or after an earlier answer ends', [false, true].map((runFirst) => async () => {
+      await H.startDemo(); await H.demo(5, { dA: '/api/simulate' }); await H.land('dA'); await H.done(5);
+      await H.ask(4); await H.demo(7); await H.run('r5', 'active', 'E-ROADS-FIVEPOINTS');
+      if (runFirst) { await H.land('r5'); await H.answer(4, []); } else { await H.answer(4, []); await H.land('r5'); }
+      await H.done(7);
+    }), (f) => f.demoAsked.length === 0 && f.map === 'R:E-ROADS-FIVEPOINTS' && !f.demoBusy);
+    await pair13('R13 demo Ask the AI does not ask over your Compare, whether it lands before or after an earlier answer ends', [false, true].map((cmpFirst) => async () => {
+      await H.startDemo(); await H.demo(5, { dA: '/api/simulate' }); await H.land('dA'); await H.done(5); await H.demo(8, { dB: '/api/simulate' }); await H.land('dB'); await H.done(8);
+      await H.ask(4); await H.demo(7); await H.cmp('c5');
+      if (cmpFirst) { await H.land('c5'); await H.answer(4, []); } else { await H.answer(4, []); await H.land('c5'); }
+      await H.done(7);
+    }), (f) => f.demoAsked.length === 0 && f.map === AB && !f.demoBusy);
+    // A clicked component's trace follows the click only if no trace action came after the click,
+    // whether its details land before or after that action
+    const edge13 = await S(() => [...window.__deeptraceStore.getState().index.edges.keys()][0]);
+    const clickThenTrace13 = async () => { await H.utrace('t1', 'PWR-TS-SOUTH'); await H.land('t1'); await H.click('n5', 'PWR-DS-FIVEPOINTS'); await H.trace('t5', 'PWR-DS-FIVEPOINTS'); H.maybe('t6', '/api/trace'); };
+    await pair13('R13 a trace you request while the clicked component\'s details load is kept (then a connection is clicked)', [false, true].map((detailsFirst) => async () => {
+      await clickThenTrace13();
+      if (detailsFirst) { await H.land('n5'); await H.land('t5'); } else { await H.land('t5'); await H.land('n5'); }
+      await S((e) => window.__deeptraceStore.getState().selectEdge(e), edge13); await H.landIfMade('t6'); await sleep(60);
+    }), (f) => f.traceOf === 'PWR-DS-FIVEPOINTS');
+    await pair13('R13 a trace you request while the clicked component\'s details load is not replaced by a failing re-trace', [false, true].map((detailsFirst) => async () => {
+      await clickThenTrace13();
+      if (detailsFirst) { await H.land('n5'); await H.land('t5'); } else { await H.land('t5'); await H.land('n5'); }
+      await H.landIfMade('t6', 'trace 500');
+    }), (f) => f.traceOf === 'PWR-DS-FIVEPOINTS' && f.err === null);
+    await pair13('R13 an answer\'s trace is kept whether a component clicked before asking gets its details before or after', [false, true].map((detailsFirst) => async () => {
+      await H.click('n1', 'PWR-TS-SOUTH'); await H.ask(2);
+      if (detailsFirst) { await H.land('n1'); await H.answer(2, [act.trace()]); } else { await H.answer(2, [act.trace()]); await H.land('n1'); }
+      await sleep(400);
+    }), (f) => f.traceOf === 'PWR-DS-FIVEPOINTS');
     // With several failed requests the toast reports the newest request's failure, whichever lands last.
     // An inspector trace sits on the request timeline after the requests made before it.
     await pair13('R13 Run as A and a newer Run both fail: the toast reports the newer Run in either landing order', orders13(

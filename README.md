@@ -298,8 +298,8 @@ step, simulation, trace or analyst answer in flight, so a slow response can neve
 state the presenter just cleared; exiting mid-reveal turns every layer back on. Steps can be
 reached in any order (step chips, ← →): a step that is about scenario A, such as the analyst
 question, puts A on screen first, and skips its question when A cannot be shown (its run failed,
-or a run, Compare or answer you started meanwhile took the map, or a run you started is still in
-flight). The Compare step first waits for what can still change a slot (your runs, an answer still
+or a run, Compare or answer you started meanwhile took the map); it waits for a run or Compare you
+started after it to land or fail before it decides. The Compare step first waits for what can still change a slot (your runs, an answer still
 streaming, a Compare in flight) and runs its presets only into slots still empty; the Trace step
 keeps its trace on screen against a Compare started before it. Runs, comparisons and analyst
 questions share one timeline, and an analyst answer counts as asked when its question was sent.
@@ -314,7 +314,8 @@ something requested after it took the map, or a run requested before it took the
 another scenario in a compared slot. The error message reports the newest failed request,
 whichever failure lands last, and a failure of a request the answer superseded is dropped whether
 it lands before or after the answer (as is a failed trace once another selection, Hide trace or a
-newer trace replaced it). All of this is checked with held requests landing in every
+newer trace replaced it). A clicked component's trace follows the click only if no trace was
+requested, shown or hidden after the click, whenever its details arrive. All of this is checked with held requests landing in every
 order (`scripts/e2e-races.cjs`, R13). A streaming analyst answer can be stopped at any time, and the
 backend sends SSE heartbeats so a stalled connection is detected (90 s without data) rather
 than hanging.
