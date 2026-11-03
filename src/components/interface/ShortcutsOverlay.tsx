@@ -2,6 +2,7 @@
 import { X } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useRef } from "react";
+import { useStore } from "@/lib/store";
 import { IconButton, Kbd } from "./ui";
 import { useUI } from "./uiStore";
 
@@ -25,8 +26,31 @@ export function ShortcutsOverlay() {
   const open = useUI((s) => s.shortcutsOpen);
   const setOpen = useUI((s) => s.setShortcutsOpen);
   const ref = useRef<HTMLDivElement>(null);
+  // Modal focus, as in the command palette: on open focus the dialog and remember the control that had
+  // keyboard focus; while open keep focus inside; once it closes (Esc, ?, Close, a backdrop click) give
+  // focus back to that control, unless focus already moved somewhere on purpose. A control focused by a
+  // pointer press is not handed focus back. The command palette (Ctrl/Cmd+K still opens it from here)
+  // keeps its own focus while it is open.
   useEffect(() => {
-    if (open) ref.current?.focus();
+    if (!open) return;
+    const dialog = ref.current;
+    const prev = document.activeElement;
+    const opener =
+      prev instanceof HTMLElement && prev !== document.body && !dialog?.contains(prev) && prev.matches(":focus-visible")
+        ? prev
+        : null;
+    dialog?.focus();
+    const keepInside = (e: FocusEvent) => {
+      if (!useUI.getState().shortcutsOpen || useStore.getState().panels.search) return;
+      if (dialog && e.target instanceof Node && !dialog.contains(e.target)) dialog.focus();
+    };
+    document.addEventListener("focusin", keepInside);
+    return () => {
+      document.removeEventListener("focusin", keepInside);
+      const now = document.activeElement;
+      if (opener?.isConnected && (!now || now === document.body || dialog?.contains(now)))
+        opener.focus({ preventScroll: true });
+    };
   }, [open]);
   return (
     <AnimatePresence>
@@ -48,6 +72,13 @@ export function ShortcutsOverlay() {
             role="dialog"
             aria-modal="true"
             aria-label="Keyboard shortcuts"
+            onKeyDown={(e) => {
+              // aria-modal: Tab / Shift+Tab stay in the overlay (Close is its only control).
+              if (e.key === "Tab") {
+                e.preventDefault();
+                e.currentTarget.querySelector<HTMLElement>("button")?.focus();
+              }
+            }}
             initial={{ opacity: 0, scale: 0.98 }}
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 0.98 }}

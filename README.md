@@ -307,7 +307,8 @@ analyst answer counts as asked when its question was sent:
 
 - Nothing started before asking takes the map back from the answer when it lands later. An older
   slot run still fills its slot, and the analyst's comparison then shows "Slots changed since this
-  comparison".
+  comparison". If it lands before the comparison without taking the map, the comparison shows
+  the same as when it lands after.
 - The answer is held back only by something started after asking that has already landed: the
   map, the comparison or that slot, including the answer's highlights and traces. A newer request
   still in flight replaces the answer when it lands, and one that failed or was cancelled never

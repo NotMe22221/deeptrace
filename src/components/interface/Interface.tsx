@@ -14,8 +14,9 @@
  */
 import { Bot, BookOpenCheck, Crosshair, GitCompareArrows, type LucideIcon } from "lucide-react";
 import { AnimatePresence, MotionConfig, motion } from "framer-motion";
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useStore } from "@/lib/store";
+import { isTypingTarget } from "@/lib/format";
 import { useViewport } from "@/hooks/useViewport";
 import { usePlaybackDriver } from "@/hooks/usePlaybackDriver";
 import { useGlobalShortcuts } from "@/hooks/useGlobalShortcuts";
@@ -34,7 +35,7 @@ import { ScenarioComparison } from "./ScenarioComparison";
 import { ShortcutsOverlay } from "./ShortcutsOverlay";
 import { SimulationPanel } from "./SimulationPanel";
 import { Toasts } from "./Toasts";
-import { cx } from "./ui";
+import { cx, useSurfaceFocusFallback } from "./ui";
 import { useUI, type RightPanel } from "./uiStore";
 import { openPanel } from "./actions";
 
@@ -45,6 +46,9 @@ const RIGHT_META: Record<RightPanel, { label: string; Icon: LucideIcon }> = {
   comparison: { label: "Compare", Icon: GitCompareArrows },
   provenance: { label: "Provenance", Icon: BookOpenCheck },
 };
+
+/** Demo steps that run or replay a simulation: on phones what they show is in the simulation sheet. */
+const SIM_STEPS: ReadonlySet<string> = new Set(["simulate", "cascade", "simulate_b"]);
 
 const GAP = 12;
 const TOP = 72;
@@ -94,8 +98,14 @@ function useInterfaceReactions(narrow: boolean, compact: boolean) {
         }
         const sel = s.selectedNodeId ?? s.selectedEdgeId;
         if (sel && sel !== (prev.selectedNodeId ?? prev.selectedEdgeId) && !s.analystPending) surfaceRight("inspector");
-        // a demo step brings its panel to the front even when it was already open behind another one
-        if (s.panelFront && s.panelFront !== prev.panelFront) surfaceRight(s.panelFront.key);
+        // a demo step (or a click on the map) brings its panel to the front even when it was already open
+        // behind another one
+        if (s.panelFront && s.panelFront !== prev.panelFront) {
+          const k = s.panelFront.key;
+          // (on phones a later step's simulation sheet closed it: reached by Prev or a step chip, it opens again)
+          if (narrowRef.current && !s.panels[k]) s.setPanel(k, true);
+          surfaceRight(k);
+        }
         if (s.deepMode && !prev.deepMode) bumpDeepFx();
         if (s.result && s.result !== prev.result) setSimTab("results");
         if (narrowRef.current) {
@@ -103,6 +113,17 @@ function useInterfaceReactions(narrow: boolean, compact: boolean) {
           const opened = (["layers", "simulation"] as const).find((k) => s.panels[k] && !prev.panels[k]);
           if (opened === "layers" && s.panels.simulation) s.setPanel("simulation", false);
           if (opened === "simulation" && s.panels.layers) s.setPanel("layers", false);
+          // A demo step that runs or replays a simulation (Fail, Cascade, Alternative) shows it: the
+          // simulation sheet comes forward in place of the inspector / analyst / explorer sheet, as
+          // openPanel does for a tap (on wider layouts the dock is always on screen). Not while you type
+          // in a right panel's field: that panel keeps the front and its field keyboard focus.
+          const step = s.demo.busy && s.demo !== prev.demo ? s.demoScript?.steps[s.demo.step] : undefined;
+          const a = typeof document === "undefined" ? null : document.activeElement;
+          const typing = !!a && isTypingTarget(a) && !!a.closest("[data-right-panel]");
+          if (step && SIM_STEPS.has(step.action) && !typing) {
+            openPanel("simulation");
+            if (useStore.getState().panels.layers) useStore.getState().setPanel("layers", false);
+          }
         }
       }),
     [surfaceRight, bumpDeepFx, setSimTab],
@@ -140,6 +161,20 @@ function RightTabs({ visible, front }: { visible: RightPanel[]; front: RightPane
   );
 }
 
+/**
+ * Where keyboard focus goes when the control that had it went away with its surface: after Exit demo or
+ * Finish, the toolbar's Demo button (on phones the menu that holds it); after a right panel was replaced
+ * (Ask AI, a component chip, a connection row) or closed, the panel now in front, on the analyst's
+ * question box; with no panel left, the toolbar button that opens the closed one (or the menu).
+ */
+function surfaceFocusTarget(surface: HTMLElement): HTMLElement | null {
+  const menu = () => document.querySelector<HTMLElement>("[data-menu-toggle]");
+  if (surface.matches("[data-demo-bar]")) return document.querySelector<HTMLElement>("[data-demo-toggle]") ?? menu();
+  const front = document.querySelector<HTMLElement>("[data-right-panel]");
+  if (front) return front.querySelector<HTMLElement>("#analyst-input") ?? front;
+  return document.querySelector<HTMLElement>(`[data-panel-toggle="${surface.dataset.rightPanel}"]`) ?? menu();
+}
+
 function RightBody({ k }: { k: RightPanel }) {
   if (k === "inspector") return <ComponentInspector />;
   if (k === "analyst") return <AIAnalyst />;
@@ -161,9 +196,42 @@ export function Interface() {
   useInterfaceReactions(narrow, compact);
   usePlaybackDriver();
   useGlobalShortcuts();
+  const surfaceFocusRef = useSurfaceFocusFallback<HTMLDivElement>("[data-right-panel], [data-demo-bar]", surfaceFocusTarget);
+
+  // Phones: while the demo runs, a bottom sheet stops below the demo bar (it never covers the step's
+  // narration or controls). The bar's height changes with each step and the width, so it is observed.
+  const uiRoot = useRef<HTMLDivElement | null>(null);
+  const demoSlot = useRef<HTMLDivElement>(null);
+  const narrowRootRef = useCallback(
+    (el: HTMLDivElement | null) => {
+      uiRoot.current = el;
+      return surfaceFocusRef(el);
+    },
+    [surfaceFocusRef],
+  );
+  useEffect(() => {
+    const root = uiRoot.current;
+    const slot = demoSlot.current;
+    if (!narrow || !demoActive || !root || !slot) return;
+    const update = () =>
+      root.style.setProperty("--demo-bottom", `${Math.ceil(slot.getBoundingClientRect().bottom) + 8}px`);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(slot);
+    return () => {
+      ro.disconnect();
+      root.style.removeProperty("--demo-bottom");
+    };
+  }, [narrow, demoActive]);
 
   const visible = RIGHT.filter((k) => panels[k] && (k !== "inspector" || hasSelection));
   const front = [...rightOrder].reverse().find((k) => visible.includes(k)) ?? visible[visible.length - 1] ?? null;
+  // The front panel is on screen whichever way it got there (a click, or closing the one in front of it):
+  // its "new" dot is spent, so it does not come back when another panel later goes in front of it.
+  const clearAttention = useUI((s) => s.clearAttention);
+  useEffect(() => {
+    if (front) clearAttention(front);
+  }, [front, clearAttention]);
 
   const leftW = vp.width >= 1440 ? 288 : 272;
   const rightW = front === "comparison" ? (vp.width >= 1440 ? 420 : 392) : vp.width >= 1440 ? 384 : 360;
@@ -175,16 +243,23 @@ export function Interface() {
   const simOpen = panels.simulation;
   // The expanded dock stays clear of the world legend column when that legend carries content.
   const dockLeft = deepMode || compareView === "diff" ? Math.max(leftOffset, GAP + 288 + GAP) : leftOffset;
+  // The camera cluster sits at the right column's left edge and is lifted above the expanded dock (below),
+  // which puts it in the top-centre column's right edge: keep that column (demo bar, highlight chip,
+  // toasts) clear of the cluster's 40 px + gap, as it already is when no right panel is open.
+  const cameraLifted = !!front && simOpen;
+  const topCentreRight = cameraLifted ? rightOffset + 40 + GAP : rightOffset;
 
   if (narrow) {
     const sheet: "right" | "layers" | "sim" | null = front ? "right" : layersOpen ? "layers" : simOpen ? "sim" : null;
     return (
       <MotionConfig reducedMotion="user">
         <style>{GLASS_CSS}</style>
-        <div className="dt-ui pointer-events-none fixed inset-0 z-10">
+        <div ref={narrowRootRef} className="dt-ui pointer-events-none fixed inset-0 z-10">
           <MainToolbar />
           <div className="absolute top-[60px] right-2 left-2 z-20 flex flex-col gap-2">
-            <DemoBar />
+            <div ref={demoSlot} className="empty:hidden">
+              <DemoBar />
+            </div>
             <div className="flex justify-center">
               <HighlightChip />
             </div>
@@ -198,13 +273,18 @@ export function Interface() {
                 animate={{ y: 0 }}
                 exit={{ y: "100%" }}
                 transition={{ duration: 0.22, ease: [0.2, 0.8, 0.2, 1] }}
-                className="pointer-events-auto absolute inset-x-0 bottom-0 z-30 flex max-h-[72vh] flex-col px-2 pb-2"
+                className="pointer-events-auto absolute inset-x-0 bottom-0 z-30 flex max-h-[min(72vh,calc(100%-var(--demo-bottom,0px)))] flex-col px-2 pb-2"
               >
                 <div className="mx-auto mb-1.5 h-1 w-10 shrink-0 rounded-full bg-white/25" aria-hidden />
                 {sheet === "right" && front ? (
                   <>
                     <RightTabs visible={visible} front={front} />
-                    <aside data-right-panel={front} className="dt-panel-strong flex h-[64vh] min-h-0 flex-col overflow-hidden">
+                    <aside
+                      data-right-panel={front}
+                      aria-label={RIGHT_META[front].label}
+                      tabIndex={-1}
+                      className="dt-panel-strong flex h-[64vh] min-h-0 flex-col overflow-hidden"
+                    >
                       <RightBody k={front} />
                     </aside>
                   </>
@@ -235,7 +315,7 @@ export function Interface() {
   return (
     <MotionConfig reducedMotion="user">
       <style>{GLASS_CSS}</style>
-      <div className="dt-ui pointer-events-none fixed inset-0 z-10">
+      <div ref={surfaceFocusRef} className="dt-ui pointer-events-none fixed inset-0 z-10">
         <MainToolbar />
 
         {/* Left column: infrastructure explorer (or its rail) */}
@@ -279,6 +359,7 @@ export function Interface() {
                   key={front}
                   data-right-panel={front}
                   aria-label={RIGHT_META[front].label}
+                  tabIndex={-1}
                   className="dt-panel pointer-events-auto flex min-h-0 flex-1 flex-col overflow-hidden"
                   initial={{ opacity: 0, y: 4 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -295,7 +376,7 @@ export function Interface() {
         {/* Top-centre: demo bar + notices */}
         <div
           className="absolute flex flex-col items-center gap-2"
-          style={{ top: TOP, left: leftOffset, right: rightOffset }}
+          style={{ top: TOP, left: leftOffset, right: topCentreRight }}
         >
           <div className="w-full max-w-[680px]">
             <DemoBar />
@@ -327,7 +408,7 @@ export function Interface() {
             initial={false}
             animate={{
               right: front ? rightOffset : GAP,
-              bottom: front && simOpen ? dockH + GAP * 2 : RIGHT_BOTTOM_RESERVE,
+              bottom: cameraLifted ? dockH + GAP * 2 : RIGHT_BOTTOM_RESERVE,
             }}
             transition={{ duration: 0.22, ease: [0.2, 0.8, 0.2, 1] }}
           >

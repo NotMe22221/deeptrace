@@ -21,11 +21,57 @@ import type { EdgeState, NodeState, ProvenanceCategory, SystemType } from "@/typ
 export const cx = clsx;
 
 /**
- * When the focused control inside the returned ref's element is disabled or removed (Stop swapped for
- * Send, Clear once the chat is empty, the Scenarios tab replaced by Results when a run lands, the stale
- * banner's Re-run), the browser drops keyboard focus to <body>. Move it to `fallback(root)` instead.
- * Focus that leaves for somewhere else (a click on the map: the control is still there and enabled)
- * is left alone.
+ * What the user pressed last: a key, or a pointer (mouse, pen, touch). Tracked once for the page in the
+ * capture phase, so it is known before any handler runs and does not depend on how focus moved since
+ * (focus the app or a script moves around in between does not change it).
+ */
+let lastInput: "keyboard" | "pointer" = "keyboard";
+if (typeof document !== "undefined") {
+  document.addEventListener("keydown", () => (lastInput = "keyboard"), true);
+  document.addEventListener("pointerdown", () => (lastInput = "pointer"), true);
+}
+
+/**
+ * Watches `root` for the control inside it that has focus being disabled or removed: the browser then
+ * drops focus to <body>, so the next Enter does nothing. Focus is handed on only when the user is on the
+ * keyboard (their last press was a key): after a pointer press (a clicked button) it falls to the page as
+ * before, as with the highlight chip and the command palette's opener, so Space and the single-key
+ * shortcuts still work. Focus that leaves for somewhere else (a click on the map: the control is still
+ * there and enabled) is left alone. `onLost(lost)` runs as focus leaves, while `lost` is still in the
+ * page, and returns where focus goes instead (looked up after the commit that disabled or removed
+ * `lost`), or null to let it fall. Returns the cleanup.
+ */
+function watchKeyboardFocusLoss(
+  root: HTMLElement,
+  onLost: (lost: HTMLElement) => (() => HTMLElement | null | undefined) | null,
+) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const onFocusOut = (e: FocusEvent) => {
+    const lost = e.target;
+    if (lastInput !== "keyboard" || e.relatedTarget || !(lost instanceof HTMLElement)) return;
+    const target = onLost(lost);
+    if (!target) return;
+    clearTimeout(timer);
+    // after the commit that disabled or removed it (not a frame: the map can hold frames back)
+    timer = setTimeout(() => {
+      const active = document.activeElement;
+      if (active && active !== document.body) return; // a nested fallback (it runs first) or the user placed it
+      if (lost.isConnected && !lost.matches(":disabled")) return;
+      if (root.isConnected) target()?.focus({ preventScroll: true });
+    }, 0);
+  };
+  root.addEventListener("focusout", onFocusOut);
+  return () => {
+    clearTimeout(timer);
+    root.removeEventListener("focusout", onFocusOut);
+  };
+}
+
+/**
+ * When the control with keyboard focus inside the returned ref's element is disabled or removed (Stop
+ * swapped for Send, Clear once the chat is empty, the Scenarios tab replaced by Results when a run lands,
+ * the stale banner's Re-run), move keyboard focus to `fallback(root)` instead of letting it drop to
+ * <body> (see watchKeyboardFocusLoss: after a pointer press, focus is not handed on).
  */
 export function useFocusFallback<T extends HTMLElement>(fallback: (root: T) => HTMLElement | null | undefined) {
   const fallbackRef = useRef(fallback);
@@ -35,25 +81,38 @@ export function useFocusFallback<T extends HTMLElement>(fallback: (root: T) => H
   // a callback ref, so a root that mounts later (the simulation center opening) is watched too
   return useCallback((root: T | null) => {
     if (!root) return;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const onFocusOut = (e: FocusEvent) => {
-      const lost = e.target;
-      if (e.relatedTarget || !(lost instanceof HTMLElement)) return;
-      clearTimeout(timer);
-      // after the commit that disabled or removed it (not a frame: the map can hold frames back)
-      timer = setTimeout(() => {
-        const active = document.activeElement;
-        if (active && active !== document.body) return;
-        if (lost.isConnected && !lost.matches(":disabled")) return;
-        if (root.isConnected) fallbackRef.current(root)?.focus({ preventScroll: true });
-      }, 0);
-    };
-    root.addEventListener("focusout", onFocusOut);
-    return () => {
-      clearTimeout(timer);
-      root.removeEventListener("focusout", onFocusOut);
-    };
+    return watchKeyboardFocusLoss(root, () => () => fallbackRef.current(root));
   }, []);
+}
+
+/**
+ * useFocusFallback for a control whose own action replaces or removes the surface it lives in, taking the
+ * root of any useFocusFallback inside it along: the inspector's Ask AI (the analyst replaces the
+ * inspector), an answer's component chip or an inspector connection row (another inspector replaces this
+ * one), a right panel's Close, Exit demo and Finish (the demo bar goes). Put the returned ref on an
+ * element that stays mounted around the `surfaces` (a selector). The surface the control lived in is
+ * found as focus leaves (the control is still in the page then); `target(surface)` gets keyboard focus
+ * after the commit that removed the control. A useFocusFallback nested inside whose root is still there
+ * (Stop swapped for Send) runs first and keeps its say.
+ */
+export function useSurfaceFocusFallback<T extends HTMLElement>(
+  surfaces: string,
+  target: (surface: HTMLElement) => HTMLElement | null | undefined,
+) {
+  const targetRef = useRef(target);
+  useEffect(() => {
+    targetRef.current = target;
+  });
+  return useCallback(
+    (root: T | null) => {
+      if (!root) return;
+      return watchKeyboardFocusLoss(root, (lost) => {
+        const surface = lost.closest<HTMLElement>(surfaces);
+        return surface ? () => targetRef.current(surface) : null;
+      });
+    },
+    [surfaces],
+  );
 }
 
 // ---------------------------------------------------------------------------

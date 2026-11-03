@@ -622,10 +622,21 @@ export class WorldController {
     this.buildings.addModel(model);
   }
 
+  /**
+   * A click on a component on the map shows its inspector: it comes to the front also when the component
+   * is already selected or an answer is streaming (the interface's selection reaction skips both). An
+   * answer's own select_node actions do not come through here, so they still leave the analyst in front.
+   * (After selectNode / selectEdge, which open the inspector and set the selection before they await.)
+   */
+  private showInspector() {
+    useStore.setState({ panelFront: { key: "inspector" } });
+  }
+
   private onClick(id: PickId) {
     const st = useStore.getState();
     if (id.dt === "node") void st.selectNode(id.id);
     else st.selectEdge(id.id);
+    this.showInspector();
   }
 
   private onDoubleClick(id: PickId) {
@@ -637,6 +648,7 @@ export class WorldController {
       const e = st.index?.edges.get(id.id);
       if (e) this.camera.flyToNodes([e.source_node, e.target_node]);
     }
+    this.showInspector();
   }
 
   // ------------------------------------------------------------------ frame

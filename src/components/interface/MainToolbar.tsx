@@ -292,6 +292,7 @@ export function MainToolbar() {
               <button
                 type="button"
                 aria-pressed={panels[key]}
+                data-panel-toggle={key}
                 onClick={() => togglePanel(key)}
                 className={cx(
                   "flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-[12px] transition-colors",
@@ -308,7 +309,13 @@ export function MainToolbar() {
             </Tooltip>
           ) : (
             <span key={key} className="relative">
-              <IconButton label={label} shortcut={shortcut} pressed={panels[key]} onClick={() => togglePanel(key)}>
+              <IconButton
+                label={label}
+                shortcut={shortcut}
+                pressed={panels[key]}
+                data-panel-toggle={key}
+                onClick={() => togglePanel(key)}
+              >
                 <Icon className="size-4" />
               </IconButton>
               {badge && (
@@ -333,6 +340,7 @@ export function MainToolbar() {
             type="button"
             disabled={!demoScript}
             aria-pressed={demoActive}
+            data-demo-toggle=""
             onClick={demoActive ? exitDemo : startDemo}
             className={cx(
               "flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-[12px] font-medium transition-colors disabled:opacity-40",

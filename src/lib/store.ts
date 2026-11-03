@@ -127,8 +127,9 @@ export interface DeeptraceState {
   depthScale: number;
   panels: Record<PanelKey, boolean>;
   /**
-   * A right panel a demo step brings to the front (a new object on every request), as openPanel does
-   * for the UI: its flag may already be on with the panel behind another one. The interface focuses it.
+   * A right panel a demo step or a click on the map brings to the front (a new object on every request),
+   * as openPanel does for the UI: its flag may already be on with the panel behind another one. The
+   * interface focuses it.
    */
   panelFront: { key: "inspector" | "analyst" | "comparison" } | null;
 
@@ -212,6 +213,13 @@ export interface DeeptraceState {
    * about its own comparison that does not describe `result` is shown on a slot of a scenario it compared.
    */
   leaveDiff: (opts?: { showHighlight?: boolean }) => void;
+  /**
+   * Where the highlight chip's "show" (leaveDiff with `showHighlight`) puts the highlight the A/B diff
+   * hides: "here" (it describes the result under the diff), "A" / "B" (a slot of a scenario its answer
+   * compared), or null (no result left that it describes: leaving the diff drops it, so the chip does not
+   * offer "show").
+   */
+  highlightShowTarget: () => "here" | "A" | "B" | null;
   clearSimulation: () => void;
   restoreWorld: () => void;
 
@@ -849,8 +857,16 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
     const t = highlightTurn.get(h);
     return t && answerProduced(t, r) ? h : null;
   };
-  /** AI highlights an answer made under its own A/B diff: about its comparison, not the result under the diff. */
+  /**
+   * AI highlights an answer made under its own A/B diff, or held off an older result and brought back by
+   * that diff: about its comparison, not the result under the diff.
+   */
   const diffHighlights = new WeakSet<Highlight>();
+  /** A highlight an answer held off an older result, back under that answer's own diff (see highlightOffDiff). */
+  const heldOwnBack = (h: Highlight | null) => {
+    if (h) diffHighlights.add(h);
+    return h;
+  };
   /**
    * `h` once the map leaves the A/B diff for `r`, the result under it. A highlight an answer made about
    * its own comparison stays only if the answer describes `r` (a run requested before asking may have put
@@ -864,6 +880,20 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
     if (hold) holdHighlight(h, t);
     return null;
   }
+  /** See DeeptraceState.highlightShowTarget: the search leaveDiff's `showHighlight` makes (no side effects). */
+  const showTarget = (s: DeeptraceState): "here" | "A" | "B" | null => {
+    const h = s.highlight;
+    if (!h) return null;
+    if (highlightOffDiff(h, s.result, false)) return "here";
+    // the highlight does not describe the result under the diff: a slot of a scenario its answer compared
+    // (as Show A / Show B would)
+    return (
+      (["A", "B"] as const).find((k) => {
+        const r = s.slots[k];
+        return !!r && r !== s.result && highlightForView(h, s.result, r) === h;
+      }) ?? null
+    );
+  };
   /**
    * The same view switch, with a held answer highlight (which would have replaced the one on the map):
    * it comes back if it describes `r`, and the hold ends either way. A switch to the result already shown
@@ -905,6 +935,12 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
      * although the shown result still follows its slot.
      */
     heldOff = false,
+    /**
+     * An analyst answer's comparison: for a slot that a request numbered before the question has filled
+     * since (as data only: it never took the map), the object the slot held when the analyst was given
+     * it. The shown result follows that slot as given, as it does when that request lands after this.
+     */
+    given: { A?: SimulationResult; B?: SimulationResult } = {},
   ): {
     patch: Partial<DeeptraceState>;
     tookView: boolean;
@@ -920,7 +956,14 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
     const B = pick("B");
     if (A !== s.slots.A) comparisonFilled.add(A);
     if (B !== s.slots.B) comparisonFilled.add(B);
-    const followed = s.result && s.result === s.slots.A ? A : s.result && s.result === s.slots.B ? B : s.result;
+    const followGiven = (k: "A" | "B") => {
+      const g = given[k];
+      return g && s.result === g ? (sameScenario(g.scenario, compared[k].scenario) ? g : compared[k]) : undefined;
+    };
+    const followed =
+      followGiven("A") ??
+      followGiven("B") ??
+      (s.result && s.result === s.slots.A ? A : s.result && s.result === s.slots.B ? B : s.result);
     // Something requested later owns the map: this comparison stores its data (slots, comparison)
     // and the shown result stays, with its highlight and trace. An A/B chip follows its slot.
     const result = keepView ? s.result : followed;
@@ -1457,18 +1500,13 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
     leaveDiff: (opts) => {
       const s = get();
       if (s.compareView !== "diff") return;
-      const h = s.highlight;
-      if (opts?.showHighlight && h && !highlightOffDiff(h, s.result, false)) {
-        // the highlight does not describe the result under the diff: show it on a slot of a scenario its
-        // answer compared instead (as Show A / Show B would)
-        const k = (["A", "B"] as const).find((k) => {
-          const r = s.slots[k];
-          return !!r && r !== s.result && highlightForView(h, s.result, r) === h;
-        });
-        if (k) return get().setCompareView(k);
+      if (opts?.showHighlight) {
+        const k = showTarget(s);
+        if (k === "A" || k === "B") return get().setCompareView(k);
       }
       set((s) => ({ compareView: viewOutsideDiff(s), highlight: highlightOffDiff(s.highlight, s.result, true) }));
     },
+    highlightShowTarget: () => showTarget(get()),
     clearSimulation: () => {
       simEpoch++; // in-flight simulations and comparisons are dropped when they land
       set((s) => ({
@@ -1826,15 +1864,22 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
             const show = mayShow() && !traceHold;
             let owns = false;
             set((s) => {
+              // slots changed since the analyst was given them belong to the newer write
+              const keep = { A: newerSlot(t.slots.A, s.slots.A), B: newerSlot(t.slots.B, s.slots.B) };
+              // ...but one an older run (requested before asking) filled as data only does not hold the
+              // answer back: the shown result follows that slot as given, the same whether that run lands
+              // before this comparison or after it
+              const given = (k: "A" | "B") => (keep[k] && slotWriteSeq[k] < at && t.slots[k]) || undefined;
               const r = adoptComparison(
                 s,
                 c,
-                // slots changed since the analyst was given them belong to the newer write
-                { A: newerSlot(t.slots.A, s.slots.A), B: newerSlot(t.slots.B, s.slots.B) },
+                keep,
                 // something started after asking already took the map: store this without its diff view
                 // (a slot written since that never took the map, or by an older run that landed in
                 // between, keeps its slot as data, and the diff shows stale)
                 !show,
+                false,
+                { A: given("A"), B: given("B") },
               );
               const nr = r.patch.result;
               const replaced = !!nr && !!s.result && nr !== s.result && !sameScenario(nr.scenario, s.result.scenario);
@@ -1851,7 +1896,10 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
               const h0 = s.highlight;
               const ht = h0 && h0.source === "ai" ? highlightTurn.get(h0) : undefined;
               const olderAnswer = owns && !!ht && ht !== t;
-              /** This answer held a highlight off an older result: drawing its own diff brings it back. */
+              /**
+               * This answer held a highlight off an older result: drawing its own diff brings it back, as a
+               * highlight about that diff (leaving the diff for a result it does not describe holds it again).
+               */
               const heldOwn = owns && r.tookView && heldHighlight?.t === t;
               // the map is this answer's now (before this update reaches listeners: the demo steps' waits
               // read displaySeq)
@@ -1865,7 +1913,7 @@ export const useStore = create<DeeptraceState>((set, get, api) => {
                 ...(replaced
                   ? { highlight: turnHighlight(s.highlight, t) }
                   : heldOwn
-                    ? { highlight: turnHighlight(null, t) }
+                    ? { highlight: heldOwnBack(turnHighlight(null, t)) }
                     : olderAnswer
                       ? { highlight: null }
                       : {}),

@@ -211,7 +211,7 @@ export function ScenarioComparison() {
   const compareStatus = useStore((s) => s.compareStatus);
   const index = useStore((s) => s.index);
   // "Compare A vs B" (the empty state) and the stale banner's "Re-run" go away when their comparison
-  // lands: keep focus on the map view the comparison shows (or Close)
+  // lands: keep keyboard focus on the map view the comparison shows (or Close)
   const rootRef = useFocusFallback<HTMLDivElement>(
     (root) =>
       root.querySelector<HTMLElement>('[aria-label="Map view"] [aria-checked="true"]') ??

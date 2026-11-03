@@ -431,7 +431,7 @@ export function SimulationPanel({ narrow }: { narrow?: boolean }) {
   const scenarioTab = useScenarioTab();
   const slot = useSlotOf(result);
   const effectiveTab = result ? tab : "build";
-  // a run that lands swaps the Scenarios tab (and its Run buttons) for Results: keep focus on the tabs
+  // a run that lands swaps the Scenarios tab (and its Run buttons) for Results: keep keyboard focus on the tabs
   const rootRef = useFocusFallback<HTMLElement>((root) =>
     root.querySelector<HTMLElement>('[aria-label="Simulation view"] [aria-selected="true"]'),
   );

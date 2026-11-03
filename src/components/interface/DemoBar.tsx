@@ -27,18 +27,23 @@ export function DemoBar() {
         <motion.div
           role="region"
           aria-label="Guided demo"
+          data-demo-bar=""
           initial={{ opacity: 0, y: -10 }}
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: -10 }}
           transition={{ duration: 0.2 }}
-          className="dt-panel-strong pointer-events-auto w-full overflow-hidden"
+          className="dt-panel-strong pointer-events-auto @container w-full overflow-hidden"
         >
+          {/* The header row is about 465px wide in full; on a narrower bar (phones, or a tablet with a side
+              panel open) the label goes and Reset demo turns icon-only, so Exit demo stays on the bar. */}
           <div className="flex items-center gap-2 border-b border-white/[0.07] px-3 py-2">
-            <span className="font-mono text-[9.5px] tracking-[0.18em] text-sky-200/90">GUIDED DEMO</span>
-            <span className="dt-num text-[10.5px] text-ink-300">
+            <span className="shrink-0 font-mono text-[9.5px] tracking-[0.18em] whitespace-nowrap text-sky-200/90 @max-[30rem]:hidden">
+              GUIDED DEMO
+            </span>
+            <span className="dt-num shrink-0 text-[10.5px] whitespace-nowrap text-ink-300">
               {demo.step + 1} / {script.steps.length}
             </span>
-            <div className="ml-1 flex flex-1 items-center gap-1" role="tablist" aria-label="Demo steps">
+            <div className="ml-1 flex min-w-0 flex-1 items-center gap-1" role="tablist" aria-label="Demo steps">
               {script.steps.map((s, i) => (
                 <Tooltip key={s.id} label={`${i + 1}. ${s.title}`}>
                   <button
@@ -66,7 +71,7 @@ export function DemoBar() {
             </div>
             <Tooltip label="Restart the walkthrough from step 1 (restores the world)">
               <Button size="xs" variant="ghost" icon={<RotateCcw className="size-3" />} onClick={resetDemo}>
-                Reset demo
+                <span className="@max-[30rem]:sr-only">Reset demo</span>
               </Button>
             </Tooltip>
             <IconButton label="Exit demo" size="xs" onClick={exitDemo}>

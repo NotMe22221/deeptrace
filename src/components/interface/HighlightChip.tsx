@@ -21,6 +21,9 @@ export function HighlightChip() {
   const setHighlight = useStore((s) => s.setHighlight);
   // The A/B diff view does not draw highlights (e.g. one set by the analyst while comparing).
   const hiddenByDiff = useStore((s) => s.compareView === "diff" && !!s.comparison);
+  // "show" is offered only when leaving the diff keeps the highlight (on the result under the diff or a
+  // slot of a scenario its answer compared); otherwise it describes no result left to show it on
+  const showable = useStore((s) => s.compareView === "diff" && !!s.comparison && s.highlightShowTarget() !== null);
   const rootRef = useRef<HTMLDivElement>(null);
   /** The "show" button was pressed with a pointer (mouse / touch / pen), not a key or a screen reader. */
   const pointerPress = useRef(false);
@@ -62,7 +65,11 @@ export function HighlightChip() {
               onKeyDown={() => {
                 pointerPress.current = false; // a pointer press abandoned earlier does not count
               }}
+              // (unavailable rather than removed when there is nothing to show it on: it keeps keyboard
+              // focus if that happens while it has it, as Button's `busy` does)
+              aria-disabled={!showable || undefined}
               onClick={(e) => {
+                if (!useStore.getState().highlightShowTarget()) return; // read at the event, not the render
                 // This button unmounts on the next render. A keyboard or screen-reader user keeps
                 // focus in the chip, on the chip itself rather than the destructive Clear button, so
                 // Space still plays and a repeated Enter does nothing. A pointer press lets focus
@@ -72,16 +79,20 @@ export function HighlightChip() {
                 pointerPress.current = false;
                 leaveDiff({ showHighlight: true });
                 const root = rootRef.current;
-                // (an analyst highlight that describes no result left to show is dropped: the chip goes)
+                // (the highlight stays: "show" is offered only then)
                 if (keyboard && root && useStore.getState().highlight) {
                   root.tabIndex = -1;
                   root.focus();
                 }
               }}
-              title="The A/B diff view does not draw highlights. Show this highlight on the map instead."
-              className="shrink-0 rounded-full px-1.5 text-[10.5px] whitespace-nowrap text-sky-300 hover:bg-white/[0.08]"
+              title={
+                showable
+                  ? "The A/B diff view does not draw highlights. Show this highlight on the map instead."
+                  : "The A/B diff view does not draw highlights, and neither slot holds a result this highlight describes."
+              }
+              className="shrink-0 rounded-full px-1.5 text-[10.5px] whitespace-nowrap text-sky-300 hover:bg-white/[0.08] aria-disabled:cursor-default aria-disabled:text-ink-400 aria-disabled:hover:bg-transparent"
             >
-              hidden in A/B diff · show
+              {showable ? "hidden in A/B diff · show" : "hidden in A/B diff"}
             </button>
           )}
           <span

@@ -1,7 +1,8 @@
 // Regression checks for async state races in the store (src/lib/store.ts): stale simulate /
 // trace / analyst responses after Restore world or Reset demo, demo steps that outlive Exit,
-// mid-session engine failover to the offline snapshot, and scenario-scoped analyst replays; and for
-// keyboard focus and typed text in the interface while requests land (R15, R16).
+// mid-session engine failover to the offline snapshot, and scenario-scoped analyst replays; for
+// keyboard focus and typed text in the interface while requests land (R15, R16); and for focus, the
+// right panel in front and the layout at phone and laptop sizes as you use the interface (R17-R19).
 // Needs both dev servers and Playwright:  NODE_PATH=$(npm root -g) node scripts/e2e-races.cjs
 // (DEEPTRACE_APP_URL points it at another front-end dev server; the engine stays on :8000).
 // Engine latency, stalls and outages are simulated with Playwright request routing (and a local SSE
@@ -1212,6 +1213,16 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
       await H.answer(2, [act.cmp(), act.hl('H4')]);
       if (!runFirst) await H.land('r1');
     }), (f) => f.hl === 'hidden:H4' && f.map === AB && f.A === 'E-ROADS-FIVEPOINTS');
+    // A Run as A requested before asking that only fills slot A as data (your newer Run failed) does not hold the
+    // answer back: its comparison moves the map to the scenario it compared (your highlight goes) whether that
+    // run lands before or after it, and the result under the diff is the same
+    await pair13('R13 an older Run as A that only fills slot A does not change what the answer\'s comparison shows, landing before or after it', [false, true].map((runFirst) => async () => {
+      await H.ran('A', 'C-WATER-MAIN-DECATUR'); await H.run('r2', 'A', 'D-TELECOM-56MARIETTA'); await H.run('r3', 'active', 'F-TS-SOUTH'); await H.land('r3', true);
+      await S(() => { const s = window.__deeptraceStore.getState(); s.setHighlight({ node_ids: s.result.impact_metrics.critical_facilities_affected, edge_ids: [], label: 'U4', tone: 'critical', source: 'user' }); });
+      await H.ask(5);
+      if (runFirst) { await H.land('r2'); await H.answer(5, [act.cmp()]); } else { await H.answer(5, [act.cmp()]); await H.land('r2'); }
+    }), (f) => f.map === AB && f.hl === null && f.A === 'D-TELECOM-56MARIETTA' && f.under === 'A-DS-FIVEPOINTS' && !f.analyst,
+    () => S(() => ({ under: window.__deeptraceStore.getState().result?.scenario_id ?? null })));
     // The demo's Trace step takes only its selection's own follow-trace for its trace: your trace of the
     // component (or an answer's) that lands before its details stays, as it does landing after them
     await pair13('R13 demo Trace step keeps your trace of its component, requested while its details load (no failing re-trace)', [false, true].map((detailsFirst) => async () => {
@@ -1328,6 +1339,45 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
       await diffOverRun13(); await H.answer(3, [act.cmp(), act.hl('H9')]);
       await page.locator('button', { hasText: 'hidden in A/B diff' }).first().click(); await sleep(300);
     }, (f) => f.map === 'R:A-DS-FIVEPOINTS' && f.hl === 'H9' && f.A === 'A-DS-FIVEPOINTS' && !f.analyst);
+    // ...nor is one the answer held off your earlier run (asked with B on screen, it highlights before that run
+    // lands or after) and its own comparison then brought back under the diff
+    const heldOverRun13 = async (runFirst) => {
+      await H.live(); await H.ab(); await H.run('r2', 'active', 'C-WATER-MAIN-DECATUR'); await H.askLive(3);
+      if (runFirst) await H.land('r2');
+      await H.send(3, [act.hl('H12')]);
+      if (!runFirst) await H.land('r2');
+      await H.send(3, [act.cmp()]);
+    };
+    await pair13('R13 an answer\'s highlight held off your earlier run is not drawn on it when the answer\'s trace leaves its own diff', [true, false].map((runFirst) => async () => {
+      await heldOverRun13(runFirst); await H.send(3, [act.trace()]); await H.end(3);
+    }), (f) => f.map === 'R:C-WATER-MAIN-DECATUR' && f.hl === null && f.trace && f.cmp === 'A-DS-FIVEPOINTS/B-EDGEWOOD-DUCTBANK' && !f.analyst);
+    await pair13('R13 the highlight chip\'s show puts an answer\'s highlight held off your earlier run on a scenario it compared, not on that run', [true, false].map((runFirst) => async () => {
+      await heldOverRun13(runFirst); await H.end(3);
+      await page.locator('button', { hasText: 'hidden in A/B diff' }).first().click(); await sleep(300);
+    }), (f) => f.map === 'R:A-DS-FIVEPOINTS' && f.hl === 'H12' && f.A === 'A-DS-FIVEPOINTS' && !f.analyst);
+    // ...also asked with A on screen and leaving the diff with Space (an explicit comparison of A and B)
+    await pair13('R13 Space leaving the answer\'s own diff does not draw its highlight, held off your earlier run, on that run', [true, false].map((runFirst) => async () => {
+      await H.live(); await H.ran('A', 'A-DS-FIVEPOINTS'); await H.run('r2', 'active', 'C-WATER-MAIN-DECATUR'); await H.askLive(3);
+      if (runFirst) await H.land('r2');
+      await H.send(3, [act.hl('H13')]);
+      if (!runFirst) await H.land('r2');
+      await H.send(3, [act.cmp()]); await H.end(3);
+      await S(() => { window.__deeptraceStore.getState().setPlaying(false); document.activeElement?.blur?.(); }); await sleep(200);
+      await page.keyboard.press('Space'); await sleep(400);
+    }), (f) => f.map === 'R:C-WATER-MAIN-DECATUR' && f.hl === null && f.cmp === 'A-DS-FIVEPOINTS/B-EDGEWOOD-DUCTBANK' && !f.analyst);
+    // The highlight chip offers "show" only when leaving the diff keeps the highlight: with both slots holding
+    // your runs requested before asking (the answer compared other scenarios), it reads "hidden in A/B diff",
+    // and Enter on it changes nothing and keeps keyboard focus (it used to drop the highlight, chip and focus)
+    await single13('R13 the highlight chip does not offer show when no slot holds a result the answer describes, and keeps keyboard focus', async () => {
+      await H.live(); await H.run('r1', 'A', 'C-WATER-MAIN-DECATUR'); await H.run('r2', 'B', 'D-TELECOM-56MARIETTA'); await H.ask(3);
+      await H.land('r1'); await H.land('r2'); await H.answer(3, [act.cmp(), act.hl('H11')]);
+      const btn = page.locator('button', { hasText: 'hidden in A/B diff' }).first();
+      await btn.waitFor({ timeout: 30000 });
+      await page.keyboard.press('Shift'); await btn.focus(); await page.keyboard.press('Enter'); await sleep(1000);
+      await page.keyboard.press('Enter'); await sleep(600);
+    }, (f) => f.map === AB && f.hl === 'hidden:H11' && f.A === 'C-WATER-MAIN-DECATUR' && f.B === 'D-TELECOM-56MARIETTA' && f.chip === 'hidden in A/B diff' && f.focus === 'hidden in A/B diff' && !f.analyst,
+    () => S(() => { const a = document.activeElement; const b = [...document.querySelectorAll('button')].find((x) => x.textContent.includes('hidden in A/B diff'));
+      return { chip: b ? b.textContent.trim() : null, focus: !a || a === document.body ? 'BODY' : a.textContent.trim() }; }));
     // The demo's Trace step does not trace once the selection moved after its click, also when it came back
     // to its component, whichever node details land first
     await pair13('R13 demo Trace step does not trace once you clicked a connection and its component again, whichever details land first', [false, true].map((stepFirst) => async () => {
@@ -1629,6 +1679,167 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
     await reset();
     await S(() => window.__deeptraceStore.getState().setPanel('analyst', false));
   }
+  // R17: who gets focus when a control goes away. A control you clicked with the mouse lets focus fall to the
+  // page as before (Space and the single-key shortcuts keep working); a control with keyboard focus whose own
+  // action replaces or removes its surface hands focus to what replaced it; the keyboard shortcuts overlay (an
+  // aria-modal dialog, like the command palette) keeps Tab inside and gives focus back when it closes.
+  {
+    const ui17 = async (name, play) => { try { await play(); } catch (e) { check(name, false, { error: e.message }); } };
+    const focused = () => S(() => { const a = document.activeElement; return !a || a === document.body ? 'BODY' : a.id ? '#' + a.id : a.getAttribute('aria-label') || a.textContent.trim().slice(0, 40); });
+    const simCenter = () => page.locator('section[aria-label="Simulation center"]');
+    const openSim = async () => { if (!(await S(() => window.__deeptraceStore.getState().panels.simulation))) await page.getByRole('button', { name: 'Open simulation center' }).first().click(); await sleep(400); };
+    const draft = async () => ((await page.locator('#analyst-input').count()) ? page.locator('#analyst-input').inputValue() : '(no analyst)');
+    const okReply = () => sse([{ type: 'status', mode: 'llm', model: 'scripted' }, { type: 'message', text: 'ok' }, { type: 'done', mode: 'llm' }]);
+    /** keyboard: focus `locator`, press Enter, and once that control is gone (its surface's exit animation is slow), what has focus */
+    const enterAndGone = async (locator) => {
+      await page.keyboard.press('Shift'); await locator.focus();
+      await S(() => { window.__pressed = document.activeElement; });
+      await page.keyboard.press('Enter');
+      await page.waitForFunction(() => !window.__pressed.isConnected, null, { timeout: 30000 }); await sleep(1200);
+      return focused();
+    };
+
+    const pointerName = 'R17 a mouse click on Run or a suggested question that then goes away leaves focus on the page: Space pauses the cascade, D toggles Deep Mode';
+    await ui17(pointerName, async () => {
+      await reset(); await openSim();
+      await simCenter().getByRole('tablist', { name: 'Simulation view' }).getByRole('tab', { name: 'Scenarios' }).click(); await sleep(300);
+      await simCenter().getByRole('button', { name: 'Run', exact: true }).first().click(); // a preset's Run, with the mouse
+      await page.waitForFunction(() => { const s = window.__deeptraceStore.getState(); return !!s.result && s.simStatus === 'idle'; }, null, { timeout: 60000 });
+      await page.waitForFunction(() => document.querySelector('section[aria-label="Simulation center"] [aria-label="Simulation view"] [aria-selected="true"]')?.textContent.trim() === 'Results', null, { timeout: 30000 });
+      await sleep(1500);
+      const afterRun = await focused();
+      // whether the cascade was playing when Space went down (it may have ended by itself just before)
+      await S(() => window.addEventListener('keydown', (e) => { if (e.key === ' ') window.__playingAtSpace = window.__deeptraceStore.getState().playback.playing; }, { capture: true, once: true }));
+      await page.keyboard.press('Space'); await sleep(300);
+      const playingBefore = await S(() => window.__playingAtSpace);
+      const playingAfter = await S(() => window.__deeptraceStore.getState().playback.playing);
+      chatReply = okReply();
+      await S(() => window.__deeptraceStore.getState().setPanel('analyst', true)); await sleep(800);
+      await page.locator('#analyst-input').fill('');
+      const suggestion = page.locator('form:has(#analyst-input)').locator('xpath=preceding-sibling::div[1]').locator('button').first();
+      await suggestion.click(); // a suggested question, with the mouse: it goes away once asked
+      await page.waitForFunction(() => { const s = window.__deeptraceStore.getState(); return !s.analystPending && s.messages.length >= 2; }, null, { timeout: 60000 }); await sleep(1500);
+      const afterSuggestion = await focused();
+      await page.keyboard.press('d'); await sleep(400);
+      st = { afterRun, playingBefore, playingAfter, afterSuggestion, deepMode: await S(() => window.__deeptraceStore.getState().deepMode), draft: await draft() };
+      if (st.draft) await page.locator('#analyst-input').fill('');
+      check(pointerName, st.afterRun === 'BODY' && typeof st.playingBefore === 'boolean' && st.playingBefore !== st.playingAfter && st.afterSuggestion === 'BODY' && st.deepMode && st.draft === '', st);
+    });
+
+    const surfaceName = 'R17 Enter on a control whose action replaces or removes its own panel hands keyboard focus on: Ask AI to the question box, Exit demo to the toolbar\'s Demo';
+    await ui17(surfaceName, async () => {
+      await reset(); chatReply = okReply();
+      // the inspector alone in front (no question box that has focus keeps the analyst in front)
+      await S(() => { document.activeElement?.blur?.(); window.__deeptraceStore.getState().setPanel('analyst', false); }); await sleep(300);
+      await S(async () => { await window.__deeptraceStore.getState().selectNode('PWR-DS-FIVEPOINTS', { fly: false }); }); await sleep(1500);
+      const askAI = await enterAndGone(page.locator('[data-right-panel=inspector]').getByRole('button', { name: 'Ask AI', exact: true })); // the analyst replaces the inspector
+      await page.waitForFunction(() => !window.__deeptraceStore.getState().analystPending, null, { timeout: 60000 });
+      await S(async () => { window.__deeptraceStore.getState().startDemo(); await new Promise((r) => setTimeout(r, 300)); });
+      await page.waitForFunction(() => !window.__deeptraceStore.getState().demo.busy, null, { timeout: 60000 }); await sleep(600);
+      const exitDemo = await enterAndGone(page.getByRole('region', { name: 'Guided demo' }).getByRole('button', { name: 'Exit demo', exact: true })); // the demo bar goes
+      st = { askAI, exitDemo };
+      check(surfaceName, st.askAI === '#analyst-input' && st.exitDemo === 'Demo', st);
+    });
+
+    const overlayName = 'R17 the keyboard shortcuts overlay keeps Tab inside and gives keyboard focus back to its toolbar button when it closes (Esc, Close)';
+    await ui17(overlayName, async () => {
+      await reset();
+      const opener = page.getByRole('button', { name: 'Keyboard shortcuts', exact: true }).first();
+      const inDialog = () => S(() => !!document.activeElement?.closest('[role=dialog][aria-label="Keyboard shortcuts"]'));
+      const closed = async () => { await page.waitForFunction(() => !document.querySelector('[role=dialog][aria-label="Keyboard shortcuts"]'), null, { timeout: 15000 }); await sleep(300); };
+      await page.keyboard.press('Shift'); await opener.focus();
+      await page.keyboard.press('Enter'); await sleep(600);
+      const opened = await inDialog();
+      const inside = [];
+      for (const key of ['Tab', 'Tab', 'Tab', 'Shift+Tab']) { await page.keyboard.press(key); await sleep(150); inside.push(await inDialog()); }
+      await page.keyboard.press('Escape'); await closed();
+      const afterEscape = await focused();
+      await page.keyboard.press('Shift'); await opener.focus(); await page.keyboard.press('Enter'); await sleep(600);
+      await page.keyboard.press('Tab'); await sleep(150);
+      const onClose = await focused();
+      await page.keyboard.press('Enter'); await closed();
+      st = { opened, inside, afterEscape, onClose, afterClose: await focused() };
+      check(overlayName, st.opened && st.inside.every(Boolean) && st.afterEscape === 'Keyboard shortcuts' && st.onClose === 'Close' && st.afterClose === 'Keyboard shortcuts', st);
+    });
+    await reset();
+  }
+
+  // R18: which right panel is in front. A click on a component on the map shows its inspector (also when it is
+  // already selected, or while an answer streams), and a panel's "new" dot is gone once it has been in front.
+  {
+    const ui18 = async (name, play) => { try { await play(); } catch (e) { check(name, false, { error: e.message }); } };
+    const frontPanel = () => S(() => document.querySelector('[role=tablist][aria-label="Open panels"] [role=tab][aria-selected=true]')?.textContent.trim() ?? null);
+    const tab = (n) => page.getByRole('tablist', { name: 'Open panels' }).getByRole('tab', { name: n, exact: true });
+    /** the tabs showing the "new" dot */
+    const dots = () => S(() => [...document.querySelectorAll('[role=tablist][aria-label="Open panels"] [role=tab]')].filter((t) => t.querySelector('span.rounded-full')).map((t) => t.textContent.trim()));
+    const okReply = () => sse([{ type: 'status', mode: 'llm', model: 'scripted' }, { type: 'message', text: 'ok' }, { type: 'done', mode: 'llm' }]);
+
+    const mapName = 'R18 a click on a component on the map brings its inspector to the front, also when it is already selected or while an answer streams';
+    await ui18(mapName, async () => {
+      await reset(); await sleep(1500);
+      /** where component `id` is on the map, if nothing covers it there */
+      const nodeXY = (id) => S((id) => { const d = window.__deeptrace; const g = d?.controller.geom?.nodes.find((x) => x.node.id === id);
+        const p = g && d.viewer.scene.cartesianToCanvasCoordinates(g.pos);
+        if (!p || p.y < 120) return null;
+        const el = document.elementFromPoint(p.x, p.y);
+        return el && el.tagName === 'CANVAS' ? { x: p.x, y: p.y } : null; }, id);
+      await S(() => window.__deeptraceStore.getState().setPanel('analyst', true)); await sleep(800);
+      const ids = []; // two power components a click on the map selects
+      for (const id of await S(() => window.__deeptraceStore.getState().network.nodes.filter((n) => n.system === 'power').map((n) => n.id))) {
+        const p = await nodeXY(id); if (!p) continue;
+        await page.mouse.click(p.x, p.y); await sleep(700);
+        if ((await S(() => window.__deeptraceStore.getState().selectedNodeId)) === id) ids.push(id);
+        if (ids.length === 2) break;
+      }
+      if (ids.length < 2) throw new Error('no two components to click on the map: ' + ids.join());
+      const [X, Y] = ids;
+      const clickNode = async (id) => { const p = await nodeXY(id); if (!p) throw new Error('covered on the map: ' + id); await page.mouse.click(p.x, p.y); await sleep(1200); };
+      await clickNode(X);
+      const first = await frontPanel();
+      await tab('Analyst').click(); await sleep(500);
+      const behind = await frontPanel();
+      await clickNode(X); // already selected
+      const again = await frontPanel();
+      await tab('Analyst').click(); await sleep(500);
+      const g = gate('/api/analyst/chat');
+      await S(() => { void window.__deeptraceStore.getState().sendAnalystMessage('Which component is the most important in this network?'); });
+      await within(g.hit, 5000, 'the question'); await sleep(300);
+      await clickNode(Y); // while the answer streams
+      const streaming = await frontPanel();
+      const pending = await S(() => window.__deeptraceStore.getState().analystPending);
+      g.reply = okReply(); g.release();
+      await page.waitForFunction(() => !window.__deeptraceStore.getState().analystPending, null, { timeout: 60000 }); await sleep(300);
+      st = { ids, first, behind, again, streaming, pending, sel: await S(() => window.__deeptraceStore.getState().selectedNodeId),
+        answer: await S(() => { const m = window.__deeptraceStore.getState().messages; return m[m.length - 1]?.content ?? null; }) };
+      check(mapName, st.first === 'Inspector' && st.behind === 'Analyst' && st.again === 'Inspector' && st.streaming === 'Inspector' && st.pending && st.sel === Y && st.answer === 'ok', st);
+    });
+
+    const dotName = 'R18 a panel that came forward behind the question you typed loses its "new" dot once it has been in front';
+    await ui18(dotName, async () => {
+      await reset();
+      await S(async () => { const P = (id) => window.__deeptraceStore.getState().presets.find((x) => x.id === id).scenario;
+        await window.__deeptraceStore.getState().runSimulation(P('A-DS-FIVEPOINTS'), 'A'); await window.__deeptraceStore.getState().runSimulation(P('B-EDGEWOOD-DUCTBANK'), 'B'); });
+      await S(() => window.__deeptraceStore.getState().setPanel('analyst', true)); await sleep(600);
+      const g = gate('/api/compare');
+      await S(() => { void window.__deeptraceStore.getState().runComparison(); }); await within(g.hit, 5000, 'the Compare'); // Compare
+      await page.locator('#analyst-input').fill(''); await page.locator('#analyst-input').click(); await page.keyboard.type('Why is B worse', { delay: 15 });
+      g.release();
+      await page.waitForFunction(() => { const s = window.__deeptraceStore.getState(); return !!s.comparison && s.compareStatus === 'idle'; }, null, { timeout: 60000 }); await sleep(800);
+      const typing = { front: await frontPanel(), dots: await dots() };
+      await page.getByRole('button', { name: 'Close analyst', exact: true }).click(); // the comparison comes to the front
+      await page.waitForFunction(() => document.querySelector('[data-right-panel]')?.getAttribute('data-right-panel') === 'comparison', null, { timeout: 20000 }).catch(() => {});
+      await sleep(500);
+      const alone = await S(() => document.querySelector('[data-right-panel]')?.getAttribute('data-right-panel') ?? null);
+      await page.getByRole('button', { name: 'AI analyst', exact: true }).first().click(); // the toolbar's AI analyst
+      await page.waitForFunction(() => document.querySelector('[data-right-panel]')?.getAttribute('data-right-panel') === 'analyst', null, { timeout: 20000 }).catch(() => {});
+      await sleep(500);
+      st = { typing, alone, front: await frontPanel(), dots: await dots() };
+      await page.locator('#analyst-input').fill('');
+      check(dotName, st.typing.front === 'Analyst' && st.typing.dots.join() === 'Compare' && st.alone === 'comparison' && st.front === 'Analyst' && st.dots.length === 0, st);
+    });
+    await reset();
+    await S(() => window.__deeptraceStore.getState().setPanel('analyst', false));
+  }
 
   // R2: a live result keeps its provenance after a failover (not relabelled "precomputed")
   await reset();
@@ -1670,6 +1881,103 @@ const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join
   st = await S(() => { const s = window.__deeptraceStore.getState(); const m = s.messages[s.messages.length - 1]; return { step: s.demo.step, result: s.result?.scenario_id ?? null, content: (m?.content || '').slice(0, 50), err: m?.error ?? null }; });
   check('R2 snapshot ask_ai reached by Prev replays the recorded answer', st.step === 7 && st.result === 'A-DS-FIVEPOINTS' && st.content.length > 0 && !st.err, st);
   await S(() => window.__deeptraceStore.getState().exitDemo());
+
+  // R19: other window sizes, each on a page of its own (they run last, once the main page is closed, so its
+  // map does not slow them down). On a phone the demo's simulation steps show the simulation sheet, and the
+  // demo bar keeps Exit demo on screen and stays clear of the sheets; at 1024x768 the camera cluster stays off
+  // the demo bar.
+  await page.close();
+  {
+    const ui19 = async (name, play) => { try { await play(); } catch (e) { check(name, false, { error: e.message }); } };
+    const openAt = async (width, height) => {
+      const p = await browser.newPage({ viewport: { width, height } });
+      p.on('pageerror', (e) => errors.push(e.message));
+      try {
+        await p.goto(APP, { waitUntil: 'domcontentloaded', timeout: 120000 });
+        await p.waitForFunction(() => { const s = window.__deeptraceStore?.getState(); return s && s.dataMode === 'live' && s.snapshot && s.presets.length; }, null, { timeout: 180000 });
+      } catch (e) {
+        const mode = await p.evaluate(() => window.__deeptraceStore?.getState().dataMode ?? null).catch(() => null);
+        await p.close();
+        throw new Error(`the ${width}x${height} page did not come up (data mode ${mode}): ${e.message.split('\n')[0]}`);
+      }
+      await sleep(2500); // the boot overlay goes away
+      return p;
+    };
+    const idle = (p) => p.waitForFunction(() => !window.__deeptraceStore.getState().demo.busy, null, { timeout: 90000 }).then(() => sleep(1200));
+    const chip = (p, n) => p.getByRole('region', { name: 'Guided demo' }).getByRole('tab', { name: new RegExp('^Step ' + n + ':') });
+
+    const phone = await openAt(390, 844).catch((e) => ({ error: e.message }));
+    const phoneSimName = 'R19 on a phone the demo\'s Fail, Cascade and Alternative steps show the simulation sheet (a step chip back to Trace shows the inspector)';
+    await ui19(phoneSimName, async () => {
+      if (phone.error) throw new Error(phone.error);
+      const onScreen = () => phone.evaluate(() => { const sim = document.querySelector('section[aria-label="Simulation center"]');
+        return { step: window.__deeptraceStore.getState().demo.step + 1, sheet: document.querySelector('[data-right-panel]')?.getAttribute('data-right-panel') ?? null,
+          results: sim ? sim.querySelector('[aria-label="Simulation view"] [aria-selected="true"]')?.textContent.trim() ?? 'open' : null }; });
+      await phone.getByRole('button', { name: 'Open menu' }).click(); await sleep(600);
+      await phone.locator('[role=menu] button', { hasText: 'Start demo' }).click(); await sleep(1200);
+      const seen = {};
+      for (let step = 1; step < 9; step++) { // tap Next from step 1 to step 9
+        await idle(phone); seen[step] = await onScreen();
+        await phone.getByRole('region', { name: 'Guided demo' }).getByRole('button', { name: 'Next', exact: true }).click();
+      }
+      await idle(phone); seen[9] = await onScreen();
+      await chip(phone, 5).click(); await idle(phone); seen.back5 = await onScreen();
+      st = { 6: seen[6], 7: seen[7], 8: seen[8], 9: seen[9], back5: seen.back5 };
+      const simShown = (o) => o.results === 'Results' && o.sheet === null;
+      check(phoneSimName, simShown(seen[6]) && simShown(seen[7]) && simShown(seen[9]) && seen[8].sheet === 'analyst' && seen.back5.step === 5 && seen.back5.sheet === 'inspector', st);
+    });
+
+    const phoneBarName = 'R19 on a phone the demo bar keeps Exit demo and Reset demo on the bar (360 and 390 px), and a sheet does not cover its narration (375x667)';
+    await ui19(phoneBarName, async () => {
+      if (phone.error) throw new Error(phone.error);
+      if (!(await phone.evaluate(() => window.__deeptraceStore.getState().demo.active))) {
+        await phone.getByRole('button', { name: 'Open menu' }).click(); await sleep(600);
+        await phone.locator('[role=menu] button', { hasText: 'Start demo' }).click(); await sleep(1200);
+      }
+      const fits = () => phone.evaluate(() => {
+        const bar = document.querySelector('[aria-label="Guided demo"]'); const br = bar.getBoundingClientRect();
+        return Object.fromEntries(['Exit demo', 'Reset demo'].map((name) => {
+          const b = [...bar.querySelectorAll('button')].find((x) => (x.getAttribute('aria-label') || x.textContent.trim()) === name);
+          const r = b.getBoundingClientRect();
+          const hit = document.elementFromPoint(Math.min(r.left + r.width / 2, innerWidth - 1), r.top + r.height / 2);
+          return [name, r.right <= br.right + 0.5 && r.left >= br.left - 0.5 && !!hit && b.contains(hit)];
+        })); });
+      const at390 = await fits();
+      await phone.setViewportSize({ width: 360, height: 740 }); await sleep(1500);
+      const at360 = await fits();
+      await phone.setViewportSize({ width: 375, height: 667 }); await sleep(1200);
+      await chip(phone, 4).click(); await idle(phone); // Select: the inspector sheet opens
+      const narration = await phone.evaluate(() => { const p = document.querySelector('[aria-label="Guided demo"] p').getBoundingClientRect();
+        const sheet = document.querySelector('[data-right-panel]')?.parentElement?.getBoundingClientRect();
+        return { bottom: Math.round(p.bottom), sheetTop: sheet ? Math.round(sheet.top) : null }; });
+      st = { at390, at360, narration };
+      check(phoneBarName, at390['Exit demo'] && at390['Reset demo'] && at360['Exit demo'] && at360['Reset demo'] && narration.sheetTop !== null && narration.sheetTop >= narration.bottom, st);
+    });
+    if (!phone.error) await phone.close();
+
+    const cameraName = 'R19 at 1024x768 the camera cluster stays off the demo bar: a tap on the right of Next goes to Next';
+    await ui19(cameraName, async () => {
+      const p = await openAt(1024, 768);
+      try {
+        await p.getByRole('button', { name: 'Demo', exact: true }).click(); await sleep(800);
+        const measure = () => p.evaluate(() => {
+          const bar = document.querySelector('[aria-label="Guided demo"]').getBoundingClientRect();
+          const cam = document.querySelector('[role=toolbar][aria-label="Camera"]').getBoundingClientRect();
+          const next = [...document.querySelectorAll('[aria-label="Guided demo"] button')].find((b) => b.textContent.trim() === 'Next');
+          const nr = next.getBoundingClientRect();
+          const x = nr.right - 6, y = nr.top + nr.height / 2;
+          const hit = document.elementFromPoint(x, y);
+          const overlap = Math.max(0, Math.min(bar.right, cam.right) - Math.max(bar.left, cam.left)) * Math.max(0, Math.min(bar.bottom, cam.bottom) - Math.max(bar.top, cam.top));
+          return { overlap: Math.round(overlap), hitsNext: !!hit && next.contains(hit), at: [Math.round(x), Math.round(y)] };
+        });
+        const seen = {};
+        for (const n of [4, 8, 9]) { await chip(p, n).click(); await sleep(500); await idle(p); seen[n] = await measure(); }
+        await p.mouse.click(seen[9].at[0], seen[9].at[1]); await sleep(1500);
+        st = { ...seen, afterTap: await p.evaluate(() => window.__deeptraceStore.getState().demo.step + 1) };
+        check(cameraName, [8, 9].every((n) => seen[n].overlap === 0 && seen[n].hitsNext) && st.afterTap === 10, st);
+      } finally { await p.close(); }
+    });
+  }
 
   check('no page errors', errors.length === 0, errors.slice(0, 5));
   await browser.close();

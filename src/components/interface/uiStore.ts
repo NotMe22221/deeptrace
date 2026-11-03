@@ -35,6 +35,8 @@ interface UIState {
   rightAttention: RightPanel[];
   /** A click or key: bring the panel to the front. */
   focusRight: (p: RightPanel) => void;
+  /** The panel is in front (by any route, e.g. the one before it closed): its tab no longer needs a dot. */
+  clearAttention: (p: RightPanel) => void;
   /**
    * Something that landed (a comparison, a demo step) brings its panel forward. While the user is typing
    * in a field of the front right panel, that panel keeps the front and its field keeps keyboard focus
@@ -67,6 +69,9 @@ export const useUI = create<UIState>((set, get) => ({
       rightOrder: [...s.rightOrder.filter((x) => x !== p), p],
       rightAttention: s.rightAttention.filter((x) => x !== p),
     })),
+  clearAttention: (p) => {
+    if (get().rightAttention.includes(p)) set((s) => ({ rightAttention: s.rightAttention.filter((x) => x !== p) }));
+  },
   surfaceRight: (p) => {
     const a = typeof document === "undefined" ? null : document.activeElement;
     const typingIn = a && isTypingTarget(a) ? (a.closest("[data-right-panel]")?.getAttribute("data-right-panel") ?? null) : null;
