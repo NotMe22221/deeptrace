@@ -1,0 +1,1988 @@
+// Regression checks for async state races in the store (src/lib/store.ts): stale simulate /
+// trace / analyst responses after Restore world or Reset demo, demo steps that outlive Exit,
+// mid-session engine failover to the offline snapshot, and scenario-scoped analyst replays; for
+// keyboard focus and typed text in the interface while requests land (R15, R16); and for focus, the
+// right panel in front and the layout at phone and laptop sizes as you use the interface (R17-R19).
+// Needs both dev servers and Playwright:  NODE_PATH=$(npm root -g) node scripts/e2e-races.cjs
+// (DEEPTRACE_APP_URL points it at another front-end dev server; the engine stays on :8000).
+// Engine latency, stalls and outages are simulated with Playwright request routing (and a local SSE
+// server for analyst answers that stream event by event or are cut off mid-answer).
+const http = require('http');
+const { chromium } = require('playwright');
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const APP = process.env.DEEPTRACE_APP_URL || 'http://localhost:3000/';
+const results = [];
+const check = (name, ok, info) => { results.push({ name, ok, info }); console.log(ok ? 'PASS' : 'FAIL', name, JSON.stringify(info ?? '')); };
+
+async function open(routeFn) {
+  const browser = await chromium.launch({ args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'] });
+  const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  if (routeFn) await routeFn(page);
+  await page.goto(APP, { waitUntil: 'domcontentloaded', timeout: 120000 });
+  await page.waitForFunction(() => window.__deeptraceStore && ['live', 'snapshot', 'error'].includes(window.__deeptraceStore.getState().dataMode), null, { timeout: 120000 });
+  await page.waitForFunction(() => window.__deeptraceStore.getState().snapshot, null, { timeout: 60000 });
+  return { browser, page, errors };
+}
+
+const delays = {}; // url-substring -> ms (mutable from tests)
+const bodyDelays = {}; // engine request-body substring (e.g. a preset's scenario_id) -> ms, checked first
+let blockEngine = false;
+let stallChat = false;
+let failSim = false; // /api/simulate answers HTTP 500
+let failCompare = false; // /api/compare answers HTTP 500
+let chatReply = null; // scripted SSE body for /api/analyst/chat (an LLM-style answer)
+// Held requests: the next request whose URL contains `url` waits until the check releases it, so a
+// check sets the exact order requests land in (no timing). `hit` resolves when the request is made
+// (`body` then holds its request body);
+// set `fail` (HTTP 500: true, or the failure's message; 'refused': the connection is refused, as when
+// the engine is down), `reply` (an SSE body) or `stream` (an id of `liveStreams`: the analyst answer
+// streams from the local SSE server, event by event as the check sends them) before `release()`.
+const gates = [];
+function gate(url) {
+  const g = { url, taken: false, fail: false, reply: null, stream: null };
+  g.open = new Promise((r) => (g.release = r));
+  g.hit = new Promise((r) => (g.made = r));
+  gates.push(g);
+  return g;
+}
+// A local SSE server for analyst answers a check streams event by event (`send`), ends (`end`) or cuts
+// off mid-answer (`drop`: the TCP connection is destroyed, as when the engine dies).
+const liveStreams = new Map(); // id -> { res, queue, opened }
+const streamServer = http.createServer((req, res) => {
+  const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*', 'Access-Control-Allow-Methods': 'POST, OPTIONS' };
+  if (req.method === 'OPTIONS') { res.writeHead(204, cors); return res.end(); }
+  req.resume();
+  const s = liveStreams.get(decodeURIComponent(req.url.split('/').pop()));
+  if (!s) { res.writeHead(404, cors); return res.end(); }
+  res.writeHead(200, { ...cors, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+  s.res = res;
+  for (const chunk of s.queue.splice(0)) res.write(chunk);
+  s.openedNow();
+});
+const liveStream = (id) => {
+  const s = { res: null, queue: [] };
+  s.opened = new Promise((r) => (s.openedNow = r));
+  liveStreams.set(id, s);
+  return {
+    send(events) { const chunk = events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join(''); if (s.res) s.res.write(chunk); else s.queue.push(chunk); },
+    end() { if (s.res) s.res.end(); },
+    drop() { s.res?.socket?.destroy(); },
+    opened: s.opened,
+  };
+};
+const within = (p, ms, what) => Promise.race([p, sleep(ms).then(() => { throw new Error('timeout: ' + what); })]);
+async function routes(page) {
+  await page.route('http://localhost:8000/**', async (route) => {
+    const url = route.request().url();
+    const held = gates.find((g) => !g.taken && url.includes(g.url));
+    if (held) {
+      held.taken = true;
+      held.body = route.request().postData();
+      held.made();
+      await held.open;
+      try {
+        if (held.fail === 'refused') return await route.abort('connectionrefused');
+        if (held.fail) return await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: typeof held.fail === 'string' ? held.fail : 'injected failure' }) });
+        if (held.reply) return await route.fulfill({ status: 200, contentType: 'text/event-stream', body: held.reply });
+        if (held.stream) return await route.continue({ url: `http://127.0.0.1:${streamServer.address().port}/stream/${encodeURIComponent(held.stream)}` });
+        return await route.continue();
+      } catch { return; }
+    }
+    if (blockEngine) return route.abort('connectionrefused');
+    if (stallChat && url.includes('/api/analyst/chat')) return; // never respond
+    // decided when the request is made, not when its delay ends
+    const fail = (failSim && url.includes('/api/simulate')) || (failCompare && url.includes('/api/compare'));
+    const reply = chatReply && url.includes('/api/analyst/chat') ? chatReply : null;
+    const body = route.request().postData() || '';
+    // engine requests only: an analyst request's body names scenarios too (its context)
+    const byBody = url.includes('/api/analyst/') ? undefined : Object.entries(bodyDelays).find(([k]) => body.includes(k));
+    if (byBody) await sleep(byBody[1]);
+    else for (const [k, ms] of Object.entries(delays)) if (url.includes(k)) { await sleep(ms); break; }
+    try {
+      if (fail) return await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'injected failure' }) });
+      if (reply) return await route.fulfill({ status: 200, contentType: 'text/event-stream', body: reply });
+      await route.continue();
+    } catch {}
+  });
+}
+const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join('');
+
+(async () => {
+  await new Promise((r) => streamServer.listen(0, '127.0.0.1', r));
+  const { browser, page, errors } = await open(routes);
+  const S = (fn, arg) => page.evaluate(fn, arg);
+  const reset = async () => { for (const g of gates.splice(0)) { g.taken = true; g.release(); }
+    for (const s of liveStreams.values()) s.res?.socket?.destroy(); liveStreams.clear();
+    for (const k of Object.keys(delays)) delete delays[k]; for (const k of Object.keys(bodyDelays)) delete bodyDelays[k]; blockEngine = false; stallChat = false; failSim = false; failCompare = false; chatReply = null;
+    await S(() => { const s = window.__deeptraceStore.getState(); s.exitDemo(); s.clearChat(); s.restoreWorld(); }); await sleep(300); };
+
+  // [0]/[32] Restore during a running simulation
+  await reset(); delays['/api/simulate'] = 2500;
+  await S(() => { const s = window.__deeptraceStore.getState(); const p = s.presets.find((x) => x.id === 'A-DS-FIVEPOINTS'); window.__p = s.runSimulation(p.scenario, 'A'); });
+  await sleep(300); await S(() => window.__deeptraceStore.getState().restoreWorld());
+  await S(() => window.__p);
+  let st = await S(() => { const s = window.__deeptraceStore.getState(); return { result: s.result?.scenario_id ?? null, slotA: s.slots.A?.scenario_id ?? null, sim: s.panels.simulation, status: s.simStatus }; });
+  check('[0/32] stale simulate dropped after Restore world', !st.result && !st.slotA && !st.sim && st.status === 'idle', st);
+
+  // [0] overlapping runs: a slow older run must not replace a newer one
+  await reset(); delays['/api/simulate'] = 2000;
+  await S(() => { const s = window.__deeptraceStore.getState(); window.__pa = s.runSimulation(s.presets.find((x) => x.id === 'A-DS-FIVEPOINTS').scenario); });
+  await sleep(400); delays['/api/simulate'] = 100;
+  await S(() => { const s = window.__deeptraceStore.getState(); window.__pc = s.runSimulation(s.presets.find((x) => x.id === 'C-WATER-MAIN-DECATUR').scenario); });
+  await S(() => Promise.all([window.__pa, window.__pc]));
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { result: s.result?.scenario_id, status: s.simStatus }; });
+  check('[0] newest run wins over a slower older one', st.result === 'C-WATER-MAIN-DECATUR' && st.status === 'idle', st);
+
+  // [1]/[28b] analyst stream cancelled by Start demo
+  await reset(); delays['/api/analyst/chat'] = 2500;
+  await S(() => { const s = window.__deeptraceStore.getState(); s.selectNode('PWR-DS-FIVEPOINTS'); window.__pq = s.sendAnalystMessage('What happens if this fails?', { forceOffline: true }); });
+  await sleep(300); await S(() => window.__deeptraceStore.getState().startDemo());
+  st = await S(() => ({ pending: window.__deeptraceStore.getState().analystPending }));
+  const pendingRightAfter = st.pending;
+  await sleep(3500);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { result: s.result?.scenario_id ?? null, msgs: s.messages.length, step: s.demo.step, pending: s.analystPending }; });
+  check('[1] Start demo cancels the in-flight analyst answer', !pendingRightAfter && !st.result && st.msgs === 0 && st.step === 0, { pendingRightAfter, ...st });
+
+  // [2] Exit demo during reveal_layers: layers stay as the user set them
+  await reset(); delays['/api/simulate'] = 0;
+  await S(() => { const s = window.__deeptraceStore.getState(); s.startDemo(); });
+  await sleep(200);
+  await S(() => { window.__pr = window.__deeptraceStore.getState().demoGoto(2); });
+  await sleep(800);
+  await S(() => { const s = window.__deeptraceStore.getState(); s.exitDemo(); s.setAllLayers(true); s.setLayer('water', false); });
+  await sleep(4000);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { water: s.layers.water, active: s.demo.active }; });
+  check('[2] exited reveal_layers step stops changing layers', st.water === false && !st.active, st);
+
+  // [28a] Reset demo during the simulate step
+  await reset(); delays['/api/simulate'] = 2000;
+  await S(() => { const s = window.__deeptraceStore.getState(); s.startDemo(); });
+  await sleep(200);
+  await S(() => { window.__pd = window.__deeptraceStore.getState().demoGoto(5); });
+  await sleep(300); await S(() => window.__deeptraceStore.getState().resetDemo());
+  await sleep(3000);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { step: s.demo.step, result: s.result?.scenario_id ?? null, slotA: s.slots.A?.scenario_id ?? null, busy: s.demo.busy }; });
+  check('[28] Reset demo mid-step: stale step does not write into the reset world', st.step === 0 && !st.result && !st.slotA, st);
+
+  // [7]/[31] trace response for a node no longer selected is dropped
+  await reset(); delays['/api/trace/PWR-DS-FIVEPOINTS'] = 1500;
+  await S(async () => { const s = window.__deeptraceStore.getState(); await s.selectNode('PWR-DS-FIVEPOINTS'); window.__pt = s.showTrace('PWR-DS-FIVEPOINTS'); });
+  await sleep(200); await S(() => window.__deeptraceStore.getState().selectNode('PWR-TS-SOUTH'));
+  await S(() => window.__pt); await sleep(300);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { sel: s.selectedNodeId, vis: s.traceVisible, tn: s.trace?.node_id ?? null }; });
+  check('[7/31] slow trace for a deselected node is not shown', st.sel === 'PWR-TS-SOUTH' && !(st.vis && st.tn === 'PWR-DS-FIVEPOINTS'), st);
+  // hide during in-flight follow-trace
+  delete delays['/api/trace/PWR-DS-FIVEPOINTS']; delays['/api/trace/'] = 1200;
+  await S(async () => { const s = window.__deeptraceStore.getState(); await s.selectNode('TEL-HUB-GSU', { trace: false }); });
+  delete delays['/api/trace/']; await S(() => window.__deeptraceStore.getState().showTrace('TEL-HUB-GSU'));
+  delays['/api/trace/'] = 1200;
+  await S(() => { window.__ps = window.__deeptraceStore.getState().selectNode('PWR-TS-SOUTH'); });
+  await sleep(400); await S(() => window.__deeptraceStore.getState().hideTrace());
+  await S(() => window.__ps); await sleep(200);
+  st = await S(() => ({ vis: window.__deeptraceStore.getState().traceVisible }));
+  check('[31] Hide trace is not undone by an in-flight follow-trace', st.vis === false, st);
+
+  // [4] highlight cleared on new run
+  await reset(); delete delays['/api/trace/'];
+  await S(async () => { const s = window.__deeptraceStore.getState(); await s.runSimulation(s.presets.find((x) => x.id === 'A-DS-FIVEPOINTS').scenario);
+    s.setHighlight({ node_ids: ['FAC-CITYHALL'], edge_ids: [], label: 'Critical facilities affected', tone: 'critical', source: 'user' });
+    await window.__deeptraceStore.getState().runSimulation(s.presets.find((x) => x.id === 'C-WATER-MAIN-DECATUR').scenario); });
+  st = await S(() => ({ hl: window.__deeptraceStore.getState().highlight }));
+  check('[4] a new simulation clears the previous result highlight', st.hl === null, st);
+
+  // [14]/[36]/[12] restore resets overlays and ends demo
+  await reset();
+  await S(() => { const s = window.__deeptraceStore.getState(); s.startDemo(); s.setShowDependencies(false); s.setShowParticles(false); s.setShowLabels(false); s.setDepthScale(1); s.restoreWorld(); });
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { dep: s.showDependencies, part: s.showParticles, lab: s.showLabels, depth: s.depthScale, demo: s.demo.active }; });
+  check('[12/14/36] Restore world resets overlays/depth and ends the demo', st.dep && st.part && st.lab && st.depth === 8 && !st.demo, st);
+  await S(() => { const s = window.__deeptraceStore.getState(); s.startDemo(); s.setPanel('layers', true); s.resetDemo(); });
+  st = await S(() => ({ layersPanel: window.__deeptraceStore.getState().panels.layers }));
+  check('[36] Reset demo hides the explorer like Start demo', st.layersPanel === false, st);
+  await S(() => window.__deeptraceStore.getState().exitDemo());
+
+  // [6] compare keeps slot identity
+  await reset();
+  await S(async () => { const s = window.__deeptraceStore.getState();
+    await s.runSimulation(s.presets.find((x) => x.id === 'A-DS-FIVEPOINTS').scenario, 'A');
+    await window.__deeptraceStore.getState().runSimulation(s.presets.find((x) => x.id === 'B-EDGEWOOD-DUCTBANK').scenario, 'B');
+    await window.__deeptraceStore.getState().runComparison(); });
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { isB: s.result === s.slots.B, cmp: !!s.comparison, view: s.compareView }; });
+  check('[6] after Compare the displayed result is still slot B', st.isB && st.cmp && st.view === 'diff', st);
+
+  // [34] ask_ai waits for an in-flight answer instead of skipping its question
+  await reset(); delays['/api/analyst/chat'] = 1500;
+  await S(async () => { const s = window.__deeptraceStore.getState(); s.startDemo(); await new Promise((r) => setTimeout(r, 200)); await window.__deeptraceStore.getState().demoGoto(5); });
+  await S(() => { const s = window.__deeptraceStore.getState(); s.sendAnalystMessage('Which component is the most important in this network?', { forceOffline: true }); });
+  await sleep(100);
+  await S(() => window.__deeptraceStore.getState().demoGoto(7));
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { qs: s.messages.filter((m) => m.role === 'user').map((m) => m.content), step: s.demo.step, busy: s.demo.busy }; });
+  check('[34] demo ask_ai step asks its question after waiting', st.qs.length === 2 && st.qs[1].startsWith('Why did this happen') && !st.busy, st);
+  await S(() => window.__deeptraceStore.getState().exitDemo());
+
+  // [35] stalled stream can be stopped
+  await reset(); stallChat = true;
+  await S(() => { window.__deeptraceStore.getState().sendAnalystMessage('Which component is the most important in this network?', { forceOffline: true }); });
+  await sleep(1500);
+  const before = await S(() => window.__deeptraceStore.getState().analystPending);
+  await S(() => window.__deeptraceStore.getState().stopAnalyst());
+  st = await S(() => { const s = window.__deeptraceStore.getState(); const last = s.messages[s.messages.length - 1]; return { pending: s.analystPending, lastPending: !!last?.pending, err: last?.error }; });
+  check('[35] Stop ends a stalled answer', before === true && !st.pending && !st.lastPending, { before, ...st });
+  stallChat = false;
+
+  // R2: Exit demo while the simulate step's request is in flight -> it is dropped, no spinner
+  await reset(); delays['/api/simulate'] = 2500;
+  await S(async () => { window.__deeptraceStore.getState().startDemo(); await new Promise((r) => setTimeout(r, 200)); window.__pd = window.__deeptraceStore.getState().demoGoto(5); });
+  await sleep(400);
+  await S(() => window.__deeptraceStore.getState().exitDemo());
+  const rightAfterExit = await S(() => window.__deeptraceStore.getState().simStatus);
+  await S(() => window.__pd); await sleep(2600);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { result: s.result?.scenario_id ?? null, slotA: s.slots.A?.scenario_id ?? null, sim: s.panels.simulation, playing: s.playback.playing, status: s.simStatus }; });
+  check('R2 Exit demo drops the simulate step\'s in-flight run', rightAfterExit === 'idle' && !st.result && !st.slotA && !st.sim && !st.playing && st.status === 'idle', { rightAfterExit, ...st });
+
+  // R2: Exit demo while the compare step's request is in flight
+  await reset();
+  await S(async () => { const s = window.__deeptraceStore.getState(); s.startDemo(); await new Promise((r) => setTimeout(r, 200)); await window.__deeptraceStore.getState().demoGoto(5); await window.__deeptraceStore.getState().demoGoto(8); });
+  delays['/api/compare'] = 2500;
+  await S(() => { window.__pd = window.__deeptraceStore.getState().demoGoto(9); });
+  await sleep(400);
+  await S(() => window.__deeptraceStore.getState().exitDemo());
+  const cmpAfterExit = await S(() => window.__deeptraceStore.getState().compareStatus);
+  await S(() => window.__pd); await sleep(2600);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { cmp: !!s.comparison, view: s.compareView, panel: s.panels.comparison, status: s.compareStatus }; });
+  check('R2 Exit demo drops the compare step\'s in-flight comparison', cmpAfterExit === 'idle' && !st.cmp && st.view !== 'diff' && !st.panel && st.status === 'idle', { cmpAfterExit, ...st });
+
+  // R2: Exit demo mid reveal_layers turns the layers it had not revealed yet back on
+  await reset();
+  await S(async () => { window.__deeptraceStore.getState().startDemo(); await new Promise((r) => setTimeout(r, 200)); window.__pd = window.__deeptraceStore.getState().demoGoto(2); });
+  await sleep(1300);
+  await S(() => window.__deeptraceStore.getState().exitDemo());
+  st = await S(() => window.__deeptraceStore.getState().layers);
+  check('R2 Exit mid reveal_layers leaves every layer on', Object.values(st).every(Boolean), st);
+
+  // R2: a comparison that lands after slot A was re-run keeps the newer run
+  await reset();
+  await S(async () => { const s = window.__deeptraceStore.getState(); const P = (id) => s.presets.find((x) => x.id === id).scenario;
+    await s.runSimulation(P('A-DS-FIVEPOINTS'), 'A'); await window.__deeptraceStore.getState().runSimulation(P('B-EDGEWOOD-DUCTBANK'), 'B'); });
+  delays['/api/compare'] = 2500;
+  await S(() => { window.__pc = window.__deeptraceStore.getState().runComparison(); });
+  await sleep(200);
+  await S(async () => { const s = window.__deeptraceStore.getState(); await s.runSimulation(s.presets.find((x) => x.id === 'C-WATER-MAIN-DECATUR').scenario, 'A'); });
+  await S(() => window.__pc);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { slotA: s.slots.A?.scenario_id, result: s.result?.scenario_id, cmp: !!s.comparison, view: s.compareView, status: s.compareStatus }; });
+  check('R2 slow comparison does not overwrite a newer slot run', st.slotA === 'C-WATER-MAIN-DECATUR' && st.result === 'C-WATER-MAIN-DECATUR' && st.cmp && st.view !== 'diff' && st.status === 'idle', st);
+
+  // R2: show_comparison that moves the displayed result also moves playback
+  await reset();
+  st = await S(async () => { const s = window.__deeptraceStore.getState(); const P = (id) => s.presets.find((x) => x.id === id).scenario;
+    await s.runSimulation(P('C-WATER-MAIN-DECATUR'), 'A'); await window.__deeptraceStore.getState().runSimulation(P('B-EDGEWOOD-DUCTBANK'), 'B');
+    window.__deeptraceStore.getState().showSlot('A');
+    const c = await (await fetch('http://localhost:8000/api/compare', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scenario_a: P('F-TS-SOUTH'), scenario_b: P('B-EDGEWOOD-DUCTBANK') }) })).json();
+    window.__deeptraceStore.getState().applyUIAction({ kind: 'show_comparison', comparison: c, node_ids: [], edge_ids: [] });
+    const t = window.__deeptraceStore.getState(); const max = Math.max(0, ...t.result.affected_nodes.map((a) => a.step ?? 0));
+    return { result: t.result.scenario_id, isA: t.result === t.slots.A, maxStep: t.playback.maxStep, resultMax: max }; });
+  check('R2 show_comparison resets playback to the result it shows', st.result === 'F-TS-SOUTH' && st.isA && st.maxStep >= st.resultMax, st);
+
+  // R2: a failed slot run that a newer run overlapped still reports its error
+  await reset(); delays['/api/simulate'] = 1500;
+  await S(() => { const s = window.__deeptraceStore.getState(); window.__pa = s.runSimulation({ failed_nodes: ['NO-SUCH-NODE'], failed_edges: [], horizon_hours: 4, enable_restoration: true }, 'A'); });
+  await sleep(200); delays['/api/simulate'] = 0;
+  await S(async () => { const s = window.__deeptraceStore.getState(); await s.runSimulation(s.presets.find((x) => x.id === 'C-WATER-MAIN-DECATUR').scenario); });
+  await S(() => window.__pa);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { slotA: s.slots.A?.scenario_id ?? null, err: s.simError, result: s.result?.scenario_id, status: s.simStatus }; });
+  check('R2 overlapped failed slot run is reported', !st.slotA && /^Scenario A failed/.test(st.err ?? '') && st.result === 'C-WATER-MAIN-DECATUR' && st.status === 'idle', st);
+
+  // R2: clearSimulation during a comparison does not leave its spinner on
+  await reset();
+  await S(async () => { const s = window.__deeptraceStore.getState(); const P = (id) => s.presets.find((x) => x.id === id).scenario;
+    await s.runSimulation(P('A-DS-FIVEPOINTS'), 'A'); await window.__deeptraceStore.getState().runSimulation(P('B-EDGEWOOD-DUCTBANK'), 'B'); });
+  delays['/api/compare'] = 1500;
+  await S(() => { window.__pc = window.__deeptraceStore.getState().runComparison(); });
+  await sleep(200);
+  await S(() => window.__deeptraceStore.getState().clearSimulation());
+  await S(() => window.__pc);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { status: s.compareStatus, cmp: !!s.comparison }; });
+  check('R2 clearSimulation settles an in-flight comparison', st.status === 'idle' && !st.cmp, st);
+
+  // R3: a slot run started just BEFORE Compare that lands during the comparison keeps its slot
+  await reset();
+  await S(async () => { const s = window.__deeptraceStore.getState(); const P = (id) => s.presets.find((x) => x.id === id).scenario;
+    await s.runSimulation(P('A-DS-FIVEPOINTS'), 'A'); await window.__deeptraceStore.getState().runSimulation(P('B-EDGEWOOD-DUCTBANK'), 'B'); });
+  delays['/api/simulate'] = 1500;
+  await S(() => { const s = window.__deeptraceStore.getState(); window.__pa = s.runSimulation(s.presets.find((x) => x.id === 'C-WATER-MAIN-DECATUR').scenario, 'A'); });
+  await sleep(250); delays['/api/compare'] = 3000;
+  await S(() => { window.__pc = window.__deeptraceStore.getState().runComparison(); });
+  await S(() => Promise.all([window.__pa, window.__pc]));
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { slotA: s.slots.A?.scenario_id, result: s.result?.scenario_id, view: s.compareView, cmpA: s.comparison?.scenario_a.scenario_id }; });
+  check('R3 slot run started before Compare keeps its slot', st.slotA === 'C-WATER-MAIN-DECATUR' && st.result === 'C-WATER-MAIN-DECATUR' && st.view !== 'diff' && st.cmpA === 'A-DS-FIVEPOINTS', st);
+
+  // R3: a slot re-run that FAILS during the comparison does not block the diff view
+  await reset();
+  await S(async () => { const s = window.__deeptraceStore.getState(); const P = (id) => s.presets.find((x) => x.id === id).scenario;
+    await s.runSimulation(P('A-DS-FIVEPOINTS'), 'A'); await window.__deeptraceStore.getState().runSimulation(P('B-EDGEWOOD-DUCTBANK'), 'B'); });
+  delays['/api/compare'] = 2000;
+  await S(() => { window.__pc = window.__deeptraceStore.getState().runComparison(); });
+  await sleep(200);
+  await S(() => window.__deeptraceStore.getState().runSimulation({ failed_nodes: ['NO-SUCH-NODE'], failed_edges: [], horizon_hours: 4, enable_restoration: true }, 'A'));
+  await S(() => window.__pc);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { slotA: s.slots.A?.scenario_id, view: s.compareView, cmp: !!s.comparison }; });
+  check('R3 failed re-run during a comparison still shows the diff', st.slotA === 'A-DS-FIVEPOINTS' && st.view === 'diff' && st.cmp, st);
+
+  // R3: tracing (inspector button or analyst show_trace) leaves the diff view, which hides traces;
+  // the highlight chip's "show" button keeps keyboard focus inside the chip
+  await S(async () => { await window.__deeptraceStore.getState().selectNode('PWR-DS-FIVEPOINTS', { fly: false }); });
+  const traceBtn = page.getByRole('button', { name: 'Trace', exact: true });
+  await traceBtn.waitFor({ timeout: 30000 }); await traceBtn.click();
+  await page.waitForFunction(() => window.__deeptraceStore.getState().traceVisible, null, { timeout: 30000 });
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { view: s.compareView, trace: s.trace?.node_id }; });
+  check('R3 inspector Trace leaves the A/B diff view', st.view !== 'diff' && st.trace === 'PWR-DS-FIVEPOINTS', st);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); const tr = s.trace; s.hideTrace(); s.setCompareView('diff');
+    s.applyUIAction({ kind: 'show_trace', trace: tr, node_ids: [], edge_ids: [] }); const t = window.__deeptraceStore.getState(); return { view: t.compareView, vis: t.traceVisible }; });
+  check('R3 analyst show_trace leaves the A/B diff view', st.view !== 'diff' && st.vis, st);
+  await S(() => { const s = window.__deeptraceStore.getState(); s.hideTrace(); s.setCompareView('diff'); s.setHighlight({ node_ids: ['PWR-DS-FIVEPOINTS'], edge_ids: [], label: 'Focus test', tone: 'info', source: 'ai' }); });
+  const showBtn = page.locator('button', { hasText: 'hidden in A/B diff' }).first();
+  await showBtn.waitFor({ timeout: 30000 }); await showBtn.focus(); await page.keyboard.press('Enter');
+  await sleep(300);
+  st = await S(() => ({ view: window.__deeptraceStore.getState().compareView, focus: document.activeElement?.getAttribute('role') ?? document.activeElement?.tagName, hl: !!window.__deeptraceStore.getState().highlight }));
+  check('R3 highlight chip "show" leaves the diff and keeps focus in the chip', st.view !== 'diff' && st.focus === 'status' && st.hl, st);
+  await page.keyboard.press('Tab');
+  st = await S(() => document.activeElement?.getAttribute('aria-label'));
+  check('R4 Tab from the chip reaches its Clear button', st === 'Clear highlight', { focus: st });
+
+  // R4: a mouse click on "show" then Space plays the cascade (focus is not left on Clear)
+  await S(() => { const s = window.__deeptraceStore.getState(); s.setCompareView('diff'); s.setPlaying(false); s.setHighlight({ node_ids: ['PWR-DS-FIVEPOINTS'], edge_ids: [], label: 'Focus test', tone: 'info', source: 'ai' }); });
+  const showBtn2 = page.locator('button', { hasText: 'hidden in A/B diff' }).first();
+  await showBtn2.waitFor({ timeout: 30000 }); await showBtn2.click();
+  await sleep(200); await page.keyboard.press(' ');
+  await sleep(200);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); const a = document.activeElement; return { hl: !!s.highlight, playing: s.playback.playing, view: s.compareView, focus: a?.tagName, ring: !!a && a !== document.body && a.matches(':focus-visible') }; });
+  check('R4 click "show", then Space plays instead of clearing the highlight (no focus ring)', st.hl && st.playing && st.view !== 'diff' && !st.ring, st);
+
+  // R5: a mouse click on the chip's label does not focus it (no ring after the next shortcut key)
+  await page.locator('[role=status]', { hasText: 'Highlight:' }).first().click();
+  await page.keyboard.press('ArrowRight');
+  st = await S(() => { const a = document.activeElement; return { focus: a?.tagName, ring: !!a && a !== document.body && a.matches(':focus-visible') }; });
+  check('R5 clicking the highlight label leaves no focus ring', st.focus === 'BODY' && !st.ring, st);
+  // screen readers may send a click with detail 1 and no pointer press: still treated as keyboard use
+  await S(() => { const s = window.__deeptraceStore.getState(); s.setCompareView('diff'); });
+  const showBtn3 = page.locator('button', { hasText: 'hidden in A/B diff' }).first();
+  await showBtn3.waitFor({ timeout: 30000 });
+  st = await S(() => { const b = [...document.querySelectorAll('button')].find((x) => x.textContent.includes('hidden in A/B diff'));
+    b.focus(); b.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }));
+    return new Promise((r) => setTimeout(() => r({ view: window.__deeptraceStore.getState().compareView, focus: document.activeElement?.getAttribute('role') ?? document.activeElement?.tagName }), 200)); });
+  check('R5 a screen-reader style click on "show" keeps focus in the chip', st.view !== 'diff' && st.focus === 'status', st);
+
+  // R4: an analyst comparison answering an earlier question does not count as a newer slot run
+  await reset();
+  await S(async () => { const s = window.__deeptraceStore.getState(); const P = (id) => s.presets.find((x) => x.id === id).scenario;
+    await s.runSimulation(P('C-WATER-MAIN-DECATUR'), 'A'); await window.__deeptraceStore.getState().runSimulation(P('B-EDGEWOOD-DUCTBANK'), 'B'); });
+  delays['/api/analyst/chat'] = 3000;
+  await S(() => { window.__pq = window.__deeptraceStore.getState().sendAnalystMessage('Compare scenario A and B'); });
+  await sleep(200);
+  await S(async () => { const s = window.__deeptraceStore.getState(); await s.runSimulation(s.presets.find((x) => x.id === 'A-DS-FIVEPOINTS').scenario, 'A'); });
+  delays['/api/compare'] = 6000;
+  await S(() => { window.__pc = window.__deeptraceStore.getState().runComparison(); });
+  await S(() => window.__pq);
+  const analystCmp = await S(() => window.__deeptraceStore.getState().comparison?.scenario_a.scenario_id ?? null);
+  await S(() => window.__pc);
+  st = { analystCmp, ...(await S(() => { const s = window.__deeptraceStore.getState(); return { slotA: s.slots.A?.scenario_id, result: s.result?.scenario_id, cmpA: s.comparison?.scenario_a.scenario_id, view: s.compareView }; })) };
+  // (analyst answers are ordered at question time: the answer's comparison shows while the Compare
+  // started after asking is in flight, then that newer Compare replaces it and owns the slots)
+  check('R4/R6 a Compare started after asking replaces the analyst\'s comparison when it lands', st.analystCmp === 'C-WATER-MAIN-DECATUR' && st.slotA === 'A-DS-FIVEPOINTS' && st.result === 'A-DS-FIVEPOINTS' && st.cmpA === 'A-DS-FIVEPOINTS' && st.view === 'diff', st);
+
+  const P2 = async (a, b) => S(async ([x, y]) => { const s = window.__deeptraceStore.getState(); const P = (id) => s.presets.find((p) => p.id === id).scenario;
+    await s.runSimulation(P(x), 'A'); await window.__deeptraceStore.getState().runSimulation(P(y), 'B'); }, [a, b]);
+  const snap = () => S(() => { const s = window.__deeptraceStore.getState(); return { slotA: s.slots.A?.scenario_id ?? null, result: s.result?.scenario_id ?? null, resultFailed: s.result?.scenario.failed_nodes ?? [], cmpA: s.comparison?.scenario_a.scenario_id ?? null, view: s.compareView, simStatus: s.simStatus, compareStatus: s.compareStatus }; });
+
+  // R6 race 1: a Compare started BEFORE asking does not replace the analyst's comparison when it lands
+  await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+  delays['/api/compare'] = 6000;
+  await S(() => { window.__pc = window.__deeptraceStore.getState().runComparison(); });
+  await sleep(200);
+  await S(async () => { const s = window.__deeptraceStore.getState(); await s.runSimulation(s.presets.find((x) => x.id === 'C-WATER-MAIN-DECATUR').scenario, 'A'); });
+  await S(() => window.__deeptraceStore.getState().sendAnalystMessage('Compare scenario A and B'));
+  const afterAnswer = await snap();
+  await S(() => window.__pc);
+  st = { afterAnswer, final: await snap() };
+  check('R6 an older in-flight Compare does not replace the analyst\'s comparison', afterAnswer.cmpA === 'C-WATER-MAIN-DECATUR' && afterAnswer.compareStatus === 'idle' && st.final.cmpA === 'C-WATER-MAIN-DECATUR' && st.final.slotA === 'C-WATER-MAIN-DECATUR' && st.final.view === 'diff' && st.final.compareStatus === 'idle', st);
+
+  // R6 race 2: the analyst's comparison (computed from the slots it was given) keeps a slot you re-ran after asking
+  await reset(); await P2('C-WATER-MAIN-DECATUR', 'B-EDGEWOOD-DUCTBANK');
+  delays['/api/analyst/chat'] = 3000;
+  await S(() => { window.__pq = window.__deeptraceStore.getState().sendAnalystMessage('Compare scenario A and B'); });
+  await sleep(200);
+  await S(async () => { const s = window.__deeptraceStore.getState(); await s.runSimulation(s.presets.find((x) => x.id === 'A-DS-FIVEPOINTS').scenario, 'A'); });
+  await S(() => window.__pq);
+  st = await snap();
+  check('R6 the analyst\'s comparison does not overwrite a slot re-run after asking', st.slotA === 'A-DS-FIVEPOINTS' && st.result === 'A-DS-FIVEPOINTS' && st.cmpA === 'C-WATER-MAIN-DECATUR' && st.view !== 'diff', st);
+
+  // R6 race 3: the analyst's simulation is newer than a run started before asking...
+  await reset();
+  await S(async () => { await window.__deeptraceStore.getState().selectNode('PWR-DS-FIVEPOINTS', { fly: false }); });
+  delays['/api/simulate'] = 4000;
+  await S(() => { const s = window.__deeptraceStore.getState(); window.__pr = s.runSimulation(s.presets.find((x) => x.id === 'C-WATER-MAIN-DECATUR').scenario); });
+  await sleep(200);
+  await S(() => window.__deeptraceStore.getState().sendAnalystMessage('What happens if this fails?'));
+  const afterSim = await snap();
+  await S(() => window.__pr);
+  st = { afterSim, final: await snap() };
+  check('R6 a run started before asking does not replace the analyst\'s simulation', afterSim.resultFailed.includes('PWR-DS-FIVEPOINTS') && afterSim.simStatus === 'idle' && st.final.resultFailed.includes('PWR-DS-FIVEPOINTS') && st.final.simStatus === 'idle', st);
+
+  // ...including a slot it fills (an older in-flight run for that slot does not overwrite it)
+  await reset();
+  const rAds = await S(async () => { const s = window.__deeptraceStore.getState(); const sc = s.presets.find((x) => x.id === 'A-DS-FIVEPOINTS').scenario;
+    return (await fetch('http://localhost:8000/api/simulate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(sc) })).json(); });
+  delays['/api/simulate'] = 3000;
+  await S(() => { const s = window.__deeptraceStore.getState(); window.__pa = s.runSimulation(s.presets.find((x) => x.id === 'C-WATER-MAIN-DECATUR').scenario, 'A'); });
+  await sleep(200);
+  await S((r) => window.__deeptraceStore.getState().applyUIAction({ kind: 'show_simulation', result: r, slot: 'A', node_ids: [], edge_ids: [] }), rAds);
+  await S(() => window.__pa);
+  st = await snap();
+  check('R6 an analyst slot write is newer than an in-flight run for that slot', st.slotA === 'A-DS-FIVEPOINTS' && st.result === 'A-DS-FIVEPOINTS' && st.simStatus === 'idle', st);
+
+  // ...but never replaces a run you started after asking
+  await reset();
+  await S(async () => { await window.__deeptraceStore.getState().selectNode('PWR-DS-FIVEPOINTS', { fly: false }); });
+  delays['/api/analyst/chat'] = 3000;
+  await S(() => { window.__pq = window.__deeptraceStore.getState().sendAnalystMessage('What happens if this fails?'); });
+  await sleep(200);
+  await S(async () => { const s = window.__deeptraceStore.getState(); await s.runSimulation(s.presets.find((x) => x.id === 'C-WATER-MAIN-DECATUR').scenario); });
+  await S(() => window.__pq);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); const m = s.messages[s.messages.length - 1]; return { result: s.result?.scenario_id, answered: !!m?.content && !m?.pending }; });
+  check('R6 the analyst\'s simulation does not replace a run started after asking', st.result === 'C-WATER-MAIN-DECATUR' && st.answered, st);
+
+  // R7: a slot run started before asking does not take the map from the analyst's comparison
+  // (it still fills its own slot as data, so the comparison shows as stale)
+  await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+  delays['/api/simulate'] = 5000;
+  await S(() => { const s = window.__deeptraceStore.getState(); window.__pr = s.runSimulation(s.presets.find((x) => x.id === 'C-WATER-MAIN-DECATUR').scenario, 'A'); });
+  await sleep(200);
+  await S(() => window.__deeptraceStore.getState().sendAnalystMessage('Compare scenario A and B'));
+  const r7a = await snap();
+  await S(() => window.__pr);
+  st = { afterAnswer: r7a, final: await snap() };
+  check('R7 an older slot run lands in its slot but not over the analyst\'s diff', r7a.view === 'diff' && r7a.cmpA === 'A-DS-FIVEPOINTS' && r7a.simStatus === 'running' && st.final.view === 'diff' && st.final.cmpA === 'A-DS-FIVEPOINTS' && st.final.slotA === 'C-WATER-MAIN-DECATUR' && st.final.simStatus === 'idle', st);
+
+  // R7: ...and an older active run is dropped (its spinner clears when the answer takes the map)
+  await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+  delays['/api/simulate'] = 5000;
+  await S(() => { const s = window.__deeptraceStore.getState(); window.__pr = s.runSimulation(s.presets.find((x) => x.id === 'C-WATER-MAIN-DECATUR').scenario); });
+  await sleep(200);
+  await S(() => window.__deeptraceStore.getState().sendAnalystMessage('Compare scenario A and B'));
+  const r7b = await snap();
+  await S(() => window.__pr);
+  st = { afterAnswer: r7b, final: await snap() };
+  check('R7 an older active run does not replace the analyst\'s diff', r7b.view === 'diff' && r7b.simStatus === 'idle' && st.final.view === 'diff' && st.final.result === 'B-EDGEWOOD-DUCTBANK' && st.final.simStatus === 'idle', st);
+
+  // R7: the analyst's comparison does not switch the map to its diff over a run started after asking
+  await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+  delays['/api/analyst/chat'] = 3000;
+  await S(() => { window.__pq = window.__deeptraceStore.getState().sendAnalystMessage('Compare scenario A and B'); });
+  await sleep(200);
+  await S(async () => { const s = window.__deeptraceStore.getState(); await s.runSimulation(s.presets.find((x) => x.id === 'C-WATER-MAIN-DECATUR').scenario); });
+  await S(() => window.__pq);
+  st = await snap();
+  check('R7 the analyst\'s comparison is stored without its diff over a newer run', st.result === 'C-WATER-MAIN-DECATUR' && st.view !== 'diff' && st.cmpA === 'A-DS-FIVEPOINTS', st);
+
+  // R7: a Compare started before asking stores its comparison but does not hide the analyst's simulation
+  await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+  await S(async () => { await window.__deeptraceStore.getState().selectNode('PWR-DS-FIVEPOINTS', { fly: false }); });
+  delays['/api/compare'] = 5000;
+  await S(() => { window.__pc = window.__deeptraceStore.getState().runComparison(); });
+  await sleep(200);
+  await S(() => window.__deeptraceStore.getState().sendAnalystMessage('What happens if this fails?'));
+  const r7d = await snap();
+  await S(() => window.__pc);
+  st = { afterAnswer: r7d, final: await snap() };
+  check('R7 an older Compare does not hide the analyst\'s simulation', r7d.resultFailed.includes('PWR-DS-FIVEPOINTS') && st.final.resultFailed.includes('PWR-DS-FIVEPOINTS') && st.final.view !== 'diff' && st.final.cmpA === 'A-DS-FIVEPOINTS' && st.final.compareStatus === 'idle', st);
+
+  // R7: a run or Compare started after asking that FAILS does not hold the answer back
+  await reset();
+  await S(async () => { await window.__deeptraceStore.getState().selectNode('PWR-DS-FIVEPOINTS', { fly: false }); });
+  delays['/api/analyst/chat'] = 3000;
+  await S(() => { window.__pq = window.__deeptraceStore.getState().sendAnalystMessage('What happens if this fails?'); });
+  await sleep(200); failSim = true;
+  await S(async () => { const s = window.__deeptraceStore.getState(); await s.runSimulation(s.presets.find((x) => x.id === 'C-WATER-MAIN-DECATUR').scenario); });
+  failSim = false;
+  const failedStatus = await S(() => window.__deeptraceStore.getState().simStatus);
+  await S(() => window.__pq);
+  st = { failedStatus, ...(await snap()) };
+  check('R7 a failed run started after asking does not suppress the analyst\'s simulation', failedStatus === 'error' && st.resultFailed.includes('PWR-DS-FIVEPOINTS'), st);
+  await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+  delays['/api/analyst/chat'] = 3000;
+  await S(() => { window.__pq = window.__deeptraceStore.getState().sendAnalystMessage('Compare scenario A and B'); });
+  await sleep(200); failCompare = true;
+  await S(() => window.__deeptraceStore.getState().runComparison());
+  failCompare = false;
+  const failedCmp = await S(() => window.__deeptraceStore.getState().compareStatus);
+  await S(() => window.__pq);
+  st = { failedCmp, ...(await snap()) };
+  check('R7 a failed Compare started after asking does not suppress the analyst\'s comparison', failedCmp === 'error' && st.cmpA === 'A-DS-FIVEPOINTS' && st.view === 'diff', st);
+
+  // R7: when a run started after asking already took the map, the answer's highlight is not drawn on it
+  await reset();
+  const rAds2 = await S(async () => { const s = window.__deeptraceStore.getState(); const sc = s.presets.find((x) => x.id === 'A-DS-FIVEPOINTS').scenario;
+    return (await fetch('http://localhost:8000/api/simulate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(sc) })).json(); });
+  chatReply = sse([
+    { type: 'status', mode: 'llm', model: 'scripted' },
+    { type: 'tool_call', id: 't1', name: 'run_failure_simulation', input: {} },
+    { type: 'tool_result', id: 't1', ok: true, summary: 'simulated' },
+    { type: 'ui_action', action: { kind: 'show_simulation', result: rAds2, slot: 'active', node_ids: [], edge_ids: [] } },
+    { type: 'ui_action', action: { kind: 'highlight', node_ids: rAds2.affected_nodes.map((n) => n.node_id), edge_ids: [], label: 'Affected components', tone: 'critical' } },
+    { type: 'message', text: 'If DS-2 Five Points fails, the modelled cascade affects several components.' },
+    { type: 'done', tool_calls: 1, mode: 'llm' },
+  ]);
+  delays['/api/analyst/chat'] = 3000;
+  await S(() => { window.__pq = window.__deeptraceStore.getState().sendAnalystMessage('What happens if Five Points fails?'); });
+  await sleep(200);
+  await S(async () => { const s = window.__deeptraceStore.getState(); await s.runSimulation(s.presets.find((x) => x.id === 'C-WATER-MAIN-DECATUR').scenario); });
+  await S(() => window.__pq);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); const m = s.messages[s.messages.length - 1]; return { result: s.result?.scenario_id, hl: s.highlight?.label ?? null, answered: !!m?.content && !m?.pending }; });
+  check('R7 a suppressed answer\'s highlight is not drawn over a newer run', st.result === 'C-WATER-MAIN-DECATUR' && st.hl === null && st.answered, st);
+  // control: with no newer run, the same scripted answer shows its simulation and its highlight
+  await reset();
+  chatReply = sse([
+    { type: 'status', mode: 'llm', model: 'scripted' },
+    { type: 'ui_action', action: { kind: 'show_simulation', result: rAds2, slot: 'active', node_ids: [], edge_ids: [] } },
+    { type: 'ui_action', action: { kind: 'highlight', node_ids: rAds2.affected_nodes.map((n) => n.node_id), edge_ids: [], label: 'Affected components', tone: 'critical' } },
+    { type: 'message', text: 'ok' }, { type: 'done', tool_calls: 1, mode: 'llm' },
+  ]);
+  await S(() => window.__deeptraceStore.getState().sendAnalystMessage('What happens if Five Points fails?'));
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { result: s.result?.scenario_id, hl: s.highlight?.label ?? null }; });
+  check('R7 control: the scripted answer shows its simulation and highlight', st.result === 'A-DS-FIVEPOINTS' && st.hl === 'Affected components', st);
+  chatReply = null;
+
+  // R8: a Compare started after asking replaces the answer's slot write when it lands
+  await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+  const rCw = await S(async () => { const s = window.__deeptraceStore.getState(); const sc = s.presets.find((x) => x.id === 'C-WATER-MAIN-DECATUR').scenario;
+    return (await fetch('http://localhost:8000/api/simulate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(sc) })).json(); });
+  chatReply = sse([
+    { type: 'status', mode: 'llm', model: 'scripted' },
+    { type: 'ui_action', action: { kind: 'show_simulation', result: rCw, slot: 'A', node_ids: [], edge_ids: [] } },
+    { type: 'message', text: 'ok' }, { type: 'done', tool_calls: 1, mode: 'llm' },
+  ]);
+  delays['/api/analyst/chat'] = 2500; delays['/api/compare'] = 6000;
+  await S(() => { window.__pq = window.__deeptraceStore.getState().sendAnalystMessage('Put the Decatur main break in slot A'); });
+  await sleep(300);
+  await S(() => { window.__pc = window.__deeptraceStore.getState().runComparison(); });
+  await S(() => window.__pq);
+  const r8a = await snap();
+  await S(() => window.__pc);
+  st = { afterAnswer: r8a, final: await snap() };
+  check('R8 a Compare started after asking replaces the answer\'s slot write when it lands', r8a.slotA === 'C-WATER-MAIN-DECATUR' && st.final.view === 'diff' && st.final.slotA === 'A-DS-FIVEPOINTS' && st.final.cmpA === 'A-DS-FIVEPOINTS' && st.final.compareStatus === 'idle', st);
+
+  // R8: ...and once such a Compare has landed, the answer no longer writes into its slots
+  await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+  chatReply = sse([
+    { type: 'status', mode: 'llm', model: 'scripted' },
+    { type: 'ui_action', action: { kind: 'show_simulation', result: rCw, slot: 'A', node_ids: [], edge_ids: [] } },
+    { type: 'message', text: 'ok' }, { type: 'done', tool_calls: 1, mode: 'llm' },
+  ]);
+  delays['/api/analyst/chat'] = 3000;
+  await S(() => { window.__pq = window.__deeptraceStore.getState().sendAnalystMessage('Put the Decatur main break in slot A'); });
+  await sleep(300);
+  await S(() => window.__deeptraceStore.getState().runComparison());
+  await S(() => window.__pq);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); const m = s.messages[s.messages.length - 1]; return { view: s.compareView, slotA: s.slots.A?.scenario_id, cmpA: s.comparison?.scenario_a.scenario_id, scripted: m?.model === 'scripted' }; });
+  check('R8 an answer does not write into the slots of a Compare started after asking', st.scripted && st.view === 'diff' && st.slotA === 'A-DS-FIVEPOINTS' && st.cmpA === 'A-DS-FIVEPOINTS', st);
+  chatReply = null;
+
+  // R8: a slot run started before asking that lands before the answer does not hold back its diff
+  await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+  delays['/api/simulate'] = 1500; delays['/api/analyst/chat'] = 4000;
+  await S(() => { const s = window.__deeptraceStore.getState(); window.__pr = s.runSimulation(s.presets.find((x) => x.id === 'C-WATER-MAIN-DECATUR').scenario, 'A'); });
+  await sleep(200);
+  await S(() => { window.__pq = window.__deeptraceStore.getState().sendAnalystMessage('Compare scenario A and B'); });
+  await S(() => window.__pr);
+  const r8c = await snap();
+  await S(() => window.__pq);
+  st = { runLanded: r8c, final: await snap() };
+  check('R8 an older slot run landing first does not hold back the answer\'s diff', r8c.slotA === 'C-WATER-MAIN-DECATUR' && st.final.view === 'diff' && st.final.cmpA === 'A-DS-FIVEPOINTS' && st.final.slotA === 'C-WATER-MAIN-DECATUR', st);
+
+  // R8: the answer's trace does not take the map from a Compare started after asking...
+  await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+  await S(async () => { await window.__deeptraceStore.getState().selectNode('PWR-DS-FIVEPOINTS', { fly: false }); });
+  delays['/api/analyst/chat'] = 3000;
+  await S(() => { window.__pq = window.__deeptraceStore.getState().sendAnalystMessage('Trace the connections of this component'); });
+  await sleep(300);
+  await S(() => window.__deeptraceStore.getState().runComparison());
+  await S(() => window.__pq);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { view: s.compareView, trace: s.trace?.node_id ?? null, cmpA: s.comparison?.scenario_a.scenario_id ?? null }; });
+  check('R8 an answer\'s trace does not take the map from a newer Compare', st.view === 'diff' && st.trace === 'PWR-DS-FIVEPOINTS' && st.cmpA === 'A-DS-FIVEPOINTS', st);
+
+  // R8: ...and a Compare started before asking does not take the diff back over the answer's trace
+  await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+  await S(() => window.__deeptraceStore.getState().runComparison());
+  await S(async () => { await window.__deeptraceStore.getState().selectNode('PWR-DS-FIVEPOINTS', { fly: false }); });
+  delays['/api/compare'] = 5000;
+  await S(() => { window.__pc = window.__deeptraceStore.getState().runComparison(); });
+  await sleep(200);
+  await S(() => window.__deeptraceStore.getState().sendAnalystMessage('Trace the connections of this component'));
+  const r8e = await S(() => { const s = window.__deeptraceStore.getState(); return { view: s.compareView, vis: s.traceVisible }; });
+  await S(() => window.__pc);
+  st = { afterAnswer: r8e, final: await S(() => { const s = window.__deeptraceStore.getState(); return { view: s.compareView, vis: s.traceVisible, status: s.compareStatus }; }) };
+  check('R8 an older Compare does not take the diff back over the answer\'s trace', r8e.view !== 'diff' && r8e.vis && st.final.view !== 'diff' && st.final.vis && st.final.status === 'idle', st);
+
+  // R9: an answer's trace shown with no diff on screen is not hidden by a Compare started before asking
+  await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+  await S(async () => { await window.__deeptraceStore.getState().selectNode('PWR-DS-FIVEPOINTS', { fly: false }); });
+  delays['/api/compare'] = 5000;
+  await S(() => { window.__pc = window.__deeptraceStore.getState().runComparison(); });
+  await sleep(200);
+  await S(() => window.__deeptraceStore.getState().sendAnalystMessage('Trace the connections of this component'));
+  const r9a = await S(() => { const s = window.__deeptraceStore.getState(); return { view: s.compareView, vis: s.traceVisible }; });
+  await S(() => window.__pc);
+  st = { afterAnswer: r9a, final: await S(() => { const s = window.__deeptraceStore.getState(); return { view: s.compareView, vis: s.traceVisible, cmp: !!s.comparison, status: s.compareStatus }; }) };
+  check('R9 an older Compare does not hide the answer\'s trace (no diff on screen)', r9a.vis && st.final.view !== 'diff' && st.final.vis && st.final.cmp && st.final.status === 'idle', st);
+
+  // R9: a Compare that takes a slot back from an older answer also clears that answer's highlight
+  await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+  chatReply = sse([
+    { type: 'status', mode: 'llm', model: 'scripted' },
+    { type: 'ui_action', action: { kind: 'show_simulation', result: rCw, slot: 'A', node_ids: [], edge_ids: [] } },
+    { type: 'ui_action', action: { kind: 'highlight', node_ids: rCw.affected_nodes.map((n) => n.node_id), edge_ids: [], label: 'Affected components', tone: 'critical' } },
+    { type: 'message', text: 'ok' }, { type: 'done', tool_calls: 1, mode: 'llm' },
+  ]);
+  delays['/api/analyst/chat'] = 2500; delays['/api/compare'] = 6000;
+  await S(() => { window.__pq = window.__deeptraceStore.getState().sendAnalystMessage('Put the Decatur main break in slot A'); });
+  await sleep(300);
+  await S(() => { window.__pc = window.__deeptraceStore.getState().runComparison(); });
+  await S(() => window.__pq);
+  const r9b = await S(() => window.__deeptraceStore.getState().highlight?.label ?? null);
+  await S(() => window.__pc);
+  st = { hlAfterAnswer: r9b, ...(await S(() => { const s = window.__deeptraceStore.getState(); return { view: s.compareView, slotA: s.slots.A?.scenario_id, result: s.result?.scenario_id, hl: s.highlight?.label ?? null }; })) };
+  check('R9 a Compare that takes back the answer\'s slot clears its highlight', r9b === 'Affected components' && st.view === 'diff' && st.slotA === 'A-DS-FIVEPOINTS' && st.result === 'A-DS-FIVEPOINTS' && st.hl === null, st);
+
+  // R9: a Compare started after asking that only KEPT an older run in slot A does not block the answer's slot write
+  const rTel = await S(async () => { const s = window.__deeptraceStore.getState(); const sc = s.presets.find((x) => x.id === 'D-TELECOM-56MARIETTA').scenario;
+    return (await fetch('http://localhost:8000/api/simulate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(sc) })).json(); });
+  const telReply = sse([
+    { type: 'status', mode: 'llm', model: 'scripted' },
+    { type: 'ui_action', action: { kind: 'show_simulation', result: rTel, slot: 'A', node_ids: [], edge_ids: [] } },
+    { type: 'message', text: 'ok' }, { type: 'done', tool_calls: 1, mode: 'llm' },
+  ]);
+  for (const [preset, label] of [['C-WATER-MAIN-DECATUR', 'other scenario'], ['A-DS-FIVEPOINTS', 'same scenario']]) {
+    await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+    chatReply = telReply;
+    delays['/api/simulate'] = 1500; delays['/api/compare'] = 3000; delays['/api/analyst/chat'] = 6000;
+    await S((id) => { const s = window.__deeptraceStore.getState(); window.__pr = s.runSimulation(s.presets.find((x) => x.id === id).scenario, 'A'); }, preset);
+    await sleep(150);
+    await S(() => { window.__pq = window.__deeptraceStore.getState().sendAnalystMessage('Put the Marietta telecom failure in slot A'); });
+    await sleep(200);
+    await S(() => { window.__pc = window.__deeptraceStore.getState().runComparison(); });
+    await S(() => Promise.all([window.__pr, window.__pc, window.__pq]));
+    st = await snap();
+    if (label === 'other scenario')
+      check('R9 an older run kept by a newer Compare does not block the answer\'s slot write', st.slotA === 'D-TELECOM-56MARIETTA', st);
+    else
+      check('R9 ...but a slot showing what the newer Compare compared keeps it', st.slotA === 'A-DS-FIVEPOINTS' && st.view === 'diff' && st.cmpA === 'A-DS-FIVEPOINTS', st);
+  }
+  chatReply = null;
+
+  // R10: a later answer that shows a new result does not keep an earlier answer's highlight
+  await reset();
+  await S(async () => { const s = window.__deeptraceStore.getState(); await s.runSimulation(s.presets.find((x) => x.id === 'A-DS-FIVEPOINTS').scenario); });
+  await S(() => window.__deeptraceStore.getState().sendAnalystMessage('Why did this happen, and what could we do differently?'));
+  const hl1 = await S(() => window.__deeptraceStore.getState().highlight?.source ?? null);
+  await S(() => window.__deeptraceStore.getState().sendAnalystMessage('What happens if PWR-TS-SOUTH fails?'));
+  st = { hl1, ...(await S(() => { const s = window.__deeptraceStore.getState(); return { failed: s.result?.scenario.failed_nodes ?? [], hl: s.highlight?.label ?? null }; })) };
+  check('R10 a later answer\'s new result does not keep the earlier answer\'s highlight', st.hl1 === 'ai' && st.failed.includes('PWR-TS-SOUTH') && st.hl === null, st);
+
+  // R10: a stale Compare drawn into the diff already on screen owns the map: an older run does not take it
+  await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+  await S(() => window.__deeptraceStore.getState().runComparison());
+  bodyDelays['C-WATER-MAIN-DECATUR'] = 1000; bodyDelays['D-TELECOM-56MARIETTA'] = 5000; delays['/api/compare'] = 2500;
+  await S(() => { const s = window.__deeptraceStore.getState(); const P = (id) => s.presets.find((x) => x.id === id).scenario;
+    window.__px = s.runSimulation(P('C-WATER-MAIN-DECATUR'), 'A'); window.__py = s.runSimulation(P('D-TELECOM-56MARIETTA')); window.__pc = s.runComparison(); });
+  await S(() => Promise.all([window.__px, window.__py, window.__pc]));
+  st = await snap();
+  check('R10 a run requested before a Compare that redrew the diff does not take the map', st.view === 'diff' && st.result === 'B-EDGEWOOD-DUCTBANK' && st.slotA === 'C-WATER-MAIN-DECATUR' && st.simStatus === 'idle', st);
+
+  // R10: a Compare started before a later answer's trace leaves that answer's result, trace and highlight alone
+  await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+  const trDs = await S(async () => (await fetch('http://localhost:8000/api/trace/PWR-DS-FIVEPOINTS?max_depth=8')).json());
+  // Q1 asked, then Compare (in flight); Q1's answer lands; Q2 asked and answered; then the Compare lands
+  delays['/api/compare'] = 6000; delays['/api/analyst/chat'] = 1500;
+  chatReply = sse([
+    { type: 'status', mode: 'llm', model: 'scripted' },
+    { type: 'ui_action', action: { kind: 'show_simulation', result: rCw, slot: 'A', node_ids: [], edge_ids: [] } },
+    { type: 'message', text: 'ok' }, { type: 'done', tool_calls: 1, mode: 'llm' },
+  ]);
+  await S(() => { window.__pq = window.__deeptraceStore.getState().sendAnalystMessage('Put the Decatur main break in slot A'); });
+  await S(() => { window.__pc = window.__deeptraceStore.getState().runComparison(); });
+  await S(() => window.__pq);
+  chatReply = sse([
+    { type: 'status', mode: 'llm', model: 'scripted' },
+    { type: 'ui_action', action: { kind: 'select_node', node_id: 'PWR-DS-FIVEPOINTS', node_ids: [], edge_ids: [] } },
+    { type: 'ui_action', action: { kind: 'show_trace', trace: trDs, node_ids: [], edge_ids: [] } },
+    { type: 'ui_action', action: { kind: 'highlight', node_ids: ['PWR-DS-FIVEPOINTS'], edge_ids: [], label: 'Connections of DS-2', tone: 'info' } },
+    { type: 'message', text: 'ok' }, { type: 'done', tool_calls: 1, mode: 'llm' },
+  ]);
+  await S(() => window.__deeptraceStore.getState().sendAnalystMessage('Trace DS-2 Five Points'));
+  await S(() => window.__pc);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { result: s.result?.scenario_id, view: s.compareView, trace: s.trace?.node_id ?? null, hl: s.highlight?.label ?? null, slotA: s.slots.A?.scenario_id, cmpA: s.comparison?.scenario_a.scenario_id ?? null, status: s.compareStatus }; });
+  check('R10 an older Compare leaves a later answer\'s result, trace and highlight', st.result === 'C-WATER-MAIN-DECATUR' && st.view !== 'diff' && st.trace === 'PWR-DS-FIVEPOINTS' && st.hl === 'Connections of DS-2' && st.slotA === 'A-DS-FIVEPOINTS' && st.cmpA === 'A-DS-FIVEPOINTS' && st.status === 'idle', st);
+  chatReply = null;
+
+  // R11: switching the shown slot drops an analyst highlight that described the other slot's result
+  await reset(); await P2('A-DS-FIVEPOINTS', 'C-WATER-MAIN-DECATUR');
+  await S(() => window.__deeptraceStore.getState().sendAnalystMessage('Why did this happen, and what could we do differently?'));
+  const r11a = await S(() => { const s = window.__deeptraceStore.getState(); return { result: s.result?.scenario_id, hl: s.highlight?.source ?? null }; });
+  await S(() => window.__deeptraceStore.getState().showSlot('A'));
+  st = { onB: r11a, ...(await S(() => { const s = window.__deeptraceStore.getState(); return { result: s.result?.scenario_id, hl: s.highlight?.label ?? null }; })) };
+  check('R11 switching to slot A drops the AI highlight about slot B', r11a.result === 'C-WATER-MAIN-DECATUR' && r11a.hl === 'ai' && st.result === 'A-DS-FIVEPOINTS' && st.hl === null, st);
+
+  // R11: an answer's highlight is not drawn on a result of another scenario that an older run put on the map meanwhile
+  await reset();
+  await S(async () => { const s = window.__deeptraceStore.getState(); await s.runSimulation(s.presets.find((x) => x.id === 'A-DS-FIVEPOINTS').scenario); });
+  bodyDelays['C-WATER-MAIN-DECATUR'] = 1500; delays['/api/analyst/chat'] = 5000;
+  await S(() => { const s = window.__deeptraceStore.getState(); window.__pr = s.runSimulation(s.presets.find((x) => x.id === 'C-WATER-MAIN-DECATUR').scenario); });
+  await sleep(150);
+  await S(() => { window.__pq = window.__deeptraceStore.getState().sendAnalystMessage('Why did this happen, and what could we do differently?'); });
+  await S(() => Promise.all([window.__pr, window.__pq]));
+  st = await S(() => { const s = window.__deeptraceStore.getState(); const m = s.messages[s.messages.length - 1]; return { result: s.result?.scenario_id, hl: s.highlight?.label ?? null, sim: s.simStatus, answered: !!m?.content && !m?.pending }; });
+  check('R11 an answer\'s highlight is not drawn on a newer scenario an older run showed', st.result === 'C-WATER-MAIN-DECATUR' && st.hl === null && st.sim === 'idle' && st.answered, st);
+
+  // R12: a run of the same scenario requested before asking keeps the answer's highlight when it lands
+  await reset();
+  await S(async () => { const s = window.__deeptraceStore.getState(); await s.runSimulation(s.presets.find((x) => x.id === 'A-DS-FIVEPOINTS').scenario); });
+  bodyDelays['A-DS-FIVEPOINTS'] = 4000;
+  await S(() => { const s = window.__deeptraceStore.getState(); window.__pr = s.runSimulation(s.presets.find((x) => x.id === 'A-DS-FIVEPOINTS').scenario, 'A'); });
+  await sleep(150);
+  await S(() => window.__deeptraceStore.getState().sendAnalystMessage('Why did this happen, and what could we do differently?'));
+  const r12a = await S(() => window.__deeptraceStore.getState().highlight?.source ?? null);
+  await S(() => window.__pr);
+  st = { hlAfterAnswer: r12a, ...(await S(() => { const s = window.__deeptraceStore.getState(); return { result: s.result?.scenario_id, slotA: s.slots.A?.scenario_id, hl: s.highlight?.source ?? null }; })) };
+  check('R12 a same-scenario run requested before asking keeps the answer\'s highlight', r12a === 'ai' && st.result === 'A-DS-FIVEPOINTS' && st.slotA === 'A-DS-FIVEPOINTS' && st.hl === 'ai', st);
+
+  // R12: a Compare started after asking drops that answer's highlight whichever lands first
+  await reset(); await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK');
+  delays['/api/compare'] = 6000;
+  await S(() => { const s = window.__deeptraceStore.getState(); window.__pq = s.sendAnalystMessage('Why did this happen, and what could we do differently?'); window.__pc = s.runComparison(); });
+  await S(() => window.__pq);
+  const r12b = await S(() => window.__deeptraceStore.getState().highlight?.source ?? null);
+  await S(() => window.__pc);
+  st = { hlAfterAnswer: r12b, ...(await S(() => { const s = window.__deeptraceStore.getState(); return { view: s.compareView, hl: s.highlight?.label ?? null }; })) };
+  check('R12 a Compare started after asking replaces that answer\'s highlight', r12b === 'ai' && st.view === 'diff' && st.hl === null, st);
+
+  // R12: the demo's 'Ask the AI' step puts A back on screen after waiting for an earlier answer
+  await reset();
+  await S(async () => { const s = window.__deeptraceStore.getState(); s.startDemo(); await new Promise((r) => setTimeout(r, 200)); await window.__deeptraceStore.getState().demoGoto(5); });
+  delays['/api/analyst/chat'] = 1500;
+  await S(() => { window.__pq = window.__deeptraceStore.getState().sendAnalystMessage('What happens if PWR-TS-SOUTH fails?'); });
+  await sleep(100);
+  await S(() => window.__deeptraceStore.getState().demoGoto(7));
+  await S(() => window.__pq);
+  st = await S(() => { const s = window.__deeptraceStore.getState(); const last = s.messages[s.messages.length - 1];
+    return { result: s.result?.scenario_id ?? null, qs: s.messages.filter((m) => m.role === 'user').map((m) => m.content.slice(0, 24)), lastErr: last?.error ?? null, busy: s.demo.busy }; });
+  check('R12 demo Ask the AI asks its question with scenario A on screen', st.result === 'A-DS-FIVEPOINTS' && st.qs.length === 2 && st.qs[1].startsWith('Why did this happen') && !st.lastErr && !st.busy, st);
+  await S(() => window.__deeptraceStore.getState().exitDemo());
+
+  // R13: request-timeline checks with held requests. Each request is held at the network until the
+  // check releases it, so the order requests land in is exact. A pair check plays the SAME requests in
+  // the same order twice, landing in two orders: both must settle to the same state (and to `expect`).
+  {
+    const ops = {};
+    const H = {
+      /** run into a slot ('A' | 'B' | 'active'), held as `id` */
+      async run(id, slot, preset) {
+        const g = (ops[id] = gate('/api/simulate'));
+        await S(([id, slot, preset]) => { const s = window.__deeptraceStore.getState(); window.__ops[id] = s.runSimulation(s.presets.find((x) => x.id === preset).scenario, slot === 'active' ? undefined : slot); }, [id, slot, preset]);
+        await within(g.hit, 5000, 'run ' + id);
+      },
+      async cmp(id) {
+        const g = (ops[id] = gate('/api/compare'));
+        await S((id) => { window.__ops[id] = window.__deeptraceStore.getState().runComparison(); }, id);
+        await within(g.hit, 5000, 'Compare ' + id);
+      },
+      /** the inspector's Trace button on `node`, held as `id` */
+      async utrace(id, node) {
+        await S(async (node) => { await window.__deeptraceStore.getState().selectNode(node, { fly: false }); }, node);
+        const g = (ops[id] = gate('/api/trace'));
+        await S(([id, node]) => { window.__ops[id] = window.__deeptraceStore.getState().showTrace(node); }, [id, node]);
+        await within(g.hit, 5000, 'trace ' + id);
+      },
+      /** click `node` while a trace is shown: the inspector follows it with a trace, held as `id` */
+      async follow(id, node) {
+        const g = (ops[id] = gate('/api/trace'));
+        await S(([id, node]) => { window.__ops[id] = window.__deeptraceStore.getState().selectNode(node, { fly: false }); }, [id, node]);
+        await within(g.hit, 5000, 'trace ' + id);
+      },
+      /** click `node` with its details held as `id` (landing it does not wait for a follow-trace it then makes) */
+      async click(id, node) {
+        const g = (ops[id] = gate('/api/nodes/'));
+        g.settle = 300; // the details only: their follow-trace may itself be held
+        await S((node) => { window.__deeptraceStore.getState().selectNode(node, { fly: false }); }, node);
+        await within(g.hit, 5000, 'details ' + id);
+      },
+      /** the inspector's Trace button on the selected `node` (not clicking it first), held as `id` */
+      async trace(id, node) {
+        const g = (ops[id] = gate('/api/trace'));
+        await S(([id, node]) => { window.__ops[id] = window.__deeptraceStore.getState().showTrace(node); }, [id, node]);
+        await within(g.hit, 5000, 'trace ' + id);
+      },
+      /** hold the next request to `url` as `id` if one is made (a request the store may or may not make) */
+      maybe(id, url) { ops[id] = gate(url); },
+      async landIfMade(id, fail = false) { if (ops[id].taken) await H.land(id, fail); },
+      /** the held request lands (fails with HTTP 500 when `fail`: true or the failure's message) and the store settles it */
+      async land(id, fail = false) {
+        ops[id].fail = fail;
+        ops[id].release();
+        await S((id) => Promise.resolve(window.__ops[id]).catch(() => {}), id);
+        await sleep(ops[id].settle ?? 60);
+      },
+      /** ask question `id` (its text: 'q<id>', or `text`), held */
+      async ask(id, text) {
+        const g = (ops['q' + id] = gate('/api/analyst/chat'));
+        await S(([id, text]) => { window.__ops['q' + id] = window.__deeptraceStore.getState().sendAnalystMessage(text ?? 'q' + id); }, [id, text]);
+        await within(g.hit, 5000, 'question ' + id);
+      },
+      /** ask question `id`; its answer streams from the local SSE server as the check sends it (H.send / H.end / H.drop) */
+      async askLive(id, text) {
+        await H.ask(id, text);
+        const st = (ops['s' + id] = liveStream('q' + id));
+        ops['q' + id].stream = 'q' + id;
+        ops['q' + id].release();
+        await within(st.opened, 5000, 'answer stream ' + id);
+        st.send([{ type: 'status', mode: 'llm', model: 'scripted' }]);
+        await sleep(100);
+      },
+      /** the streaming answer to question `id` sends these events (ui_actions: `action` objects) */
+      async send(id, events) {
+        ops['s' + id].send(events.map((e) => (e.type ? e : { type: 'ui_action', action: e })));
+        await sleep(250);
+      },
+      /** the streaming answer to question `id` is cut off mid-answer (its connection drops) */
+      drop(id) { ops['s' + id].drop(); },
+      /** the streaming answer to question `id` ends */
+      async end(id) {
+        ops['s' + id].send([{ type: 'message', text: 'ok' }, { type: 'done', mode: 'llm' }]);
+        ops['s' + id].end();
+        await S((id) => Promise.resolve(window.__ops['q' + id]).catch(() => {}), id);
+        await sleep(60);
+      },
+      /** the engine is up and the app is live: after a failover, the recovery poll (every 15 s) finds it back */
+      async live() {
+        blockEngine = false;
+        await page.waitForFunction(() => window.__deeptraceStore.getState().dataMode === 'live', null, { timeout: 40000 });
+      },
+      /** the answer to question `id` streams its actions, then ends */
+      async answer(id, actions) {
+        const g = ops['q' + id];
+        g.reply = sse([{ type: 'status', mode: 'llm', model: 'scripted' }, ...actions.map((action) => ({ type: 'ui_action', action })), { type: 'message', text: 'ok' }, { type: 'done', tool_calls: actions.length, mode: 'llm' }]);
+        g.release();
+        await S((id) => Promise.resolve(window.__ops['q' + id]).catch(() => {}), id);
+        await sleep(60);
+      },
+      async startDemo() { await S(async () => { window.__deeptraceStore.getState().startDemo(); await new Promise((r) => setTimeout(r, 200)); }); },
+      /** go to a demo step (not awaited); `holds` names the gate of each engine request it makes */
+      async demo(step, holds = {}) {
+        const gs = Object.entries(holds).map(([id, url]) => (ops[id] = gate(url)));
+        await S((step) => { window.__ops['demo' + step] = window.__deeptraceStore.getState().demoGoto(step); }, step);
+        for (const g of gs) await within(g.hit, 5000, 'demo step ' + step);
+        await sleep(60);
+      },
+      /** the demo step has finished */
+      done: (step) => within(S((step) => window.__ops['demo' + step], step), 30000, 'demo step ' + step + ' to finish'),
+      async exitDemo() { await S(() => window.__deeptraceStore.getState().exitDemo()); await sleep(60); },
+      /** a run into `slot` that has already landed */
+      async ran(slot, preset) { await S(async ([slot, preset]) => { const s = window.__deeptraceStore.getState(); await s.runSimulation(s.presets.find((x) => x.id === preset).scenario, slot === 'active' ? undefined : slot); }, [slot, preset]); },
+      /** A and B already landed */
+      async ab() { await P2('A-DS-FIVEPOINTS', 'B-EDGEWOOD-DUCTBANK'); },
+    };
+    const rTel13 = await S(async () => { const sc = window.__deeptraceStore.getState().presets.find((x) => x.id === 'D-TELECOM-56MARIETTA').scenario;
+      return (await fetch('http://localhost:8000/api/simulate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(sc) })).json(); });
+    const cmpAB = await S(async () => { const P = (id) => window.__deeptraceStore.getState().presets.find((x) => x.id === id).scenario;
+      return (await fetch('http://localhost:8000/api/compare', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scenario_a: P('A-DS-FIVEPOINTS'), scenario_b: P('B-EDGEWOOD-DUCTBANK') }) })).json(); });
+    const cmpAC = await S(async () => { const P = (id) => window.__deeptraceStore.getState().presets.find((x) => x.id === id).scenario;
+      return (await fetch('http://localhost:8000/api/compare', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scenario_a: P('A-DS-FIVEPOINTS'), scenario_b: P('C-WATER-MAIN-DECATUR') }) })).json(); });
+    const traceTS13 = await S(async () => (await fetch('http://localhost:8000/api/trace/PWR-TS-SOUTH?max_depth=8')).json());
+    const trace13 = await S(async () => (await fetch('http://localhost:8000/api/trace/PWR-DS-FIVEPOINTS?max_depth=8')).json());
+    const act = {
+      sim: (result, slot) => ({ kind: 'show_simulation', result, slot, node_ids: [], edge_ids: [] }),
+      hl: (label) => ({ kind: 'highlight', node_ids: ['PWR-DS-FIVEPOINTS'], edge_ids: [], label, tone: 'info' }),
+      trace: (trace = trace13) => ({ kind: 'show_trace', trace, node_ids: [], edge_ids: [] }),
+      cmp: (comparison = cmpAB) => ({ kind: 'show_comparison', comparison, node_ids: [], edge_ids: [] }),
+    };
+    const start13 = async () => {
+      await reset();
+      // record what is on screen whenever a question is actually sent (the user's or the demo's)
+      await S(() => { const st = window.__deeptraceStore; window.__ops = {}; window.__asked = [];
+        if (!window.__origAsk) window.__origAsk = st.getState().sendAnalystMessage;
+        st.setState({ sendAnalystMessage: (text, opts) => { const s = st.getState();
+          if (text.trim() && !s.analystPending) window.__asked.push({ text, result: s.result?.scenario_id ?? null, view: s.compareView });
+          return window.__origAsk(text, opts); } }); });
+    };
+    const state13 = async () => { await sleep(150); return S(() => { const s = window.__deeptraceStore.getState(); const diff = s.compareView === 'diff' && !!s.comparison;
+      return { map: diff ? 'D:' + s.comparison.scenario_a.scenario_id + '/' + s.comparison.scenario_b.scenario_id : 'R:' + (s.result?.scenario_id ?? null),
+        hl: s.highlight ? (diff ? 'hidden:' : '') + s.highlight.label : null, A: s.slots.A?.scenario_id ?? null, B: s.slots.B?.scenario_id ?? null,
+        cmp: s.comparison ? s.comparison.scenario_a.scenario_id + '/' + s.comparison.scenario_b.scenario_id : null,
+        trace: s.traceVisible, sim: s.simStatus, cmpSt: s.compareStatus, analyst: s.analystPending, demoBusy: s.demo.busy, err: s.simError,
+        sel: s.selectedNodeId, traceOf: s.traceVisible ? s.trace?.node_id ?? null : null,
+        // the demo's own question: what was on screen when it was sent (it must be scenario A, not the diff)
+        demoAsked: window.__asked.filter((a) => !/^q\d+$/.test(a.text)).map((a) => (a.view === 'diff' ? 'diff' : a.result)) }; }); };
+    /** every landing order settles to the same state (and to `expect`); `more` adds fields to the state */
+    const pair13 = async (name, plays, expect, more) => {
+      const out = [];
+      try { for (const play of plays) { await start13(); await play(); out.push({ ...(await state13()), ...(more ? await more() : {}) }); } } catch (e) { return check(name, false, { error: e.message, out }); }
+      check(name, out.every((f) => JSON.stringify(f) === JSON.stringify(out[0])) && (!expect || out.every(expect)), out);
+    };
+    /** the last analyst answer (its text, error and tool rows) and the data mode */
+    const answer13 = () => S(() => { const s = window.__deeptraceStore.getState(); const m = [...s.messages].reverse().find((x) => x.role === 'assistant');
+      return { answer: (m?.content ?? '').slice(0, 40), answerErr: (m?.error ?? '').slice(0, 40), tools: m ? m.tools.map((t) => t.status).join(',') : null, mode: s.dataMode }; });
+    /** the inspector's details */
+    const details13 = () => S(() => { const s = window.__deeptraceStore.getState(); return { details: s.details?.node.id ?? null, detailsLoading: s.detailsLoading }; });
+    /** every order of the steps in `last` after `first` */
+    const orders13 = (first, last) => {
+      const perms = (xs) => (xs.length <= 1 ? [xs] : xs.flatMap((x, i) => perms([...xs.slice(0, i), ...xs.slice(i + 1)]).map((p) => [x, ...p])));
+      return perms(last).map((p) => async () => { await first(); for (const step of p) await step(); });
+    };
+    const single13 = async (name, play, expect, more) => {
+      try { await start13(); await play(); } catch (e) { return check(name, false, { error: e.message }); }
+      const f = { ...(await state13()), ...(more ? await more() : {}) };
+      check(name, expect(f), f);
+    };
+    const AB = 'D:A-DS-FIVEPOINTS/B-EDGEWOOD-DUCTBANK';
+    const onlyA = (f) => f.demoAsked.every((x) => x === 'A-DS-FIVEPOINTS');
+
+    await pair13('R13 a Compare held back by a later answer\'s trace owns the map: an older run does not take it', [
+      async () => { await H.ab(); await H.run('r5', 'active', 'F-TS-SOUTH'); await H.cmp('c7'); await H.ask(8); await H.answer(8, [act.trace()]); await H.land('c7'); await H.land('r5'); },
+      async () => { await H.ab(); await H.run('r5', 'active', 'F-TS-SOUTH'); await H.cmp('c7'); await H.ask(8); await H.land('c7'); await H.answer(8, [act.trace()]); await H.land('r5'); },
+    ], (f) => f.map === 'R:B-EDGEWOOD-DUCTBANK' && f.trace && f.cmp === 'A-DS-FIVEPOINTS/B-EDGEWOOD-DUCTBANK' && f.sim === 'idle');
+
+    await pair13('R13 a Compare held back by a later answer\'s trace clears an earlier answer\'s highlight', [
+      async () => { await H.ab(); await H.ask(1); await H.answer(1, [act.hl('L1')]); await H.cmp('c4'); await H.ask(5); await H.answer(5, [act.trace()]); await H.land('c4'); },
+      async () => { await H.ab(); await H.ask(1); await H.answer(1, [act.hl('L1')]); await H.cmp('c4'); await H.ask(5); await H.land('c4'); await H.answer(5, [act.trace()]); },
+    ], (f) => f.hl === null && f.trace);
+
+    await pair13('R13 an older slot run landing after a later Compare does not release the answer\'s write to that slot', [
+      async () => { await H.ab(); await H.run('r3', 'A', 'C-WATER-MAIN-DECATUR'); await H.ask(4); await H.cmp('c5'); await H.land('c5'); await H.land('r3'); await H.answer(4, [act.sim(rTel13, 'A')]); },
+      async () => { await H.ab(); await H.run('r3', 'A', 'C-WATER-MAIN-DECATUR'); await H.ask(4); await H.cmp('c5'); await H.land('c5'); await H.answer(4, [act.sim(rTel13, 'A')]); await H.land('r3'); },
+    ]);
+
+    await single13('R13 an analyst comparison that takes the map clears an earlier answer\'s highlight',
+      async () => { await H.ab(); await H.ask(1); await H.answer(1, [act.hl('L1')]); await H.ask(3); await H.answer(3, [act.cmp()]); },
+      (f) => f.map === AB && f.hl === null);
+
+    await pair13('R13 a Compare is not kept off the map by a newer slot run that never took it (a later run failed)', [
+      async () => { await H.ab(); await H.cmp('c3'); await H.run('r4', 'A', 'E-ROADS-FIVEPOINTS'); await H.run('r5', 'active', 'F-TS-SOUTH'); await H.land('r5', true); await H.land('r4'); await H.land('c3'); },
+      async () => { await H.ab(); await H.cmp('c3'); await H.run('r4', 'A', 'E-ROADS-FIVEPOINTS'); await H.run('r5', 'active', 'F-TS-SOUTH'); await H.land('r5', true); await H.land('c3'); await H.land('r4'); },
+    ], (f) => f.map === AB && f.A === 'E-ROADS-FIVEPOINTS' && f.cmpSt === 'idle');
+
+    await pair13('R13 the answer\'s comparison is not held back by a slot run after asking that never took the map', [
+      async () => { await H.ab(); await H.ask(3); await H.run('r4', 'A', 'E-ROADS-FIVEPOINTS'); await H.run('r5', 'active', 'F-TS-SOUTH'); await H.land('r5', true); await H.land('r4'); await H.answer(3, [act.cmp()]); },
+      async () => { await H.ab(); await H.ask(3); await H.run('r4', 'A', 'E-ROADS-FIVEPOINTS'); await H.run('r5', 'active', 'F-TS-SOUTH'); await H.land('r5', true); await H.answer(3, [act.cmp()]); await H.land('r4'); },
+    ], (f) => f.map === AB && f.A === 'E-ROADS-FIVEPOINTS' && !f.analyst);
+
+    await pair13('R13 demo: a Compare is not kept off the map by Run as A when a later step\'s run was cancelled by Exit', [false, true].map((cmpFirst) => async () => {
+      await H.startDemo(); await H.demo(5, { dA: '/api/simulate' }); await H.land('dA'); await H.done(5); await H.demo(8, { dB: '/api/simulate' }); await H.land('dB'); await H.done(8);
+      await H.cmp('c4'); await H.run('r5', 'A', 'E-ROADS-FIVEPOINTS'); await H.demo(8, { dB2: '/api/simulate' }); await H.exitDemo();
+      if (cmpFirst) { await H.land('c4'); await H.land('r5'); } else { await H.land('r5'); await H.land('c4'); }
+      await H.land('dB2');
+    }), (f) => f.map === AB && f.A === 'E-ROADS-FIVEPOINTS' && f.sim !== 'running' && f.cmpSt === 'idle' && !f.demoBusy);
+
+    // the demo's Ask the AI step asks about scenario A only with A on screen (R5)
+    await single13('R13 demo Ask the AI is not asked over an answer that took the map while its run for A was in flight',
+      async () => { await H.startDemo(); await H.demo(7, { dA: '/api/simulate' }); await H.ask(3); await H.answer(3, [act.sim(rTel13, 'active')]); await H.land('dA'); await H.done(7); },
+      (f) => onlyA(f) && f.map === 'R:D-TELECOM-56MARIETTA' && !f.demoBusy);
+    await single13('R13 demo Ask the AI is not asked over a newer run you requested while its run for A was in flight',
+      async () => { await H.startDemo(); await H.demo(7, { dA: '/api/simulate' }); await H.run('r3', 'B', 'C-WATER-MAIN-DECATUR'); await H.land('dA'); await H.land('r3'); await H.done(7); },
+      (f) => onlyA(f) && f.map === 'R:C-WATER-MAIN-DECATUR' && !f.demoBusy);
+    await single13('R13 demo Ask the AI is not asked when its run for A fails',
+      async () => { await H.startDemo(); await H.demo(7, { dA: '/api/simulate' }); await H.land('dA', true); await H.done(7); },
+      (f) => onlyA(f) && !f.demoBusy && f.sim !== 'running');
+    await single13('R13 demo Ask the AI is not asked over a Compare you started while it waited for an answer',
+      async () => { await H.startDemo(); await H.demo(5, { dA: '/api/simulate' }); await H.land('dA'); await H.done(5); await H.demo(8, { dB: '/api/simulate' }); await H.land('dB'); await H.done(8);
+        await H.ask(5); await H.demo(7); await sleep(150); await H.cmp('c7'); await H.land('c7'); await H.answer(5, []); await H.done(7); },
+      (f) => onlyA(f) && f.map === AB && !f.demoBusy);
+
+    // An analyst answer supersedes a request made before asking (a Compare, a slot run, the inspector's
+    // trace): if it fails after the answer its failure is dropped, so one that failed before the answer
+    // is taken off the error toast (and compareStatus) too. A failure the answer does not supersede stays.
+    await pair13('R13 a Compare made before asking that fails is not reported once the answer\'s comparison superseded it', orders13(
+      async () => { await H.ab(); await H.cmp('c3'); await H.ask(4); },
+      [() => H.land('c3', 'engine 500'), () => H.answer(4, [act.cmp()])],
+    ), (f) => f.err === null && f.cmpSt === 'idle' && f.map === AB);
+    await pair13('R13 a slot run made before asking that fails is not reported once the answer wrote that slot', orders13(
+      async () => { await H.ab(); await H.run('r3', 'A', 'C-WATER-MAIN-DECATUR'); await H.run('r4', 'active', 'E-ROADS-FIVEPOINTS'); await H.land('r4'); await H.ask(5); },
+      [() => H.land('r3', 'engine 500'), () => H.answer(5, [act.sim(rTel13, 'A')])],
+    ), (f) => f.err === null && f.A === 'D-TELECOM-56MARIETTA' && f.sim === 'idle');
+    await pair13('R13 an inspector trace that fails is not reported once the answer\'s trace superseded it', orders13(
+      async () => { await H.ab(); await H.utrace('t3', 'PWR-TS-SOUTH'); await H.ask(4); },
+      [() => H.land('t3', 'trace 500'), () => H.answer(4, [act.trace()])],
+    ), (f) => f.err === null && f.trace);
+    await pair13('R13 taking a superseded failure off the toast keeps a failure the answer did not supersede (all 6 orders)', orders13(
+      async () => { await H.ab(); await H.run('r3', 'A', 'C-WATER-MAIN-DECATUR'); await H.run('r4', 'active', 'E-ROADS-FIVEPOINTS'); await H.land('r4'); await H.cmp('c5'); await H.ask(6); },
+      [() => H.land('r3', 'p3 down'), () => H.land('c5', 'cmp down'), () => H.answer(6, [act.cmp()])],
+    ), (f) => f.err === 'Scenario A failed: p3 down' && f.cmpSt === 'idle' && f.sim === 'idle');
+    // ...and so is a trace superseded by another selection or Hide trace (the analyst's or yours)
+    const traced13 = (ask) => async () => { await H.ab(); await H.utrace('t1', 'PWR-TS-SOUTH'); await H.land('t1'); if (ask) await H.ask(2); await H.follow('t3', 'PWR-DS-FIVEPOINTS'); };
+    await pair13('R13 a trace that fails is not reported once the answer selected another component', orders13(traced13(true),
+      [() => H.land('t3', 'trace 500'), async () => { await H.answer(2, [{ kind: 'select_node', node_id: 'PWR-SW-CEN1', node_ids: [], edge_ids: [] }]); await sleep(400); }],
+    ), (f) => f.err === null && f.sel === 'PWR-SW-CEN1');
+    await pair13('R13 a trace that fails is not reported once you selected another component', orders13(traced13(false),
+      [() => H.land('t3', 'trace 500'), async () => { await S(async () => { await window.__deeptraceStore.getState().selectNode('PWR-SW-CEN1', { fly: false }); }); await sleep(200); }],
+    ), (f) => f.err === null && f.sel === 'PWR-SW-CEN1' && f.traceOf === 'PWR-SW-CEN1');
+    await pair13('R13 a trace that fails is not reported once you hid the trace', orders13(traced13(false),
+      [() => H.land('t3', 'trace 500'), async () => { await S(() => window.__deeptraceStore.getState().hideTrace()); await sleep(60); }],
+    ), (f) => f.err === null && f.traceOf === null);
+    await pair13('R13 a trace that fails is not reported once you deselected the component', orders13(traced13(false),
+      [() => H.land('t3', 'trace 500'), async () => { await S(() => window.__deeptraceStore.getState().selectNode(null)); await sleep(60); }],
+    ), (f) => f.err === null && f.sel === null && f.traceOf === null);
+    // The demo's Compare step waits for a run you requested for an empty slot instead of running the
+    // demo's preset over it, so it compares the same scenarios whichever lands first
+    // (it waits for everything requested before it that can still write a slot, so its own runs start
+    // only after yours have landed)
+    await single13('R13 demo Compare step waits for your Run as B still in flight and compares it',
+      async () => { await H.startDemo(); await H.run('r2', 'B', 'C-WATER-MAIN-DECATUR'); await H.demo(9); await sleep(300); await H.land('r2'); await H.done(9); },
+      (f) => f.map === 'D:A-DS-FIVEPOINTS/C-WATER-MAIN-DECATUR' && f.B === 'C-WATER-MAIN-DECATUR' && f.err === null && !f.demoBusy);
+    await pair13('R13 demo Compare step waits for a newer Run as B that replaced its own run for B (either landing order)', [false, true].map((stepFirst) => async () => {
+      await H.startDemo(); await H.demo(9, { dA: '/api/simulate' }); const dB = (ops.dB = gate('/api/simulate')); await H.land('dA'); await within(dB.hit, 5000, 'demo run for B');
+      await H.run('r3', 'active', 'F-TS-SOUTH'); await H.land('r3'); await H.run('r4', 'B', 'C-WATER-MAIN-DECATUR');
+      if (stepFirst) { await H.land('dB'); await H.land('r4'); } else { await H.land('r4'); await H.land('dB'); }
+      await H.done(9);
+    }), (f) => f.map === 'D:A-DS-FIVEPOINTS/C-WATER-MAIN-DECATUR' && f.err === null && f.cmpSt === 'idle' && !f.demoBusy);
+    // A Compare that failed before Start demo (or Restore world) is not settled by a later answer. Each half
+    // guards its own line: failing before Start demo, its failure is forgotten by Restore world (which
+    // resets compareStatus and the Compare it names); failing after it, it is dropped as stale. (The "Run
+    // two scenarios" check does not reset that bookkeeping itself, so it masks neither regression.)
+    await pair13('R13 a Compare that failed before Start demo does not let a later answer settle the demo\'s Compare error', [false, true].map((beforeDemo) => async () => {
+      await H.ab(); await H.cmp('c1'); if (beforeDemo) await H.land('c1', 'engine 500');
+      await H.startDemo(); if (!beforeDemo) await H.land('c1', 'engine 500');
+      await S(async () => { const s = window.__deeptraceStore.getState(); await s.runSimulation(s.presets.find((x) => x.id === 'E-ROADS-FIVEPOINTS').scenario, 'A'); });
+      await H.demo(9, { dB: '/api/simulate' }); await H.land('dB', 'engine 500'); await H.done(9);
+      await H.ask(5); await H.answer(5, [act.cmp()]);
+    }), (f) => f.cmpSt === 'error' && f.err === 'Run two scenarios (A and B) before comparing.');
+    // The demo's Compare step compares the same scenarios whichever lands first: a run you started for a
+    // slot it already holds, or an answer's write to the slot its own run was filling
+    await single13('R13 demo Compare step waits for your Run as A into a filled slot and compares it',
+      async () => { await H.startDemo(); await H.demo(5, { dA: '/api/simulate' }); await H.land('dA'); await H.done(5);
+        await H.run('r3', 'A', 'C-WATER-MAIN-DECATUR'); await H.demo(9); await sleep(300); await H.land('r3'); await H.done(9); },
+      (f) => f.map === 'D:C-WATER-MAIN-DECATUR/B-EDGEWOOD-DUCTBANK' && f.A === 'C-WATER-MAIN-DECATUR' && f.err === null && !f.demoBusy);
+    await single13('R13 demo Compare step waits for a streaming answer that writes slot B and compares it',
+      async () => { await H.startDemo(); await H.demo(5, { dA: '/api/simulate' }); await H.land('dA'); await H.done(5);
+        await H.ask(6); await H.demo(9); await sleep(300); await H.answer(6, [act.sim(rTel13, 'B')]); await H.done(9); },
+      (f) => f.map === 'D:A-DS-FIVEPOINTS/D-TELECOM-56MARIETTA' && f.B === 'D-TELECOM-56MARIETTA' && f.cmpSt === 'idle' && f.err === null && !f.demoBusy);
+    // ...and its Ask the AI step decides whether to ask the same way whether its run for A lands before
+    // or after an earlier answer ends
+    await pair13('R13 demo Ask the AI decides the same way when its run for A lands before or after an earlier answer ends', [false, true].map((runFirst) => async () => {
+      await H.startDemo(); await H.ask(2); await H.demo(7, { dA: '/api/simulate' }); await H.run('r4', 'active', 'E-ROADS-FIVEPOINTS');
+      if (runFirst) { await H.land('dA'); await H.answer(2, []); } else { await H.answer(2, []); await H.land('dA'); }
+      await H.land('r4'); await H.done(7);
+    }), (f) => f.map === 'R:E-ROADS-FIVEPOINTS' && !f.demoBusy);
+    // ...and its Trace step keeps the trace on screen whether an earlier Compare lands before or after it
+    await pair13('R13 demo Trace step keeps its trace when an earlier Compare lands before or after its node details', [false, true].map((cmpFirst) => async () => {
+      await H.startDemo(); await H.ran('A', 'E-ROADS-FIVEPOINTS'); await H.ran('B', 'C-WATER-MAIN-DECATUR'); await H.cmp('c4'); await H.demo(4, { n5: '/api/nodes/' });
+      if (cmpFirst) { await H.land('c4'); await H.land('n5'); } else { await H.land('n5'); await H.land('c4'); }
+      await H.done(4);
+    }), (f) => f.trace && f.traceOf === 'PWR-DS-FIVEPOINTS' && !f.demoBusy);
+    await pair13('R13 demo Trace step keeps its trace when an earlier answer\'s comparison lands before or after its node details', [false, true].map((answerFirst) => async () => {
+      await H.startDemo(); await H.ran('A', 'A-DS-FIVEPOINTS'); await H.ran('B', 'B-EDGEWOOD-DUCTBANK'); await H.ask(4); await H.demo(4, { n5: '/api/nodes/' });
+      if (answerFirst) { await H.answer(4, [act.cmp()]); await H.land('n5'); } else { await H.land('n5'); await H.answer(4, [act.cmp()]); }
+      await H.done(4);
+    }), (f) => f.trace && f.traceOf === 'PWR-DS-FIVEPOINTS' && !f.demoBusy);
+    // An answer's highlight is kept on a slot holding the scenario it compared, whichever object of that
+    // scenario the slot holds (an older run of it landing before or after the answer's comparison)
+    await pair13('R13 an answer\'s highlight follows its compared scenario to a slot whichever run of it the slot holds', [false, true].map((runFirst) => async () => {
+      await H.ran('B', 'C-WATER-MAIN-DECATUR'); await H.run('r2', 'A', 'A-DS-FIVEPOINTS'); await H.ask(3);
+      const answer = () => H.answer(3, [act.sim(rTel13, 'active'), act.cmp(cmpAC), act.hl('L6')]);
+      if (runFirst) { await H.land('r2'); await answer(); } else { await answer(); await H.land('r2'); }
+      await S(() => window.__deeptraceStore.getState().showSlot('A')); await sleep(60);
+    }), (f) => f.hl === 'L6' && f.map === 'R:A-DS-FIVEPOINTS' && f.A === 'A-DS-FIVEPOINTS');
+    // The demo's Ask the AI step decides only once your run or Compare started after it has settled
+    // (one that lands holds the map: no question; one that fails never counts)
+    await pair13('R13 demo Ask the AI asks when your newer run fails, before or after its run for A lands', [false, true].map((stepFirst) => async () => {
+      await H.startDemo(); await H.demo(7, { dA: '/api/simulate' }); await H.run('r2', 'active', 'E-ROADS-FIVEPOINTS');
+      if (stepFirst) { await H.land('dA'); await H.land('r2', 'engine 500'); } else { await H.land('r2', 'engine 500'); await H.land('dA'); }
+      await H.done(7);
+    }), (f) => f.demoAsked.length === 1 && f.demoAsked[0] === 'A-DS-FIVEPOINTS' && !f.demoBusy);
+    await pair13('R13 demo Ask the AI does not ask over your newer run, whether it lands before or after an earlier answer ends', [false, true].map((runFirst) => async () => {
+      await H.startDemo(); await H.demo(5, { dA: '/api/simulate' }); await H.land('dA'); await H.done(5);
+      await H.ask(4); await H.demo(7); await H.run('r5', 'active', 'E-ROADS-FIVEPOINTS');
+      if (runFirst) { await H.land('r5'); await H.answer(4, []); } else { await H.answer(4, []); await H.land('r5'); }
+      await H.done(7);
+    }), (f) => f.demoAsked.length === 0 && f.map === 'R:E-ROADS-FIVEPOINTS' && !f.demoBusy);
+    await pair13('R13 demo Ask the AI does not ask over your Compare, whether it lands before or after an earlier answer ends', [false, true].map((cmpFirst) => async () => {
+      await H.startDemo(); await H.demo(5, { dA: '/api/simulate' }); await H.land('dA'); await H.done(5); await H.demo(8, { dB: '/api/simulate' }); await H.land('dB'); await H.done(8);
+      await H.ask(4); await H.demo(7); await H.cmp('c5');
+      if (cmpFirst) { await H.land('c5'); await H.answer(4, []); } else { await H.answer(4, []); await H.land('c5'); }
+      await H.done(7);
+    }), (f) => f.demoAsked.length === 0 && f.map === AB && !f.demoBusy);
+    // A clicked component's trace follows the click only if no trace action came after the click,
+    // whether its details land before or after that action
+    const edge13 = await S(() => [...window.__deeptraceStore.getState().index.edges.keys()][0]);
+    const clickThenTrace13 = async () => { await H.utrace('t1', 'PWR-TS-SOUTH'); await H.land('t1'); await H.click('n5', 'PWR-DS-FIVEPOINTS'); await H.trace('t5', 'PWR-DS-FIVEPOINTS'); H.maybe('t6', '/api/trace'); };
+    await pair13('R13 a trace you request while the clicked component\'s details load is kept (then a connection is clicked)', [false, true].map((detailsFirst) => async () => {
+      await clickThenTrace13();
+      if (detailsFirst) { await H.land('n5'); await H.land('t5'); } else { await H.land('t5'); await H.land('n5'); }
+      await S((e) => window.__deeptraceStore.getState().selectEdge(e), edge13); await H.landIfMade('t6'); await sleep(60);
+    }), (f) => f.traceOf === 'PWR-DS-FIVEPOINTS');
+    await pair13('R13 a trace you request while the clicked component\'s details load is not replaced by a failing re-trace', [false, true].map((detailsFirst) => async () => {
+      await clickThenTrace13();
+      if (detailsFirst) { await H.land('n5'); await H.land('t5'); } else { await H.land('t5'); await H.land('n5'); }
+      await H.landIfMade('t6', 'trace 500');
+    }), (f) => f.traceOf === 'PWR-DS-FIVEPOINTS' && f.err === null);
+    await pair13('R13 an answer\'s trace is kept whether a component clicked before asking gets its details before or after', [false, true].map((detailsFirst) => async () => {
+      await H.click('n1', 'PWR-TS-SOUTH'); await H.ask(2);
+      if (detailsFirst) { await H.land('n1'); await H.answer(2, [act.trace()]); } else { await H.answer(2, [act.trace()]); await H.land('n1'); }
+      await sleep(400);
+    }), (f) => f.traceOf === 'PWR-DS-FIVEPOINTS');
+    // The demo's Compare step also waits for your newest run while it can still take the map (its own
+    // preset runs would be newer and keep it off), so your run takes the map, and its failure shows,
+    // whichever lands first
+    const yoursThenCompareStep13 = async () => { await H.startDemo(); await H.run('r2', 'B', 'C-WATER-MAIN-DECATUR'); await H.run('r3', 'active', 'E-ROADS-FIVEPOINTS'); await H.demo(9); H.maybe('dA', '/api/simulate'); };
+    await pair13('R13 demo Compare step: your newest run takes the map whether it lands before or after your Run as B (the step\'s run for A then fails)', [false, true].map((bFirst) => async () => {
+      await yoursThenCompareStep13();
+      if (bFirst) { await H.land('r2'); await H.land('r3'); } else { await H.land('r3'); await H.land('r2'); }
+      await within(ops.dA.hit, 5000, 'the step\'s run for A'); await H.land('dA', 'engine 500'); await H.done(9);
+    }), (f) => f.map === 'R:E-ROADS-FIVEPOINTS' && f.A === null && f.B === 'C-WATER-MAIN-DECATUR' && f.cmp === null && f.cmpSt === 'error' && f.err === 'Run two scenarios (A and B) before comparing.' && !f.demoBusy);
+    await pair13('R13 demo Compare step: your newest run takes the map whether it lands before or after your Run as B (then Exit demo)', [false, true].map((bFirst) => async () => {
+      await yoursThenCompareStep13();
+      if (bFirst) { await H.land('r2'); await H.land('r3'); } else { await H.land('r3'); await H.land('r2'); }
+      await within(ops.dA.hit, 5000, 'the step\'s run for A'); await H.exitDemo(); await H.land('dA');
+    }), (f) => f.map === 'R:E-ROADS-FIVEPOINTS' && f.A === null && f.B === 'C-WATER-MAIN-DECATUR' && f.sim === 'idle' && f.err === null && !f.demoBusy);
+    await pair13('R13 demo Compare step: your newest run\'s failure shows whether it fails before or after your Run as B lands', [false, true].map((bFirst) => async () => {
+      await H.startDemo(); await H.ran('A', 'C-WATER-MAIN-DECATUR'); await H.run('r4', 'B', 'E-ROADS-FIVEPOINTS'); await H.run('r5', 'active', 'F-TS-SOUTH'); await H.demo(9);
+      if (bFirst) { await H.land('r4'); await H.land('r5', 'engine 500'); } else { await H.land('r5', 'engine 500'); await H.land('r4'); }
+      await H.done(9);
+    }), (f) => f.map === 'D:C-WATER-MAIN-DECATUR/E-ROADS-FIVEPOINTS' && f.sim === 'error' && f.cmpSt === 'idle' && f.err === 'engine 500' && !f.demoBusy);
+    // ...and its Trace step traces its focus only if no trace or selection came after the click
+    await pair13('R13 demo Trace step keeps your trace of another component, requested while the focus details load', [false, true].map((detailsFirst) => async () => {
+      await H.startDemo(); await H.demo(4, { n5: '/api/nodes/' }); await H.utrace('t3', 'PWR-TS-SOUTH');
+      if (detailsFirst) { await H.land('n5'); await H.land('t3'); } else { await H.land('t3'); await H.land('n5'); }
+      await H.done(4); await sleep(300);
+    }), (f) => f.traceOf === 'PWR-TS-SOUTH' && f.sel === 'PWR-TS-SOUTH' && f.err === null && !f.demoBusy);
+    await pair13('R13 demo Trace step keeps an earlier answer\'s trace that lands while the focus details load', [false, true].map((detailsFirst) => async () => {
+      await H.startDemo(); await H.ask(2); await H.demo(4, { n5: '/api/nodes/' });
+      if (detailsFirst) { await H.land('n5'); await H.answer(2, [act.trace(traceTS13)]); } else { await H.answer(2, [act.trace(traceTS13)]); await H.land('n5'); }
+      await H.done(4); await sleep(300);
+    }), (f) => f.traceOf === 'PWR-TS-SOUTH' && f.sel === 'PWR-DS-FIVEPOINTS' && f.err === null && !f.analyst && !f.demoBusy);
+    // ...and a demo step's request made after waiting settles only the failures it supersedes
+    await pair13('R13 demo Compare step waiting for an answer keeps your trace\'s failure whether it fails before or after the answer ends', [false, true].map((answerFirst) => async () => {
+      await H.startDemo(); await H.ran('A', 'C-WATER-MAIN-DECATUR'); await H.ran('B', 'E-ROADS-FIVEPOINTS'); await H.ask(6); await H.utrace('t7', 'PWR-TS-SOUTH'); await H.demo(9);
+      if (answerFirst) { await H.answer(6, []); await H.land('t7', 'engine 500'); } else { await H.land('t7', 'engine 500'); await H.answer(6, []); }
+      await H.done(9);
+    }), (f) => f.map === 'D:C-WATER-MAIN-DECATUR/E-ROADS-FIVEPOINTS' && f.cmpSt === 'idle' && f.err === 'Trace failed: engine 500' && !f.analyst && !f.demoBusy);
+    // With several failed requests the toast reports the newest request's failure, whichever lands last.
+    // An inspector trace sits on the request timeline after the requests made before it.
+    await pair13('R13 Run as A and a newer Run both fail: the toast reports the newer Run in either landing order', orders13(
+      async () => { await H.run('r1', 'A', 'C-WATER-MAIN-DECATUR'); await H.run('r2', 'active', 'E-ROADS-FIVEPOINTS'); },
+      [() => H.land('r1', 'timeout'), () => H.land('r2', 'bad scenario')],
+    ), (f) => f.err === 'bad scenario' && f.sim === 'error');
+    await pair13('R13 Run as A and a newer Compare both fail: the toast reports the Compare in either landing order', orders13(
+      async () => { await H.ab(); await H.run('r3', 'A', 'C-WATER-MAIN-DECATUR'); await H.cmp('c4'); },
+      [() => H.land('r3', 'timeout'), () => H.land('c4', 'bad scenario')],
+    ), (f) => f.err === 'bad scenario' && f.sim === 'error' && f.cmpSt === 'error');
+    await pair13('R13 a Run and a newer inspector trace both fail: the toast reports the trace in either landing order', orders13(
+      async () => { await H.run('r1', 'active', 'A-DS-FIVEPOINTS'); await H.utrace('t2', 'PWR-TS-SOUTH'); },
+      [() => H.land('r1', 'engine 500'), () => H.land('t2', 'trace 500')],
+    ), (f) => f.err === 'Trace failed: trace 500' && f.sim === 'error');
+    await pair13('R13 an inspector trace and a newer Run both fail: the toast reports the Run in either landing order', orders13(
+      async () => { await H.utrace('t1', 'PWR-TS-SOUTH'); await H.run('r2', 'active', 'B-EDGEWOOD-DUCTBANK'); },
+      [() => H.land('t1', 'trace 500'), () => H.land('r2', 'engine 500')],
+    ), (f) => f.err === 'engine 500' && f.sim === 'error');
+
+    // The demo's Ask the AI step also waits for a run or Compare of yours requested BEFORE it, and takes
+    // the map back from it like from an earlier answer, whether it lands before or after that answer ends
+    await pair13('R13 demo Ask the AI takes the map back from your run requested before it, whether it lands before or after an earlier answer ends', [false, true].map((runFirst) => async () => {
+      await H.startDemo(); await H.demo(5, { dA: '/api/simulate' }); await H.land('dA'); await H.done(5);
+      await H.run('r2', 'active', 'C-WATER-MAIN-DECATUR'); await H.ask(3); await H.demo(7);
+      if (runFirst) { await H.land('r2'); await H.answer(3, []); } else { await H.answer(3, []); await H.land('r2'); }
+      await H.done(7);
+    }), (f) => f.demoAsked.length === 1 && f.demoAsked[0] === 'A-DS-FIVEPOINTS' && f.map === 'R:A-DS-FIVEPOINTS' && f.A === 'A-DS-FIVEPOINTS' && !f.analyst && !f.demoBusy);
+    await pair13('R13 demo Ask the AI takes the map back from your Compare requested before it, whether it lands before or after an earlier answer ends', [false, true].map((cmpFirst) => async () => {
+      await H.startDemo(); await H.demo(5, { dA: '/api/simulate' }); await H.land('dA'); await H.done(5); await H.demo(8, { dB: '/api/simulate' }); await H.land('dB'); await H.done(8);
+      await H.cmp('c3'); await H.ask(4); await H.demo(7);
+      if (cmpFirst) { await H.land('c3'); await H.answer(4, []); } else { await H.answer(4, []); await H.land('c3'); }
+      await H.done(7);
+    }), (f) => f.demoAsked.length === 1 && f.demoAsked[0] === 'A-DS-FIVEPOINTS' && f.map === 'R:A-DS-FIVEPOINTS' && f.cmp === 'A-DS-FIVEPOINTS/B-EDGEWOOD-DUCTBANK' && !f.analyst && !f.demoBusy);
+    // An answer's highlight that comes before its own result is held, not dropped, while a run requested
+    // before asking shows a result the answer does not describe: it comes back with the answer's result
+    await pair13('R13 an answer\'s highlight before its own show_simulation stays whether your earlier Run as B lands before it, between or after', [0, 1, 2].map((when) => async () => {
+      await H.run('r1', 'B', 'C-WATER-MAIN-DECATUR'); await H.askLive(2);
+      if (when === 0) await H.land('r1');
+      await H.send(2, [act.hl('H2')]);
+      if (when === 1) await H.land('r1');
+      await H.send(2, [act.sim(rTel13, 'A')]); await H.end(2);
+      if (when === 2) await H.land('r1');
+    }), (f) => f.hl === 'H2' && f.map === 'R:D-TELECOM-56MARIETTA' && f.A === 'D-TELECOM-56MARIETTA' && f.B === 'C-WATER-MAIN-DECATUR' && f.sim === 'idle');
+    await pair13('R13 an answer\'s highlight after its own comparison stays whether your earlier Run as A lands before or after the answer', [false, true].map((runFirst) => async () => {
+      await H.run('r1', 'A', 'E-ROADS-FIVEPOINTS'); await H.ask(2);
+      if (runFirst) await H.land('r1');
+      await H.answer(2, [act.cmp(), act.hl('H4')]);
+      if (!runFirst) await H.land('r1');
+    }), (f) => f.hl === 'hidden:H4' && f.map === AB && f.A === 'E-ROADS-FIVEPOINTS');
+    // A Run as A requested before asking that only fills slot A as data (your newer Run failed) does not hold the
+    // answer back: its comparison moves the map to the scenario it compared (your highlight goes) whether that
+    // run lands before or after it, and the result under the diff is the same
+    await pair13('R13 an older Run as A that only fills slot A does not change what the answer\'s comparison shows, landing before or after it', [false, true].map((runFirst) => async () => {
+      await H.ran('A', 'C-WATER-MAIN-DECATUR'); await H.run('r2', 'A', 'D-TELECOM-56MARIETTA'); await H.run('r3', 'active', 'F-TS-SOUTH'); await H.land('r3', true);
+      await S(() => { const s = window.__deeptraceStore.getState(); s.setHighlight({ node_ids: s.result.impact_metrics.critical_facilities_affected, edge_ids: [], label: 'U4', tone: 'critical', source: 'user' }); });
+      await H.ask(5);
+      if (runFirst) { await H.land('r2'); await H.answer(5, [act.cmp()]); } else { await H.answer(5, [act.cmp()]); await H.land('r2'); }
+    }), (f) => f.map === AB && f.hl === null && f.A === 'D-TELECOM-56MARIETTA' && f.under === 'A-DS-FIVEPOINTS' && !f.analyst,
+    () => S(() => ({ under: window.__deeptraceStore.getState().result?.scenario_id ?? null })));
+    // The demo's Trace step takes only its selection's own follow-trace for its trace: your trace of the
+    // component (or an answer's) that lands before its details stays, as it does landing after them
+    await pair13('R13 demo Trace step keeps your trace of its component, requested while its details load (no failing re-trace)', [false, true].map((detailsFirst) => async () => {
+      await H.startDemo(); await H.demo(4, { n5: '/api/nodes/' }); await H.trace('t3', 'PWR-DS-FIVEPOINTS'); H.maybe('t6', '/api/trace');
+      if (detailsFirst) { await H.land('n5'); await H.land('t3'); } else { await H.land('t3'); await H.land('n5'); }
+      await sleep(400); await H.landIfMade('t6', 'trace 500'); await H.done(4);
+    }), (f) => f.traceOf === 'PWR-DS-FIVEPOINTS' && f.sel === 'PWR-DS-FIVEPOINTS' && f.err === null && !f.demoBusy);
+    await pair13('R13 demo Trace step keeps an earlier answer\'s trace of its component that lands while its details load (no failing re-trace)', [false, true].map((detailsFirst) => async () => {
+      await H.startDemo(); await H.ask(2); await H.demo(4, { n5: '/api/nodes/' }); H.maybe('t6', '/api/trace');
+      if (detailsFirst) { await H.land('n5'); await sleep(300); await H.answer(2, [act.trace()]); } else { await H.answer(2, [act.trace()]); await H.land('n5'); }
+      await sleep(400); await H.landIfMade('t6', 'trace 500'); await H.done(4);
+    }), (f) => f.traceOf === 'PWR-DS-FIVEPOINTS' && f.sel === 'PWR-DS-FIVEPOINTS' && f.err === null && !f.analyst && !f.demoBusy);
+    // Clicking the same component twice: only the newer click's details count, whichever lands last
+    await pair13('R13 clicking a component twice: the newer click\'s details count whichever lands last (the newer request fails)', [false, true].map((newerFirst) => async () => {
+      await H.click('n1', 'PWR-SW-CEN1'); await H.click('n2', 'PWR-SW-CEN1');
+      if (newerFirst) { await H.land('n2', 'engine 500'); await H.land('n1'); } else { await H.land('n1'); await H.land('n2', 'engine 500'); }
+    }), (f) => f.details === null && !f.detailsLoading && f.sel === 'PWR-SW-CEN1' && f.err === null, details13);
+    await pair13('R13 clicking a component twice: the newer click\'s details count whichever lands last (the older request fails)', [false, true].map((newerFirst) => async () => {
+      await H.click('n1', 'PWR-SW-CEN1'); await H.click('n2', 'PWR-SW-CEN1');
+      if (newerFirst) { await H.land('n2'); await H.land('n1', 'engine 500'); } else { await H.land('n1', 'engine 500'); await H.land('n2'); }
+    }), (f) => f.details === 'PWR-SW-CEN1' && !f.detailsLoading && f.sel === 'PWR-SW-CEN1' && f.err === null, details13);
+    // A Compare that lands takes the map before its update reaches the demo steps' waits: the Compare step
+    // compares at once (your older run can no longer take the map), so your newest run keeps the map
+    // whether the older run lands before or after you start it
+    await pair13('R13 demo Compare step compares once your Compare lands: your newest run keeps the map whether your older run lands before or after it', [false, true].map((olderFirst) => async () => {
+      await H.startDemo(); await H.demo(5, { dA: '/api/simulate' }); await H.land('dA'); await H.done(5); await H.demo(8, { dB: '/api/simulate' }); await H.land('dB'); await H.done(8);
+      await S(() => window.__deeptraceStore.getState().setPlaying(false)); // (a playing cascade updates the store as it steps)
+      await H.run('r3', 'active', 'F-TS-SOUTH'); await H.cmp('c4'); await H.demo(9); H.maybe('c6', '/api/compare');
+      await H.land('c4');
+      if (olderFirst) { await H.land('r3'); await H.run('r5', 'active', 'E-ROADS-FIVEPOINTS'); } else { await H.run('r5', 'active', 'E-ROADS-FIVEPOINTS'); await H.land('r3'); }
+      await H.land('r5'); await within(ops.c6.hit, 5000, 'the step\'s Compare'); await H.land('c6'); await H.done(9);
+    }), (f) => f.map === 'R:E-ROADS-FIVEPOINTS' && f.cmp === 'A-DS-FIVEPOINTS/B-EDGEWOOD-DUCTBANK' && f.sim === 'idle' && f.cmpSt === 'idle' && f.err === null && !f.demoBusy);
+    // A trace is superseded once the selection moves off its component (also with no trace on screen, so no
+    // follow-trace): its failure is not reported, whether it lands before or after
+    const edgeF1 = await S(() => [...window.__deeptraceStore.getState().index.edges.keys()][0]);
+    await pair13('R13 a trace that fails is not reported once you selected another component (no trace was on screen)', orders13(
+      async () => { await H.utrace('t1', 'PWR-TS-SOUTH'); },
+      [() => H.land('t1', 'trace 500'), async () => { await S(async () => { await window.__deeptraceStore.getState().selectNode('PWR-SW-CEN1', { fly: false }); }); await sleep(200); }],
+    ), (f) => f.err === null && f.sel === 'PWR-SW-CEN1' && f.traceOf === null);
+    await pair13('R13 a trace that fails is not reported once you clicked a connection (no trace was on screen)', orders13(
+      async () => { await H.utrace('t1', 'PWR-TS-SOUTH'); },
+      [() => H.land('t1', 'trace 500'), async () => { await S((e) => window.__deeptraceStore.getState().selectEdge(e), edgeF1); await sleep(60); }],
+    ), (f) => f.err === null && f.sel === null && f.traceOf === null);
+    // Exit demo stops what the demo steps started: the Ask the AI step's answer and the Trace step's trace
+    await single13('R13 Exit demo stops the Ask the AI step\'s answer in flight', async () => {
+      await H.startDemo(); await H.demo(5, { dA: '/api/simulate' }); await H.land('dA'); await H.done(5);
+      const dq = (ops.dq = gate('/api/analyst/chat')); await H.demo(7); await within(dq.hit, 5000, 'the step\'s question');
+      await H.exitDemo();
+      dq.reply = sse([{ type: 'status', mode: 'llm', model: 'scripted' }, { type: 'ui_action', action: act.sim(rTel13, 'A') }, { type: 'ui_action', action: act.hl('After exit') }, { type: 'message', text: 'late' }, { type: 'done', mode: 'llm' }]);
+      dq.release(); await H.done(7); await sleep(300);
+    }, (f) => f.map === 'R:A-DS-FIVEPOINTS' && f.A === 'A-DS-FIVEPOINTS' && f.hl === null && !f.analyst && f.answerErr === 'Stopped: you exited the demo.' && !f.demoBusy, answer13);
+    await single13('R13 Exit demo drops the Trace step\'s trace in flight', async () => {
+      await H.startDemo(); await H.demo(3); await H.done(3);
+      await H.demo(4, { t5: '/api/trace' }); await H.exitDemo(); await H.land('t5'); await sleep(200);
+    }, (f) => f.traceOf === null && f.sel === 'PWR-DS-FIVEPOINTS' && f.err === null && !f.demoBusy);
+    // Mid-session failover with requests in flight (each play starts live: the recovery poll brings the app
+    // back from the snapshot within 15 s). After the engine dies mid-answer, the recorded answer is the
+    // answer to the question as it was asked: about the result on screen then, whichever failure lands first.
+    const DQ13 = 'Why did this happen, and what could we do differently?';
+    await pair13('R13 the engine dies mid-answer: the recorded answer follows what was on screen when asking, whichever failure lands first', [false, true].map((runFirst) => async () => {
+      await H.live(); await H.ran('active', 'C-WATER-MAIN-DECATUR'); await H.run('r1', 'active', 'A-DS-FIVEPOINTS'); await H.ask(2, DQ13);
+      blockEngine = true; // the engine dies: /api/health is refused too
+      if (runFirst) { await H.land('r1', 'refused'); await H.land('q2', 'refused'); } else { await H.land('q2', 'refused'); await H.land('r1', 'refused'); }
+      await sleep(600);
+    }), (f) => f.mode === 'snapshot' && f.map === 'R:A-DS-FIVEPOINTS' && !f.answer && f.answerErr.startsWith('The engine stopped responding') && f.tools === '' && f.hl === null && !f.analyst, answer13);
+    // ...and Stop while the failover's health check runs keeps what the answer had shown
+    await single13('R13 Stop while the failover health check runs keeps the answer\'s text and tool rows', async () => {
+      await H.live(); await H.ran('active', 'A-DS-FIVEPOINTS'); await H.askLive(2, DQ13);
+      const health = (ops.h = gate('/api/health'));
+      await H.send(2, [{ type: 'tool_call', id: 't1', name: 'run_failure_simulation', input: {} }, { type: 'tool_result', id: 't1', name: 'run_failure_simulation', ok: true, summary: 'Simulated the outage' },
+        { type: 'message', text: 'Partial answer' }, { type: 'tool_call', id: 't2', name: 'evaluate_mitigation', input: {} }]);
+      H.drop(2); // the connection drops mid-answer: the store checks /api/health before failing over
+      await within(health.hit, 5000, 'the failover health check');
+      await S(() => window.__deeptraceStore.getState().stopAnalyst());
+      health.fail = 'refused'; health.release(); // the engine is down
+      await S(() => Promise.resolve(window.__ops.q2).catch(() => {})); await sleep(300);
+    }, (f) => f.mode === 'snapshot' && f.answer === 'Partial answer' && f.tools === 'ok,error' && f.answerErr === 'Stopped.' && !f.analyst, answer13);
+    // ...and a run you start after asking keeps its slot against the answer's comparison when it is answered
+    // from the snapshot, also when it reruns the scenario that slot held (each snapshot answer is a new result)
+    await single13('R13 Run as A after asking, answered from the snapshot, keeps slot A against the answer\'s comparison', async () => {
+      await H.live(); blockEngine = true; // the engine is down: Run as A and Run as B come from the snapshot
+      await H.ran('A', 'C-WATER-MAIN-DECATUR'); await H.ran('B', 'D-TELECOM-56MARIETTA');
+      await H.live(); await H.ask(3);
+      blockEngine = true; // the engine drops again (the answer's own connection stays open)
+      await H.ran('A', 'C-WATER-MAIN-DECATUR');
+      await H.answer(3, [act.cmp()]);
+    }, (f) => f.mode === 'snapshot' && f.A === 'C-WATER-MAIN-DECATUR' && f.map === 'R:C-WATER-MAIN-DECATUR' && f.B === 'B-EDGEWOOD-DUCTBANK' && f.cmp === 'A-DS-FIVEPOINTS/B-EDGEWOOD-DUCTBANK' && !f.analyst, answer13);
+    // An answer that ends while a tool call has no result yet (its connection drops while the tool runs, the
+    // engine dies, the backend reports an error) settles that tool row: no spinner is left once it is over.
+    // (Each check starts live: an earlier one may have failed over to the snapshot.)
+    const toolCut13 = [{ type: 'tool_call', id: 't1', name: 'get_criticality_ranking', input: {} }, { type: 'tool_result', id: 't1', name: 'get_criticality_ranking', ok: true, summary: 'Ranked' },
+      { type: 'tool_call', id: 't2', name: 'run_failure_simulation', input: {} }];
+    /** the last answer, and the spinners its tool rows draw in the analyst panel */
+    const toolRows13 = async () => ({ ...(await answer13()), ...(await S(() => { const panel = document.querySelector('#analyst-input')?.closest('aside');
+      return { analystShown: !!panel, spinners: panel ? panel.querySelectorAll('li svg.animate-spin').length : -1 }; })) });
+    const answerOver13 = async () => { await page.waitForFunction(() => !window.__deeptraceStore.getState().analystPending, null, { timeout: 30000 }); await sleep(300); };
+    await single13('R13 an answer whose connection drops while a tool runs settles its tool rows (the engine is still up)', async () => {
+      await H.live(); await H.askLive(2); await H.send(2, toolCut13);
+      H.drop(2); // /api/health still answers: the answer fails with the stream's error
+      await answerOver13();
+    }, (f) => f.mode === 'live' && !f.analyst && !!f.answerErr && f.tools === 'ok,error' && f.analystShown && f.spinners === 0, toolRows13);
+    await single13('R13 an answer that reports an error while a tool runs settles its tool rows', async () => {
+      await H.live(); await H.askLive(2); await H.send(2, [...toolCut13, { type: 'error', message: 'Analyst error: boom' }, { type: 'done', mode: 'llm' }]);
+      ops.s2.end();
+      await answerOver13();
+    }, (f) => !f.analyst && f.answerErr.startsWith('Analyst error') && f.tools === 'ok,error' && f.analystShown && f.spinners === 0, toolRows13);
+    // An answer's highlight made under its own A/B diff is about its comparison: when the diff is left for your
+    // run requested before asking, which took the map while the answer was coming, it is not drawn on that run
+    const diffOverRun13 = async () => { await H.live(); await H.ran('active', 'C-WATER-MAIN-DECATUR'); await H.run('r2', 'active', 'E-ROADS-FIVEPOINTS'); await H.ask(3); await H.land('r2'); };
+    await single13('R13 an answer\'s highlight under its own diff is not drawn on your earlier run when its trace leaves the diff', async () => {
+      await diffOverRun13(); await H.answer(3, [act.cmp(), act.hl('H8'), act.trace()]);
+    }, (f) => f.map === 'R:E-ROADS-FIVEPOINTS' && f.hl === null && f.trace && f.cmp === 'A-DS-FIVEPOINTS/B-EDGEWOOD-DUCTBANK' && !f.analyst);
+    await single13('R13 the highlight chip\'s show puts an answer\'s highlight under its own diff on a scenario it compared, not on your earlier run', async () => {
+      await diffOverRun13(); await H.answer(3, [act.cmp(), act.hl('H9')]);
+      await page.locator('button', { hasText: 'hidden in A/B diff' }).first().click(); await sleep(300);
+    }, (f) => f.map === 'R:A-DS-FIVEPOINTS' && f.hl === 'H9' && f.A === 'A-DS-FIVEPOINTS' && !f.analyst);
+    // ...nor is one the answer held off your earlier run (asked with B on screen, it highlights before that run
+    // lands or after) and its own comparison then brought back under the diff
+    const heldOverRun13 = async (runFirst) => {
+      await H.live(); await H.ab(); await H.run('r2', 'active', 'C-WATER-MAIN-DECATUR'); await H.askLive(3);
+      if (runFirst) await H.land('r2');
+      await H.send(3, [act.hl('H12')]);
+      if (!runFirst) await H.land('r2');
+      await H.send(3, [act.cmp()]);
+    };
+    await pair13('R13 an answer\'s highlight held off your earlier run is not drawn on it when the answer\'s trace leaves its own diff', [true, false].map((runFirst) => async () => {
+      await heldOverRun13(runFirst); await H.send(3, [act.trace()]); await H.end(3);
+    }), (f) => f.map === 'R:C-WATER-MAIN-DECATUR' && f.hl === null && f.trace && f.cmp === 'A-DS-FIVEPOINTS/B-EDGEWOOD-DUCTBANK' && !f.analyst);
+    await pair13('R13 the highlight chip\'s show puts an answer\'s highlight held off your earlier run on a scenario it compared, not on that run', [true, false].map((runFirst) => async () => {
+      await heldOverRun13(runFirst); await H.end(3);
+      await page.locator('button', { hasText: 'hidden in A/B diff' }).first().click(); await sleep(300);
+    }), (f) => f.map === 'R:A-DS-FIVEPOINTS' && f.hl === 'H12' && f.A === 'A-DS-FIVEPOINTS' && !f.analyst);
+    // ...also asked with A on screen and leaving the diff with Space (an explicit comparison of A and B)
+    await pair13('R13 Space leaving the answer\'s own diff does not draw its highlight, held off your earlier run, on that run', [true, false].map((runFirst) => async () => {
+      await H.live(); await H.ran('A', 'A-DS-FIVEPOINTS'); await H.run('r2', 'active', 'C-WATER-MAIN-DECATUR'); await H.askLive(3);
+      if (runFirst) await H.land('r2');
+      await H.send(3, [act.hl('H13')]);
+      if (!runFirst) await H.land('r2');
+      await H.send(3, [act.cmp()]); await H.end(3);
+      await S(() => { window.__deeptraceStore.getState().setPlaying(false); document.activeElement?.blur?.(); }); await sleep(200);
+      await page.keyboard.press('Space'); await sleep(400);
+    }), (f) => f.map === 'R:C-WATER-MAIN-DECATUR' && f.hl === null && f.cmp === 'A-DS-FIVEPOINTS/B-EDGEWOOD-DUCTBANK' && !f.analyst);
+    // The highlight chip offers "show" only when leaving the diff keeps the highlight: with both slots holding
+    // your runs requested before asking (the answer compared other scenarios), it reads "hidden in A/B diff",
+    // and Enter on it changes nothing and keeps keyboard focus (it used to drop the highlight, chip and focus)
+    await single13('R13 the highlight chip does not offer show when no slot holds a result the answer describes, and keeps keyboard focus', async () => {
+      await H.live(); await H.run('r1', 'A', 'C-WATER-MAIN-DECATUR'); await H.run('r2', 'B', 'D-TELECOM-56MARIETTA'); await H.ask(3);
+      await H.land('r1'); await H.land('r2'); await H.answer(3, [act.cmp(), act.hl('H11')]);
+      const btn = page.locator('button', { hasText: 'hidden in A/B diff' }).first();
+      await btn.waitFor({ timeout: 30000 });
+      await page.keyboard.press('Shift'); await btn.focus(); await page.keyboard.press('Enter'); await sleep(1000);
+      await page.keyboard.press('Enter'); await sleep(600);
+    }, (f) => f.map === AB && f.hl === 'hidden:H11' && f.A === 'C-WATER-MAIN-DECATUR' && f.B === 'D-TELECOM-56MARIETTA' && f.chip === 'hidden in A/B diff' && f.focus === 'hidden in A/B diff' && !f.analyst,
+    () => S(() => { const a = document.activeElement; const b = [...document.querySelectorAll('button')].find((x) => x.textContent.includes('hidden in A/B diff'));
+      return { chip: b ? b.textContent.trim() : null, focus: !a || a === document.body ? 'BODY' : a.textContent.trim() }; }));
+    // The demo's Trace step does not trace once the selection moved after its click, also when it came back
+    // to its component, whichever node details land first
+    await pair13('R13 demo Trace step does not trace once you clicked a connection and its component again, whichever details land first', [false, true].map((stepFirst) => async () => {
+      await H.live(); await H.startDemo(); await H.demo(4, { n5: '/api/nodes/' });
+      await S((e) => window.__deeptraceStore.getState().selectEdge(e), edge13); await sleep(60);
+      if (stepFirst) { await H.land('n5'); await H.click('n6', 'PWR-DS-FIVEPOINTS'); await H.land('n6'); } else { await H.click('n6', 'PWR-DS-FIVEPOINTS'); await H.land('n6'); await H.land('n5'); }
+      await H.done(4); await sleep(400);
+    }), (f) => f.traceOf === null && f.sel === 'PWR-DS-FIVEPOINTS' && f.err === null && !f.demoBusy);
+    // The demo's Ask the AI step decides only once an answer to a question asked while it waited has ended: it
+    // does not run A over that answer when your Run as A lands first
+    await pair13('R13 demo Ask the AI does not take the map back from an answer asked while it waited for your Run as A, whichever lands first', [false, true].map((runFirst) => async () => {
+      await H.live(); await H.startDemo(); await H.run('r1', 'A', 'C-WATER-MAIN-DECATUR'); await H.demo(7); H.maybe('dA', '/api/simulate'); await H.askLive(2);
+      if (runFirst) { await H.land('r1'); await H.send(2, [act.sim(rTel13, 'active')]); } else { await H.send(2, [act.sim(rTel13, 'active')]); await H.land('r1'); }
+      await H.landIfMade('dA'); await H.end(2); await H.done(7);
+    }), (f) => f.demoAsked.length === 0 && f.map === 'R:D-TELECOM-56MARIETTA' && f.A === 'C-WATER-MAIN-DECATUR' && !f.analyst && !f.demoBusy);
+    // ...and waits for your Run as B still in flight too, so its question carries the same scenario B (the
+    // step runs A only once your run has landed)
+    let early13 = null;
+    await pair13('R13 demo Ask the AI asks with your Run as B in flight in its context, whether it lands before or after the step\'s run for A', [false, true].map((stepFirst) => async () => {
+      await H.live(); await H.startDemo(); await H.run('r1', 'B', 'C-WATER-MAIN-DECATUR'); await H.ran('active', 'E-ROADS-FIVEPOINTS');
+      H.maybe('dA', '/api/simulate'); H.maybe('dq', '/api/analyst/chat'); await H.demo(7); await sleep(300);
+      early13 = ops.dA.taken; // the step ran A before your Run as B landed
+      if (stepFirst && ops.dA.taken) { await H.land('dA'); await H.land('r1'); } else { await H.land('r1'); await within(ops.dA.hit, 5000, 'the step\'s run for A'); await H.land('dA'); }
+      await within(ops.dq.hit, 5000, 'the step\'s question');
+      ops.dq.reply = sse([{ type: 'status', mode: 'llm', model: 'scripted' }, { type: 'message', text: 'ok' }, { type: 'done', mode: 'llm' }]); ops.dq.release();
+      await H.done(7);
+    }), (f) => !f.early && f.qB === 'C-WATER-MAIN-DECATUR' && f.map === 'R:A-DS-FIVEPOINTS' && f.B === 'C-WATER-MAIN-DECATUR' && !f.demoBusy,
+    () => ({ early: early13, qB: JSON.parse(ops.dq.body || '{}').context?.scenario_b?.scenario_id ?? null }));
+    // An answer's highlight held off a result it does not describe comes back with your Run as B, requested
+    // before asking, of the scenario it was asked about, whether that lands before or after the answer ends
+    await pair13('R13 an answer\'s highlight held off slot A comes back with your earlier Run as B of what it was asked about, before or after the answer ends', [false, true].map((runFirst) => async () => {
+      await H.live(); await H.ran('A', 'A-DS-FIVEPOINTS'); await H.ran('active', 'C-WATER-MAIN-DECATUR');
+      await H.run('r1', 'B', 'C-WATER-MAIN-DECATUR'); await H.askLive(2);
+      await S(() => window.__deeptraceStore.getState().showSlot('A'));
+      await H.send(2, [act.hl('H6')]);
+      if (runFirst) { await H.land('r1'); await H.end(2); } else { await H.end(2); await H.land('r1'); }
+    }), (f) => f.hl === 'H6' && f.map === 'R:C-WATER-MAIN-DECATUR' && f.A === 'A-DS-FIVEPOINTS' && f.B === 'C-WATER-MAIN-DECATUR' && f.sim === 'idle' && !f.analyst);
+    // The answer's simulation supersedes your newest run made before asking that it took the map and the slot
+    // from: that run's failure is not reported, whether it fails before or after the answer
+    await pair13('R13 your newest run made before asking that fails is not reported once the answer\'s simulation took the map and its slot', orders13(
+      async () => { await H.live(); await H.run('r1', 'A', 'C-WATER-MAIN-DECATUR'); await H.ask(2); },
+      [() => H.land('r1', 'engine 500'), () => H.answer(2, [act.sim(rTel13, 'A')])],
+    ), (f) => f.err === null && f.sim === 'idle' && f.map === 'R:D-TELECOM-56MARIETTA' && f.A === 'D-TELECOM-56MARIETTA');
+    // A switch to the result already shown (the chip of the slot on screen) changes nothing: your highlight
+    // stays while an answer's highlight is held
+    await single13('R13 clicking the chip of the slot already shown keeps your highlight while an answer\'s highlight is held', async () => {
+      await H.live(); await H.ran('A', 'A-DS-FIVEPOINTS'); await H.ran('B', 'B-EDGEWOOD-DUCTBANK');
+      await S(() => window.__deeptraceStore.getState().showSlot('A')); await H.askLive(2);
+      await S(() => window.__deeptraceStore.getState().showSlot('B'));
+      await S(() => window.__deeptraceStore.getState().setHighlight({ node_ids: ['FAC-CITYHALL'], edge_ids: [], label: 'U1', tone: 'critical', source: 'user' }));
+      await H.send(2, [act.hl('H10')]); // held: the answer is about A, the map shows B
+      await S(() => window.__deeptraceStore.getState().showSlot('B')); // the B chip, already pressed
+      await H.end(2);
+    }, (f) => f.map === 'R:B-EDGEWOOD-DUCTBANK' && f.hl === 'U1' && !f.analyst);
+    // (the failover checks come last: after one, each check waits for the app to come back live)
+    // ...and so does an answer the engine dies under while a tool runs
+    await single13('R13 an answer the engine dies under while a tool runs settles its tool rows (no recorded answer to replay)', async () => {
+      await H.live(); await H.askLive(2); await H.send(2, toolCut13);
+      blockEngine = true; // the engine dies: /api/health is refused too
+      H.drop(2);
+      await answerOver13();
+    }, (f) => f.mode === 'snapshot' && !f.analyst && f.answerErr.startsWith('The engine stopped responding') && f.tools === 'ok,error' && f.analystShown && f.spinners === 0, toolRows13);
+    // After a failover the recorded answer replaces the partial one: it is about scenario A as asked, so it does
+    // not draw its highlights on another scenario the partial answer had put on the map
+    await single13('R13 the engine dies after the answer showed another scenario: the recorded answer does not draw its highlights on it', async () => {
+      await H.live(); await H.ran('active', 'A-DS-FIVEPOINTS'); await H.askLive(2, DQ13);
+      await H.send(2, [{ type: 'tool_call', id: 't1', name: 'run_failure_simulation', input: {} }, { type: 'tool_result', id: 't1', name: 'run_failure_simulation', ok: true, summary: 'Simulated' },
+        act.sim(rTel13, 'active'), { type: 'tool_call', id: 't2', name: 'evaluate_mitigation', input: {} }]);
+      blockEngine = true; H.drop(2);
+      await answerOver13();
+    }, (f) => f.mode === 'snapshot' && f.map === 'R:D-TELECOM-56MARIETTA' && !!f.answer && !f.answerErr && f.hl === null && !f.analyst, answer13);
+    await reset(); await H.live();
+
+    await reset();
+    await S(() => { if (window.__origAsk) window.__deeptraceStore.setState({ sendAnalystMessage: window.__origAsk }); });
+  }
+
+  // R15: demo steps in the interface. The Select, Trace, Ask the AI and Compare steps bring their panel to the
+  // front, also when it was already open behind another one (the step's inspector, question, answer or
+  // comparison would otherwise happen out of sight); a focused Next keeps keyboard focus while a step runs,
+  // and a focused Previous step keeps it at the first step.
+  {
+    /** runs a check that drives the interface: a step that never settles fails that check only */
+    const ui15 = async (name, play) => { try { await play(); } catch (e) { check(name, false, { error: e.message }); } };
+    /** the right-hand panel in front: the selected tab of the open panels (shown with two or more open) */
+    const frontPanel = () => S(() => document.querySelector('[role=tablist][aria-label="Open panels"] [role=tab][aria-selected=true]')?.textContent.trim() ?? null);
+    const askName = 'R15 the demo Ask the AI step brings the analyst to the front (it was open behind the inspector)';
+    const compareName = 'R15 the demo Compare step brings the comparison to the front (it was open behind the analyst)';
+    await ui15(askName, async () => {
+      await reset();
+      await S(() => window.__deeptraceStore.getState().setPanel('analyst', true)); await sleep(300); // the analyst opened before the demo
+      await S(async () => { window.__deeptraceStore.getState().startDemo(); await new Promise((r) => setTimeout(r, 200)); await window.__deeptraceStore.getState().demoGoto(3); });
+      await sleep(500);
+      const beforeAsk = await frontPanel();
+      await S(() => window.__deeptraceStore.getState().demoGoto(7)); await sleep(600);
+      st = { beforeAsk, front: await frontPanel(), input: await page.locator('#analyst-input').isVisible(),
+        asked: await S(() => window.__deeptraceStore.getState().messages.filter((m) => m.role === 'user').map((m) => m.content.slice(0, 20))) };
+      check(askName, st.beforeAsk === 'Inspector' && st.front === 'Analyst' && st.input && st.asked.length === 1, st);
+    });
+    await ui15(compareName, async () => {
+      await S(() => window.__deeptraceStore.getState().demoGoto(9)); await sleep(600);
+      const firstCompare = await frontPanel();
+      await page.getByRole('tablist', { name: 'Open panels' }).getByRole('tab', { name: 'Analyst', exact: true }).click(); await sleep(400);
+      const beforeReplay = await frontPanel();
+      await S(() => window.__deeptraceStore.getState().demoGoto(9)); await sleep(600);
+      st = { firstCompare, beforeReplay, front: await frontPanel(), view: await S(() => window.__deeptraceStore.getState().compareView) };
+      check(compareName, st.firstCompare === 'Compare' && st.beforeReplay === 'Analyst' && st.front === 'Compare' && st.view === 'diff', st);
+    });
+    // The Select and Trace steps show their component's inspector: it comes to the front, also when the
+    // component is already selected and the inspector is open behind the analyst
+    const selectName = 'R15 the demo Select and Trace steps bring the inspector to the front (it was behind the analyst)';
+    await ui15(selectName, async () => {
+      const tab = (n) => page.getByRole('tablist', { name: 'Open panels' }).getByRole('tab', { name: n, exact: true });
+      await reset();
+      await S(() => window.__deeptraceStore.getState().setPanel('analyst', true)); await sleep(300);
+      await S(async () => { window.__deeptraceStore.getState().startDemo(); await new Promise((r) => setTimeout(r, 200)); await window.__deeptraceStore.getState().demoGoto(3); });
+      await sleep(500);
+      await tab('Analyst').click(); await sleep(400);
+      const before = await frontPanel();
+      await S(() => window.__deeptraceStore.getState().demoGoto(3)); await sleep(600); // the step again: its component is selected already
+      const select = await frontPanel();
+      await tab('Analyst').click(); await sleep(400);
+      await S(() => window.__deeptraceStore.getState().demoGoto(4)); await sleep(600);
+      st = { before, select, trace: await frontPanel(), sel: await S(() => window.__deeptraceStore.getState().selectedNodeId) };
+      check(selectName, st.before === 'Analyst' && st.select === 'Inspector' && st.trace === 'Inspector' && st.sel === 'PWR-DS-FIVEPOINTS', st);
+    });
+
+    const focusName = 'R15 a focused Next keeps keyboard focus through a busy demo step, and the next Enter advances';
+    await ui15(focusName, async () => {
+      await reset();
+      await S(async () => { window.__deeptraceStore.getState().startDemo(); await new Promise((r) => setTimeout(r, 300)); });
+      const demoState = () => S(() => { const s = window.__deeptraceStore.getState(); const a = document.activeElement;
+        return { step: s.demo.step, busy: s.demo.busy, focus: !a || a === document.body ? 'BODY' : a.textContent.trim() }; });
+      await page.getByRole('region', { name: 'Guided demo' }).getByRole('button', { name: 'Next', exact: true }).focus();
+      await page.keyboard.press('Enter'); // step 1 -> 2 (Deep Mode)
+      await page.waitForFunction(() => { const d = window.__deeptraceStore.getState().demo; return d.step === 1 && !d.busy; }, null, { timeout: 60000 });
+      await page.keyboard.press('Enter'); // step 2 -> 3 (Reveal: busy while the layers appear one by one)
+      await sleep(400);
+      const during = await demoState();
+      await page.keyboard.press('Enter'); // ignored while the step runs
+      await page.waitForFunction(() => !window.__deeptraceStore.getState().demo.busy, null, { timeout: 60000 });
+      const afterStep = await demoState();
+      await page.keyboard.press('Enter'); // step 3 -> 4 (Select)
+      await sleep(400);
+      st = { during, afterStep, next: await demoState() };
+      check(focusName, during.step === 2 && during.busy && during.focus === 'Next' &&
+        afterStep.step === 2 && afterStep.focus === 'Next' && st.next.step === 3 && st.next.focus === 'Next', st);
+    });
+    const prevName = 'R15 a focused Previous step keeps keyboard focus when it reaches the first step';
+    await ui15(prevName, async () => {
+      const demoAt = () => S(() => { const s = window.__deeptraceStore.getState(); const a = document.activeElement;
+        return { step: s.demo.step, focus: !a || a === document.body ? 'BODY' : a.getAttribute('aria-label') || a.textContent.trim() }; });
+      if (!(await S(() => window.__deeptraceStore.getState().demo.active))) await S(async () => { window.__deeptraceStore.getState().startDemo(); await new Promise((r) => setTimeout(r, 300)); });
+      await S(() => window.__deeptraceStore.getState().demoGoto(1)); // step 2 (Deep Mode)
+      await page.waitForFunction(() => { const d = window.__deeptraceStore.getState().demo; return d.step === 1 && !d.busy; }, null, { timeout: 60000 });
+      await page.getByRole('region', { name: 'Guided demo' }).getByRole('button', { name: 'Previous step' }).focus();
+      await page.keyboard.press('Enter'); // step 2 -> 1: Previous is unavailable there
+      await page.waitForFunction(() => { const d = window.__deeptraceStore.getState().demo; return d.step === 0 && !d.busy; }, null, { timeout: 60000 });
+      await sleep(300);
+      const first = await demoAt();
+      await page.keyboard.press('Enter'); await sleep(300); // ignored at the first step
+      st = { first, again: await demoAt() };
+      check(prevName, first.step === 0 && first.focus === 'Previous step' && st.again.step === 0 && st.again.focus === 'Previous step', st);
+    });
+    await S(() => window.__deeptraceStore.getState().exitDemo());
+  }
+
+  // R16: keyboard focus and typed text survive what happens while you use the interface. A busy control keeps
+  // keyboard focus (or, when it goes away, hands it to its neighbour) instead of dropping it to the page, a
+  // comparison that lands while you type a question leaves the analyst, its draft and its focus alone, and
+  // the command palette gives focus back to what had it when it closes.
+  {
+    const ui16 = async (name, play) => { try { await play(); } catch (e) { check(name, false, { error: e.message }); } };
+    /** what has keyboard focus: '#id', else its label or text ('BODY' when focus fell to the page) */
+    const focused = () => S(() => { const a = document.activeElement; return !a || a === document.body ? 'BODY' : a.id ? '#' + a.id : a.getAttribute('aria-label') || a.textContent.trim().slice(0, 40); });
+    const frontPanel = () => S(() => document.querySelector('[role=tablist][aria-label="Open panels"] [role=tab][aria-selected=true]')?.textContent.trim() ?? null);
+    const tab = (n) => page.getByRole('tablist', { name: 'Open panels' }).getByRole('tab', { name: n, exact: true });
+    const simCenter = () => page.locator('section[aria-label="Simulation center"]');
+    const openSim = async () => { if (!(await S(() => window.__deeptraceStore.getState().panels.simulation))) await page.getByRole('button', { name: 'Open simulation center' }).first().click(); await sleep(400); };
+    const fillAB = () => S(async () => { const P = (id) => window.__deeptraceStore.getState().presets.find((x) => x.id === id).scenario;
+      await window.__deeptraceStore.getState().runSimulation(P('A-DS-FIVEPOINTS'), 'A'); await window.__deeptraceStore.getState().runSimulation(P('B-EDGEWOOD-DUCTBANK'), 'B'); });
+    const draft = async () => ((await page.locator('#analyst-input').count()) ? page.locator('#analyst-input').inputValue() : '(no analyst)');
+    let simulateRequests = 0;
+    page.on('request', (r) => { if (r.url().includes('/api/simulate')) simulateRequests++; });
+
+    const runName = 'R16 Run as scenario A keeps keyboard focus while it runs (Enter does nothing more), then hands it to the Results tab';
+    await ui16(runName, async () => {
+      await reset(); await openSim();
+      await simCenter().getByRole('tablist', { name: 'Simulation view' }).getByRole('tab', { name: 'Scenarios' }).click(); await sleep(300);
+      const name = await S(() => window.__deeptraceStore.getState().presets[0].name);
+      const g = gate('/api/simulate');
+      await page.keyboard.press('Shift'); // keyboard use
+      await page.getByRole('button', { name: `Run ${name} as scenario A`, exact: true }).focus();
+      await page.keyboard.press('Enter'); await within(g.hit, 5000, 'the run'); await sleep(300);
+      const during = await focused();
+      const before = simulateRequests;
+      await page.keyboard.press('Enter'); await sleep(400); // ignored while it runs
+      const extra = simulateRequests - before;
+      g.release();
+      await page.waitForFunction(() => { const s = window.__deeptraceStore.getState(); return !!s.slots.A && s.simStatus === 'idle'; }, null, { timeout: 60000 }); await sleep(1500);
+      st = { during, extra, after: await focused() };
+      check(runName, st.during === `Run ${name} as scenario A` && st.extra === 0 && st.after === 'Results', st);
+    });
+
+    const busyName = 'R16 Compare and the inspector\'s Trace keep keyboard focus while they run';
+    await ui16(busyName, async () => {
+      await reset(); await fillAB(); await openSim();
+      let g = gate('/api/compare');
+      await page.keyboard.press('Shift');
+      await simCenter().getByRole('button', { name: 'Compare', exact: true }).focus();
+      await page.keyboard.press('Enter'); await within(g.hit, 5000, 'the Compare'); await sleep(300);
+      const duringCompare = await focused();
+      g.release();
+      await page.waitForFunction(() => { const s = window.__deeptraceStore.getState(); return !!s.comparison && s.compareStatus === 'idle'; }, null, { timeout: 60000 }); await sleep(600);
+      const afterCompare = await focused();
+      await S(async () => { await window.__deeptraceStore.getState().selectNode('PWR-TS-SOUTH', { fly: false }); }); await sleep(600);
+      g = gate('/api/trace');
+      await page.keyboard.press('Shift');
+      await page.getByRole('button', { name: 'Trace', exact: true }).first().focus();
+      await page.keyboard.press('Enter'); await within(g.hit, 5000, 'the trace'); await sleep(300);
+      const duringTrace = await focused();
+      g.release();
+      await page.waitForFunction(() => window.__deeptraceStore.getState().traceVisible, null, { timeout: 60000 }); await sleep(600);
+      st = { duringCompare, afterCompare, duringTrace, afterTrace: await focused() };
+      check(busyName, st.duringCompare === 'Compare' && st.afterCompare === 'Compare' && st.duringTrace === 'Trace' && st.afterTrace === 'Hide trace', st);
+    });
+
+    const stopName = 'R16 Stop answer and Clear conversation leave keyboard focus on the question box';
+    await ui16(stopName, async () => {
+      await reset();
+      await S(() => window.__deeptraceStore.getState().setPanel('analyst', true)); await sleep(400);
+      const g = gate('/api/analyst/chat');
+      await S(() => { window.__deeptraceStore.getState().sendAnalystMessage('Which component is the most important in this network?'); });
+      await within(g.hit, 5000, 'the question'); await sleep(300);
+      await page.keyboard.press('Shift');
+      await page.getByRole('button', { name: 'Stop answer', exact: true }).focus();
+      const onStop = await focused();
+      await page.keyboard.press('Enter'); await sleep(500);
+      const afterStop = await focused();
+      g.fail = 'refused'; g.release();
+      await page.getByRole('button', { name: 'Clear conversation', exact: true }).focus();
+      const onClear = await focused();
+      await page.keyboard.press('Enter'); await sleep(500);
+      st = { onStop, afterStop, onClear, afterClear: await focused(), messages: await S(() => window.__deeptraceStore.getState().messages.length) };
+      check(stopName, st.onStop === 'Stop answer' && st.afterStop === '#analyst-input' && st.onClear === 'Clear conversation' && st.afterClear === '#analyst-input' && st.messages === 0, st);
+    });
+
+    const typingName = 'R16 a Compare that lands while you type a question leaves the analyst in front with your draft and keyboard focus';
+    await ui16(typingName, async () => {
+      await reset(); await fillAB(); await openSim();
+      await S(() => window.__deeptraceStore.getState().setPanel('analyst', true)); await sleep(400);
+      const g = gate('/api/compare');
+      await simCenter().getByRole('button', { name: 'Compare', exact: true }).click(); await within(g.hit, 5000, 'the Compare');
+      await page.locator('#analyst-input').fill(''); await page.locator('#analyst-input').click(); await page.keyboard.type('Why is B worse', { delay: 15 });
+      g.release();
+      await page.waitForFunction(() => { const s = window.__deeptraceStore.getState(); return !!s.comparison && s.compareStatus === 'idle'; }, null, { timeout: 60000 }); await sleep(800);
+      await page.keyboard.type(' downtown', { delay: 15 }); await sleep(300); // 'd' would turn Deep Mode on outside a text field
+      st = { focus: await focused(), draft: await draft(), front: await frontPanel(), view: await S(() => window.__deeptraceStore.getState().compareView),
+        deepMode: await S(() => window.__deeptraceStore.getState().deepMode), compareOpen: await S(() => window.__deeptraceStore.getState().panels.comparison) };
+      check(typingName, st.focus === '#analyst-input' && st.draft === 'Why is B worse downtown' && st.front === 'Analyst' && st.view === 'diff' && !st.deepMode && st.compareOpen, st);
+    });
+
+    const draftName = 'R16 the analyst keeps an unsent question while another panel is in front';
+    await ui16(draftName, async () => {
+      await reset();
+      await S(() => { const s = window.__deeptraceStore.getState(); s.setPanel('analyst', true); s.setPanel('provenance', true); }); await sleep(400);
+      await tab('Analyst').click(); await sleep(400);
+      await page.locator('#analyst-input').fill(''); await page.locator('#analyst-input').click(); await page.keyboard.type('draft one', { delay: 15 });
+      await tab('Provenance').click(); await page.locator('#analyst-input').waitFor({ state: 'detached', timeout: 10000 });
+      await tab('Analyst').click(); await page.locator('#analyst-input').waitFor({ timeout: 10000 }); await sleep(300);
+      st = { draft: await draft() };
+      await S(() => window.__deeptraceStore.getState().setPanel('provenance', false));
+      check(draftName, st.draft === 'draft one', st);
+    });
+
+    const paletteName = 'R16 the command palette keeps Tab inside and gives keyboard focus back to what had it when it closes';
+    await ui16(paletteName, async () => {
+      await reset();
+      const search = page.getByRole('button', { name: 'Search components and commands', exact: true }).first();
+      const inPalette = () => S(() => !!document.activeElement?.closest('[role=dialog][aria-label="Search components and commands"]'));
+      await page.keyboard.press('Shift');
+      await search.focus();
+      await page.keyboard.press('Enter'); await sleep(600); // opens the palette
+      const opened = await inPalette();
+      await page.keyboard.press('Shift+Tab'); await sleep(200);
+      const shiftTab = await inPalette();
+      await page.keyboard.press('Escape'); await sleep(800);
+      const afterEscape = await focused();
+      // a question being typed: Ctrl+K and Escape, and typing goes on in the question box
+      await S(() => window.__deeptraceStore.getState().setPanel('analyst', true)); await sleep(400);
+      await page.locator('#analyst-input').fill(''); await page.locator('#analyst-input').click(); await page.keyboard.type('why', { delay: 15 });
+      await page.keyboard.press('Control+k'); await sleep(600);
+      await page.keyboard.press('Escape'); await sleep(800);
+      await page.keyboard.type(' does it fail', { delay: 15 }); await sleep(300);
+      st = { opened, shiftTab, afterEscape, typing: await focused(), draft: await draft(), deepMode: await S(() => window.__deeptraceStore.getState().deepMode) };
+      check(paletteName, st.opened && st.shiftTab && st.afterEscape === 'Search components and commands' && st.typing === '#analyst-input' && st.draft === 'why does it fail' && !st.deepMode, st);
+    });
+    await page.locator('#analyst-input').fill('');
+    await reset();
+    await S(() => window.__deeptraceStore.getState().setPanel('analyst', false));
+  }
+  // R17: who gets focus when a control goes away. A control you clicked with the mouse lets focus fall to the
+  // page as before (Space and the single-key shortcuts keep working); a control with keyboard focus whose own
+  // action replaces or removes its surface hands focus to what replaced it; the keyboard shortcuts overlay (an
+  // aria-modal dialog, like the command palette) keeps Tab inside and gives focus back when it closes.
+  {
+    const ui17 = async (name, play) => { try { await play(); } catch (e) { check(name, false, { error: e.message }); } };
+    const focused = () => S(() => { const a = document.activeElement; return !a || a === document.body ? 'BODY' : a.id ? '#' + a.id : a.getAttribute('aria-label') || a.textContent.trim().slice(0, 40); });
+    const simCenter = () => page.locator('section[aria-label="Simulation center"]');
+    const openSim = async () => { if (!(await S(() => window.__deeptraceStore.getState().panels.simulation))) await page.getByRole('button', { name: 'Open simulation center' }).first().click(); await sleep(400); };
+    const draft = async () => ((await page.locator('#analyst-input').count()) ? page.locator('#analyst-input').inputValue() : '(no analyst)');
+    const okReply = () => sse([{ type: 'status', mode: 'llm', model: 'scripted' }, { type: 'message', text: 'ok' }, { type: 'done', mode: 'llm' }]);
+    /** keyboard: focus `locator`, press Enter, and once that control is gone (its surface's exit animation is slow), what has focus */
+    const enterAndGone = async (locator) => {
+      await page.keyboard.press('Shift'); await locator.focus();
+      await S(() => { window.__pressed = document.activeElement; });
+      await page.keyboard.press('Enter');
+      await page.waitForFunction(() => !window.__pressed.isConnected, null, { timeout: 30000 }); await sleep(1200);
+      return focused();
+    };
+
+    const pointerName = 'R17 a mouse click on Run or a suggested question that then goes away leaves focus on the page: Space pauses the cascade, D toggles Deep Mode';
+    await ui17(pointerName, async () => {
+      await reset(); await openSim();
+      await simCenter().getByRole('tablist', { name: 'Simulation view' }).getByRole('tab', { name: 'Scenarios' }).click(); await sleep(300);
+      await simCenter().getByRole('button', { name: 'Run', exact: true }).first().click(); // a preset's Run, with the mouse
+      await page.waitForFunction(() => { const s = window.__deeptraceStore.getState(); return !!s.result && s.simStatus === 'idle'; }, null, { timeout: 60000 });
+      await page.waitForFunction(() => document.querySelector('section[aria-label="Simulation center"] [aria-label="Simulation view"] [aria-selected="true"]')?.textContent.trim() === 'Results', null, { timeout: 30000 });
+      await sleep(1500);
+      const afterRun = await focused();
+      // whether the cascade was playing when Space went down (it may have ended by itself just before)
+      await S(() => window.addEventListener('keydown', (e) => { if (e.key === ' ') window.__playingAtSpace = window.__deeptraceStore.getState().playback.playing; }, { capture: true, once: true }));
+      await page.keyboard.press('Space'); await sleep(300);
+      const playingBefore = await S(() => window.__playingAtSpace);
+      const playingAfter = await S(() => window.__deeptraceStore.getState().playback.playing);
+      chatReply = okReply();
+      await S(() => window.__deeptraceStore.getState().setPanel('analyst', true)); await sleep(800);
+      await page.locator('#analyst-input').fill('');
+      const suggestion = page.locator('form:has(#analyst-input)').locator('xpath=preceding-sibling::div[1]').locator('button').first();
+      await suggestion.click(); // a suggested question, with the mouse: it goes away once asked
+      await page.waitForFunction(() => { const s = window.__deeptraceStore.getState(); return !s.analystPending && s.messages.length >= 2; }, null, { timeout: 60000 }); await sleep(1500);
+      const afterSuggestion = await focused();
+      await page.keyboard.press('d'); await sleep(400);
+      st = { afterRun, playingBefore, playingAfter, afterSuggestion, deepMode: await S(() => window.__deeptraceStore.getState().deepMode), draft: await draft() };
+      if (st.draft) await page.locator('#analyst-input').fill('');
+      check(pointerName, st.afterRun === 'BODY' && typeof st.playingBefore === 'boolean' && st.playingBefore !== st.playingAfter && st.afterSuggestion === 'BODY' && st.deepMode && st.draft === '', st);
+    });
+
+    const surfaceName = 'R17 Enter on a control whose action replaces or removes its own panel hands keyboard focus on: Ask AI to the question box, Exit demo to the toolbar\'s Demo';
+    await ui17(surfaceName, async () => {
+      await reset(); chatReply = okReply();
+      // the inspector alone in front (no question box that has focus keeps the analyst in front)
+      await S(() => { document.activeElement?.blur?.(); window.__deeptraceStore.getState().setPanel('analyst', false); }); await sleep(300);
+      await S(async () => { await window.__deeptraceStore.getState().selectNode('PWR-DS-FIVEPOINTS', { fly: false }); }); await sleep(1500);
+      const askAI = await enterAndGone(page.locator('[data-right-panel=inspector]').getByRole('button', { name: 'Ask AI', exact: true })); // the analyst replaces the inspector
+      await page.waitForFunction(() => !window.__deeptraceStore.getState().analystPending, null, { timeout: 60000 });
+      await S(async () => { window.__deeptraceStore.getState().startDemo(); await new Promise((r) => setTimeout(r, 300)); });
+      await page.waitForFunction(() => !window.__deeptraceStore.getState().demo.busy, null, { timeout: 60000 }); await sleep(600);
+      const exitDemo = await enterAndGone(page.getByRole('region', { name: 'Guided demo' }).getByRole('button', { name: 'Exit demo', exact: true })); // the demo bar goes
+      st = { askAI, exitDemo };
+      check(surfaceName, st.askAI === '#analyst-input' && st.exitDemo === 'Demo', st);
+    });
+
+    const overlayName = 'R17 the keyboard shortcuts overlay keeps Tab inside and gives keyboard focus back to its toolbar button when it closes (Esc, Close)';
+    await ui17(overlayName, async () => {
+      await reset();
+      const opener = page.getByRole('button', { name: 'Keyboard shortcuts', exact: true }).first();
+      const inDialog = () => S(() => !!document.activeElement?.closest('[role=dialog][aria-label="Keyboard shortcuts"]'));
+      const closed = async () => { await page.waitForFunction(() => !document.querySelector('[role=dialog][aria-label="Keyboard shortcuts"]'), null, { timeout: 15000 }); await sleep(300); };
+      await page.keyboard.press('Shift'); await opener.focus();
+      await page.keyboard.press('Enter'); await sleep(600);
+      const opened = await inDialog();
+      const inside = [];
+      for (const key of ['Tab', 'Tab', 'Tab', 'Shift+Tab']) { await page.keyboard.press(key); await sleep(150); inside.push(await inDialog()); }
+      await page.keyboard.press('Escape'); await closed();
+      const afterEscape = await focused();
+      await page.keyboard.press('Shift'); await opener.focus(); await page.keyboard.press('Enter'); await sleep(600);
+      await page.keyboard.press('Tab'); await sleep(150);
+      const onClose = await focused();
+      await page.keyboard.press('Enter'); await closed();
+      st = { opened, inside, afterEscape, onClose, afterClose: await focused() };
+      check(overlayName, st.opened && st.inside.every(Boolean) && st.afterEscape === 'Keyboard shortcuts' && st.onClose === 'Close' && st.afterClose === 'Keyboard shortcuts', st);
+    });
+    await reset();
+  }
+
+  // R18: which right panel is in front. A click on a component on the map shows its inspector (also when it is
+  // already selected, or while an answer streams), and a panel's "new" dot is gone once it has been in front.
+  {
+    const ui18 = async (name, play) => { try { await play(); } catch (e) { check(name, false, { error: e.message }); } };
+    const frontPanel = () => S(() => document.querySelector('[role=tablist][aria-label="Open panels"] [role=tab][aria-selected=true]')?.textContent.trim() ?? null);
+    const tab = (n) => page.getByRole('tablist', { name: 'Open panels' }).getByRole('tab', { name: n, exact: true });
+    /** the tabs showing the "new" dot */
+    const dots = () => S(() => [...document.querySelectorAll('[role=tablist][aria-label="Open panels"] [role=tab]')].filter((t) => t.querySelector('span.rounded-full')).map((t) => t.textContent.trim()));
+    const okReply = () => sse([{ type: 'status', mode: 'llm', model: 'scripted' }, { type: 'message', text: 'ok' }, { type: 'done', mode: 'llm' }]);
+
+    const mapName = 'R18 a click on a component on the map brings its inspector to the front, also when it is already selected or while an answer streams';
+    await ui18(mapName, async () => {
+      await reset(); await sleep(1500);
+      /** where component `id` is on the map, if nothing covers it there */
+      const nodeXY = (id) => S((id) => { const d = window.__deeptrace; const g = d?.controller.geom?.nodes.find((x) => x.node.id === id);
+        const p = g && d.viewer.scene.cartesianToCanvasCoordinates(g.pos);
+        if (!p || p.y < 120) return null;
+        const el = document.elementFromPoint(p.x, p.y);
+        return el && el.tagName === 'CANVAS' ? { x: p.x, y: p.y } : null; }, id);
+      await S(() => window.__deeptraceStore.getState().setPanel('analyst', true)); await sleep(800);
+      const ids = []; // two power components a click on the map selects
+      for (const id of await S(() => window.__deeptraceStore.getState().network.nodes.filter((n) => n.system === 'power').map((n) => n.id))) {
+        const p = await nodeXY(id); if (!p) continue;
+        await page.mouse.click(p.x, p.y); await sleep(700);
+        if ((await S(() => window.__deeptraceStore.getState().selectedNodeId)) === id) ids.push(id);
+        if (ids.length === 2) break;
+      }
+      if (ids.length < 2) throw new Error('no two components to click on the map: ' + ids.join());
+      const [X, Y] = ids;
+      const clickNode = async (id) => { const p = await nodeXY(id); if (!p) throw new Error('covered on the map: ' + id); await page.mouse.click(p.x, p.y); await sleep(1200); };
+      await clickNode(X);
+      const first = await frontPanel();
+      await tab('Analyst').click(); await sleep(500);
+      const behind = await frontPanel();
+      await clickNode(X); // already selected
+      const again = await frontPanel();
+      await tab('Analyst').click(); await sleep(500);
+      const g = gate('/api/analyst/chat');
+      await S(() => { void window.__deeptraceStore.getState().sendAnalystMessage('Which component is the most important in this network?'); });
+      await within(g.hit, 5000, 'the question'); await sleep(300);
+      await clickNode(Y); // while the answer streams
+      const streaming = await frontPanel();
+      const pending = await S(() => window.__deeptraceStore.getState().analystPending);
+      g.reply = okReply(); g.release();
+      await page.waitForFunction(() => !window.__deeptraceStore.getState().analystPending, null, { timeout: 60000 }); await sleep(300);
+      st = { ids, first, behind, again, streaming, pending, sel: await S(() => window.__deeptraceStore.getState().selectedNodeId),
+        answer: await S(() => { const m = window.__deeptraceStore.getState().messages; return m[m.length - 1]?.content ?? null; }) };
+      check(mapName, st.first === 'Inspector' && st.behind === 'Analyst' && st.again === 'Inspector' && st.streaming === 'Inspector' && st.pending && st.sel === Y && st.answer === 'ok', st);
+    });
+
+    const dotName = 'R18 a panel that came forward behind the question you typed loses its "new" dot once it has been in front';
+    await ui18(dotName, async () => {
+      await reset();
+      await S(async () => { const P = (id) => window.__deeptraceStore.getState().presets.find((x) => x.id === id).scenario;
+        await window.__deeptraceStore.getState().runSimulation(P('A-DS-FIVEPOINTS'), 'A'); await window.__deeptraceStore.getState().runSimulation(P('B-EDGEWOOD-DUCTBANK'), 'B'); });
+      await S(() => window.__deeptraceStore.getState().setPanel('analyst', true)); await sleep(600);
+      const g = gate('/api/compare');
+      await S(() => { void window.__deeptraceStore.getState().runComparison(); }); await within(g.hit, 5000, 'the Compare'); // Compare
+      await page.locator('#analyst-input').fill(''); await page.locator('#analyst-input').click(); await page.keyboard.type('Why is B worse', { delay: 15 });
+      g.release();
+      await page.waitForFunction(() => { const s = window.__deeptraceStore.getState(); return !!s.comparison && s.compareStatus === 'idle'; }, null, { timeout: 60000 }); await sleep(800);
+      const typing = { front: await frontPanel(), dots: await dots() };
+      await page.getByRole('button', { name: 'Close analyst', exact: true }).click(); // the comparison comes to the front
+      await page.waitForFunction(() => document.querySelector('[data-right-panel]')?.getAttribute('data-right-panel') === 'comparison', null, { timeout: 20000 }).catch(() => {});
+      await sleep(500);
+      const alone = await S(() => document.querySelector('[data-right-panel]')?.getAttribute('data-right-panel') ?? null);
+      await page.getByRole('button', { name: 'AI analyst', exact: true }).first().click(); // the toolbar's AI analyst
+      await page.waitForFunction(() => document.querySelector('[data-right-panel]')?.getAttribute('data-right-panel') === 'analyst', null, { timeout: 20000 }).catch(() => {});
+      await sleep(500);
+      st = { typing, alone, front: await frontPanel(), dots: await dots() };
+      await page.locator('#analyst-input').fill('');
+      check(dotName, st.typing.front === 'Analyst' && st.typing.dots.join() === 'Compare' && st.alone === 'comparison' && st.front === 'Analyst' && st.dots.length === 0, st);
+    });
+    await reset();
+    await S(() => window.__deeptraceStore.getState().setPanel('analyst', false));
+  }
+
+  // R2: a live result keeps its provenance after a failover (not relabelled "precomputed")
+  await reset();
+  st = await S(async () => { const s = window.__deeptraceStore.getState(); const r = await s.runSimulation({ failed_nodes: ['PWR-DS-FIVEPOINTS'], failed_edges: [], horizon_hours: 6, enable_restoration: true });
+    return { live: !!r }; });
+  const liveRes = st.live;
+  blockEngine = true;
+  await S(async () => { await window.__deeptraceStore.getState().selectNode('PWR-TS-SOUTH'); });
+  st = await S(() => ({ mode: window.__deeptraceStore.getState().dataMode, label: document.body.innerText.includes('precomputed (offline snapshot)') }));
+  check('R2 live result is not labelled precomputed after failover', liveRes && st.mode === 'snapshot' && !st.label, st);
+  blockEngine = false;
+
+  // [26]/[27] engine dies mid-session -> snapshot failover; offline trace uses engine trace
+  await reset(); blockEngine = true;
+  await S(async () => { const s = window.__deeptraceStore.getState(); await s.runSimulation(s.presets.find((x) => x.id === 'A-DS-FIVEPOINTS').scenario, 'A'); });
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { mode: s.dataMode, result: s.result?.scenario_id ?? null, err: s.simError }; });
+  check('[26] engine down mid-session fails over to the snapshot', st.mode === 'snapshot' && st.result === 'A-DS-FIVEPOINTS', st);
+  await S(async () => { const s = window.__deeptraceStore.getState(); await s.selectNode('PWR-DS-FIVEPOINTS'); await window.__deeptraceStore.getState().showTrace('PWR-DS-FIVEPOINTS'); });
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { up: s.trace?.upstream.length, down: s.trace?.downstream.length, deps: s.trace?.dependents.length, dUp: s.details?.upstream_ids.length, dDown: s.details?.downstream_ids.length, spof: s.details?.is_single_point_of_failure }; });
+  check('[27] offline trace/details use the engine trace from the snapshot', st.up === 1 && st.down === 15 && st.deps === 33 && st.dDown === 15 && st.spof === true, st);
+  await S(async () => { await window.__deeptraceStore.getState().selectNode('PWR-SW-CEN1'); });
+  st = await S(() => { const s = window.__deeptraceStore.getState(); return { up: s.details?.upstream_ids.length, conn: s.details?.connected_node_ids.length, spof: s.details?.is_single_point_of_failure }; });
+  check('[27] node without a precomputed trace: no fake upstream, SPOF from engine set', st.up === 0 && st.conn > 0 && st.spof === true, st);
+
+  // [29] replay only for the scenario it was recorded for
+  await S(async () => { const s = window.__deeptraceStore.getState(); s.clearChat(); await s.runSimulation(s.presets.find((x) => x.id === 'C-WATER-MAIN-DECATUR').scenario); });
+  await S(() => window.__deeptraceStore.getState().sendAnalystMessage('Why did this happen, and what could we do differently?'));
+  st = await S(() => { const s = window.__deeptraceStore.getState(); const m = s.messages[s.messages.length - 1]; return { content: (m.content || '').slice(0, 60), err: (m.error || '').slice(0, 60), tools: m.tools.length }; });
+  check('[29] recorded replay is not shown for a different scenario', !st.content && st.tools === 0 && !!st.err, st);
+  await S(async () => { const s = window.__deeptraceStore.getState(); s.clearChat(); await s.runSimulation(s.presets.find((x) => x.id === 'A-DS-FIVEPOINTS').scenario); await window.__deeptraceStore.getState().sendAnalystMessage('Why did this happen, and what could we do differently?'); });
+  st = await S(() => { const s = window.__deeptraceStore.getState(); const m = s.messages[s.messages.length - 1]; return { content: (m.content || '').slice(0, 60), tools: m.tools.length, pending: s.analystPending }; });
+  check('[29] recorded replay still works for the demo scenario', st.content.length > 0 && st.tools > 0 && !st.pending, st);
+
+  // R2: snapshot mode, the ask_ai step reached by a step chip or Prev still replays its answer
+  await S(async () => { const s = window.__deeptraceStore.getState(); s.startDemo(); await new Promise((r) => setTimeout(r, 200)); await window.__deeptraceStore.getState().demoGoto(7); });
+  st = await S(() => { const s = window.__deeptraceStore.getState(); const m = s.messages[s.messages.length - 1]; return { mode: s.dataMode, result: s.result?.scenario_id ?? null, content: (m?.content || '').slice(0, 50), err: m?.error ?? null }; });
+  check('R2 snapshot ask_ai reached cold replays the recorded answer', st.mode === 'snapshot' && st.result === 'A-DS-FIVEPOINTS' && st.content.length > 0 && !st.err, st);
+  await S(async () => { await window.__deeptraceStore.getState().demoGoto(8); await window.__deeptraceStore.getState().demoPrev(); });
+  st = await S(() => { const s = window.__deeptraceStore.getState(); const m = s.messages[s.messages.length - 1]; return { step: s.demo.step, result: s.result?.scenario_id ?? null, content: (m?.content || '').slice(0, 50), err: m?.error ?? null }; });
+  check('R2 snapshot ask_ai reached by Prev replays the recorded answer', st.step === 7 && st.result === 'A-DS-FIVEPOINTS' && st.content.length > 0 && !st.err, st);
+  await S(() => window.__deeptraceStore.getState().exitDemo());
+
+  // R19: other window sizes, each on a page of its own (they run last, once the main page is closed, so its
+  // map does not slow them down). On a phone the demo's simulation steps show the simulation sheet, and the
+  // demo bar keeps Exit demo on screen and stays clear of the sheets; at 1024x768 the camera cluster stays off
+  // the demo bar.
+  await page.close();
+  {
+    const ui19 = async (name, play) => { try { await play(); } catch (e) { check(name, false, { error: e.message }); } };
+    const openAt = async (width, height) => {
+      const p = await browser.newPage({ viewport: { width, height } });
+      p.on('pageerror', (e) => errors.push(e.message));
+      try {
+        await p.goto(APP, { waitUntil: 'domcontentloaded', timeout: 120000 });
+        await p.waitForFunction(() => { const s = window.__deeptraceStore?.getState(); return s && s.dataMode === 'live' && s.snapshot && s.presets.length; }, null, { timeout: 180000 });
+      } catch (e) {
+        const mode = await p.evaluate(() => window.__deeptraceStore?.getState().dataMode ?? null).catch(() => null);
+        await p.close();
+        throw new Error(`the ${width}x${height} page did not come up (data mode ${mode}): ${e.message.split('\n')[0]}`);
+      }
+      await sleep(2500); // the boot overlay goes away
+      return p;
+    };
+    const idle = (p) => p.waitForFunction(() => !window.__deeptraceStore.getState().demo.busy, null, { timeout: 90000 }).then(() => sleep(1200));
+    const chip = (p, n) => p.getByRole('region', { name: 'Guided demo' }).getByRole('tab', { name: new RegExp('^Step ' + n + ':') });
+
+    const phone = await openAt(390, 844).catch((e) => ({ error: e.message }));
+    const phoneSimName = 'R19 on a phone the demo\'s Fail, Cascade and Alternative steps show the simulation sheet (a step chip back to Trace shows the inspector)';
+    await ui19(phoneSimName, async () => {
+      if (phone.error) throw new Error(phone.error);
+      const onScreen = () => phone.evaluate(() => { const sim = document.querySelector('section[aria-label="Simulation center"]');
+        return { step: window.__deeptraceStore.getState().demo.step + 1, sheet: document.querySelector('[data-right-panel]')?.getAttribute('data-right-panel') ?? null,
+          results: sim ? sim.querySelector('[aria-label="Simulation view"] [aria-selected="true"]')?.textContent.trim() ?? 'open' : null }; });
+      await phone.getByRole('button', { name: 'Open menu' }).click(); await sleep(600);
+      await phone.locator('[role=menu] button', { hasText: 'Start demo' }).click(); await sleep(1200);
+      const seen = {};
+      for (let step = 1; step < 9; step++) { // tap Next from step 1 to step 9
+        await idle(phone); seen[step] = await onScreen();
+        await phone.getByRole('region', { name: 'Guided demo' }).getByRole('button', { name: 'Next', exact: true }).click();
+      }
+      await idle(phone); seen[9] = await onScreen();
+      await chip(phone, 5).click(); await idle(phone); seen.back5 = await onScreen();
+      st = { 6: seen[6], 7: seen[7], 8: seen[8], 9: seen[9], back5: seen.back5 };
+      const simShown = (o) => o.results === 'Results' && o.sheet === null;
+      check(phoneSimName, simShown(seen[6]) && simShown(seen[7]) && simShown(seen[9]) && seen[8].sheet === 'analyst' && seen.back5.step === 5 && seen.back5.sheet === 'inspector', st);
+    });
+
+    const phoneBarName = 'R19 on a phone the demo bar keeps Exit demo and Reset demo on the bar (360 and 390 px), and a sheet does not cover its narration (375x667)';
+    await ui19(phoneBarName, async () => {
+      if (phone.error) throw new Error(phone.error);
+      if (!(await phone.evaluate(() => window.__deeptraceStore.getState().demo.active))) {
+        await phone.getByRole('button', { name: 'Open menu' }).click(); await sleep(600);
+        await phone.locator('[role=menu] button', { hasText: 'Start demo' }).click(); await sleep(1200);
+      }
+      const fits = () => phone.evaluate(() => {
+        const bar = document.querySelector('[aria-label="Guided demo"]'); const br = bar.getBoundingClientRect();
+        return Object.fromEntries(['Exit demo', 'Reset demo'].map((name) => {
+          const b = [...bar.querySelectorAll('button')].find((x) => (x.getAttribute('aria-label') || x.textContent.trim()) === name);
+          const r = b.getBoundingClientRect();
+          const hit = document.elementFromPoint(Math.min(r.left + r.width / 2, innerWidth - 1), r.top + r.height / 2);
+          return [name, r.right <= br.right + 0.5 && r.left >= br.left - 0.5 && !!hit && b.contains(hit)];
+        })); });
+      const at390 = await fits();
+      await phone.setViewportSize({ width: 360, height: 740 }); await sleep(1500);
+      const at360 = await fits();
+      await phone.setViewportSize({ width: 375, height: 667 }); await sleep(1200);
+      await chip(phone, 4).click(); await idle(phone); // Select: the inspector sheet opens
+      const narration = await phone.evaluate(() => { const p = document.querySelector('[aria-label="Guided demo"] p').getBoundingClientRect();
+        const sheet = document.querySelector('[data-right-panel]')?.parentElement?.getBoundingClientRect();
+        return { bottom: Math.round(p.bottom), sheetTop: sheet ? Math.round(sheet.top) : null }; });
+      st = { at390, at360, narration };
+      check(phoneBarName, at390['Exit demo'] && at390['Reset demo'] && at360['Exit demo'] && at360['Reset demo'] && narration.sheetTop !== null && narration.sheetTop >= narration.bottom, st);
+    });
+    if (!phone.error) await phone.close();
+
+    const cameraName = 'R19 at 1024x768 the camera cluster stays off the demo bar: a tap on the right of Next goes to Next';
+    await ui19(cameraName, async () => {
+      const p = await openAt(1024, 768);
+      try {
+        await p.getByRole('button', { name: 'Demo', exact: true }).click(); await sleep(800);
+        const measure = () => p.evaluate(() => {
+          const bar = document.querySelector('[aria-label="Guided demo"]').getBoundingClientRect();
+          const cam = document.querySelector('[role=toolbar][aria-label="Camera"]').getBoundingClientRect();
+          const next = [...document.querySelectorAll('[aria-label="Guided demo"] button')].find((b) => b.textContent.trim() === 'Next');
+          const nr = next.getBoundingClientRect();
+          const x = nr.right - 6, y = nr.top + nr.height / 2;
+          const hit = document.elementFromPoint(x, y);
+          const overlap = Math.max(0, Math.min(bar.right, cam.right) - Math.max(bar.left, cam.left)) * Math.max(0, Math.min(bar.bottom, cam.bottom) - Math.max(bar.top, cam.top));
+          return { overlap: Math.round(overlap), hitsNext: !!hit && next.contains(hit), at: [Math.round(x), Math.round(y)] };
+        });
+        const seen = {};
+        for (const n of [4, 8, 9]) { await chip(p, n).click(); await sleep(500); await idle(p); seen[n] = await measure(); }
+        await p.mouse.click(seen[9].at[0], seen[9].at[1]); await sleep(1500);
+        st = { ...seen, afterTap: await p.evaluate(() => window.__deeptraceStore.getState().demo.step + 1) };
+        check(cameraName, [8, 9].every((n) => seen[n].overlap === 0 && seen[n].hitsNext) && st.afterTap === 10, st);
+      } finally { await p.close(); }
+    });
+  }
+
+  check('no page errors', errors.length === 0, errors.slice(0, 5));
+  await browser.close();
+  streamServer.close();
+  const failed = results.filter((r) => !r.ok);
+  console.log(`\n${results.length - failed.length}/${results.length} passed`);
+  process.exit(failed.length ? 1 : 0);
+})().catch((e) => { console.error(e); process.exit(2); });

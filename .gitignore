@@ -1,0 +1,20 @@
+node_modules/
+.next/
+out/
+public/cesium/
+*.tsbuildinfo
+next-env.d.ts
+.env
+.env.local
+.env*.local
+# python
+backend/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+# local caches
+backend/datasets/cache/
+.playwright/
+test-results/
+playwright-report/

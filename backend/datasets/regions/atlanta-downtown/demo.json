@@ -1,0 +1,99 @@
+{
+  "id": "deeptrace-atlanta-demo",
+  "title": "DEEPTRACE: one substation, six systems",
+  "steps": [
+    {
+      "id": "overview",
+      "title": "Downtown Atlanta as one living system",
+      "narration": "This is downtown Atlanta — Five Points, Peachtree Center, the Capitol and Grady — rebuilt as a digital twin. Streets and landmarks are approximate; every utility asset beneath them is an illustrative simulation.",
+      "action": "overview",
+      "node_id": null,
+      "preset_id": null,
+      "question": null
+    },
+    {
+      "id": "deep_mode",
+      "title": "Go beneath the street",
+      "narration": "Deep mode peels the city open. Pipes, cables, duct banks and rail tunnels are drawn at modelled depth, so you can see what normally only shows up when someone digs.",
+      "action": "deep_mode",
+      "node_id": null,
+      "preset_id": null,
+      "question": null
+    },
+    {
+      "id": "reveal_layers",
+      "title": "Six interdependent networks",
+      "narration": "Power, water, internet, transportation, shared underground corridors and critical facilities. The thin links between them are dependencies: pumps need power, signals need power, switches need comms.",
+      "action": "reveal_layers",
+      "node_id": null,
+      "preset_id": null,
+      "question": null
+    },
+    {
+      "id": "select_node",
+      "title": "DS-2 Five Points (simulated)",
+      "narration": "This simulated distribution substation feeds the heart of downtown through three radial feeders. Its inspector shows rating, load and provenance, labelled SIMULATED.",
+      "action": "select_node",
+      "node_id": "PWR-DS-FIVEPOINTS",
+      "preset_id": null,
+      "question": null
+    },
+    {
+      "id": "trace",
+      "title": "Trace what depends on it",
+      "narration": "Tracing downstream lights up every vault, the booster pump, the 56 Marietta carrier hotel, City Hall, MARTA Five Points and dozens of traffic signals that hang off this one substation.",
+      "action": "trace",
+      "node_id": "PWR-DS-FIVEPOINTS",
+      "preset_id": null,
+      "question": null
+    },
+    {
+      "id": "simulate",
+      "title": "Fail the substation",
+      "narration": "Scenario A trips DS Five Points. The engine finds every customer that lost its path to a source, then closes normally-open ties to pick up what it can.",
+      "action": "simulate",
+      "node_id": null,
+      "preset_id": "A-DS-FIVEPOINTS",
+      "question": null
+    },
+    {
+      "id": "cascade",
+      "title": "Watch the cascade",
+      "narration": "Round by round the failure spreads: feeders de-energise, signals go dark and traffic slows, the high-pressure water zone falls back on its tank, cell sites run down their batteries. Ties restore only part of the load — they were never sized for all of it.",
+      "action": "cascade",
+      "node_id": null,
+      "preset_id": null,
+      "question": null
+    },
+    {
+      "id": "ask_ai",
+      "title": "Ask the analyst",
+      "narration": "The AI analyst answers from the simulation results, not guesswork: it cites the elements that failed, why restoration was partial, and which upgrades would have helped most.",
+      "action": "ask_ai",
+      "node_id": null,
+      "preset_id": null,
+      "question": "Why did this happen, and what could we do differently?"
+    },
+    {
+      "id": "simulate_b",
+      "title": "One shovel, four systems",
+      "narration": "Scenario B is a single excavation strike on the Edgewood Ave duct bank beside Grady. One feeder, its station traction feed and both of the hospital's 'diverse' fibre paths share that trench, so one cut hits power, telecom, transit and Grady at once.",
+      "action": "simulate_b",
+      "node_id": null,
+      "preset_id": "B-EDGEWOOD-DUCTBANK",
+      "question": null
+    },
+    {
+      "id": "compare",
+      "title": "Compare A and B",
+      "narration": "Side by side: the substation loss drops far more load and puts City Hall on generators; the trench strike drops less load but cuts the hospital's communications and shuts the east-line MARTA stations. Shared corridors are the hidden single points of failure.",
+      "action": "compare",
+      "node_id": null,
+      "preset_id": null,
+      "question": null
+    }
+  ],
+  "scenario_a_preset": "A-DS-FIVEPOINTS",
+  "scenario_b_preset": "B-EDGEWOOD-DUCTBANK",
+  "focus_node_id": "PWR-DS-FIVEPOINTS"
+}

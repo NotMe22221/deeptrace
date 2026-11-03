@@ -1,0 +1,122 @@
+[
+  {
+    "id": "A-DS-FIVEPOINTS",
+    "name": "DS Five Points substation failure",
+    "scenario_type": "power_failure",
+    "description": "DS-2 Five Points (simulated) trips. Its three radial feeders lose supply; normally-open ties to Centennial, Capitol and Peachtree Center can only pick up part of the load, and the outage cascades into water pumping, telecom, signals and MARTA.",
+    "scenario": {
+      "scenario_id": "A-DS-FIVEPOINTS",
+      "name": "DS Five Points substation failure",
+      "scenario_type": "power_failure",
+      "failed_nodes": [
+        "PWR-DS-FIVEPOINTS"
+      ],
+      "failed_edges": [],
+      "horizon_hours": 4.0,
+      "enable_restoration": true,
+      "max_cascade_rounds": 8
+    },
+    "focus_node_id": "PWR-DS-FIVEPOINTS"
+  },
+  {
+    "id": "B-EDGEWOOD-DUCTBANK",
+    "name": "Excavation strike on Edgewood Ave duct bank (Grady / Georgia State)",
+    "scenario_type": "corridor_strike",
+    "description": "A contractor strikes the shared Edgewood Ave duct bank between Courtland St and Jesse Hill Jr Dr. Every cable in the trench is cut at once: feeder GR-1 (one of Grady's two power feeds, plus the traction feed for Georgia State station) and the fibre backhaul of BOTH access nodes that give Grady its 'diverse' communications paths (common-cause failure).",
+    "scenario": {
+      "scenario_id": "B-EDGEWOOD-DUCTBANK",
+      "name": "Excavation strike on Edgewood Ave duct bank (Grady / Georgia State)",
+      "scenario_type": "corridor_strike",
+      "failed_nodes": [],
+      "failed_edges": [
+        "UGD-DB-06"
+      ],
+      "horizon_hours": 4.0,
+      "enable_restoration": true,
+      "max_cascade_rounds": 8
+    },
+    "focus_node_id": "UGD-VLT-08"
+  },
+  {
+    "id": "C-WATER-MAIN-DECATUR",
+    "name": "Transmission main break on Decatur St",
+    "scenario_type": "water_rupture",
+    "description": "A transmission water main ruptures on Decatur St east of Five Points; crews must close isolation valves, cutting supply to part of the low-pressure grid.",
+    "scenario": {
+      "scenario_id": "C-WATER-MAIN-DECATUR",
+      "name": "Transmission main break on Decatur St",
+      "scenario_type": "water_rupture",
+      "failed_nodes": [],
+      "failed_edges": [
+        "WTR-MAIN-0023"
+      ],
+      "horizon_hours": 4.0,
+      "enable_restoration": true,
+      "max_cascade_rounds": 8
+    },
+    "focus_node_id": "WTR-JN-07"
+  },
+  {
+    "id": "D-TELECOM-56MARIETTA",
+    "name": "56 Marietta St carrier hotel outage",
+    "scenario_type": "telecom_outage",
+    "description": "The core interconnection facility at 56 Marietta St (real building; modelled connections simulated) goes dark. The dual-homed fibre rings fail over to the east core, but the Capitol Hill access node and the Five Points rooftop cell are backhauled only into 56 Marietta: City Hall and the Fulton County Courthouse lose communications.",
+    "scenario": {
+      "scenario_id": "D-TELECOM-56MARIETTA",
+      "name": "56 Marietta St carrier hotel outage",
+      "scenario_type": "telecom_outage",
+      "failed_nodes": [
+        "TEL-IX-56MARIETTA"
+      ],
+      "failed_edges": [],
+      "horizon_hours": 4.0,
+      "enable_restoration": true,
+      "max_cascade_rounds": 8
+    },
+    "focus_node_id": "TEL-IX-56MARIETTA"
+  },
+  {
+    "id": "E-ROADS-FIVEPOINTS",
+    "name": "Five Points cordon (road closures)",
+    "scenario_type": "road_disruption",
+    "description": "An emergency cordon closes the Five Points intersection, the Marietta St / Broad St corner outside Five Points station and the adjoining blocks of Peachtree St, Marietta St and Edgewood Ave. Traffic detours around the core and Five Points station loses its street access.",
+    "scenario": {
+      "scenario_id": "E-ROADS-FIVEPOINTS",
+      "name": "Five Points cordon (road closures)",
+      "scenario_type": "road_disruption",
+      "failed_nodes": [
+        "TRN-INT-0068",
+        "TRN-INT-0070"
+      ],
+      "failed_edges": [
+        "TRN-RD-0056",
+        "TRN-RD-0102",
+        "TRN-RD-0153",
+        "TRN-RD-0154"
+      ],
+      "horizon_hours": 4.0,
+      "enable_restoration": true,
+      "max_cascade_rounds": 8
+    },
+    "focus_node_id": "TRN-INT-0070"
+  },
+  {
+    "id": "F-TS-SOUTH",
+    "name": "Loss of TS-South bulk supply (overload cascade)",
+    "scenario_type": "power_failure",
+    "description": "The TS-South 115 kV bulk supply point (simulated) is lost. DS-2 Five Points shifts onto its alternate line from TS-West, which was never rated for the full load: it runs above its 120% emergency limit, trips in the next round, and Five Points blacks out - a true overload cascade.",
+    "scenario": {
+      "scenario_id": "F-TS-SOUTH",
+      "name": "Loss of TS-South bulk supply (overload cascade)",
+      "scenario_type": "power_failure",
+      "failed_nodes": [
+        "PWR-TS-SOUTH"
+      ],
+      "failed_edges": [],
+      "horizon_hours": 4.0,
+      "enable_restoration": true,
+      "max_cascade_rounds": 8
+    },
+    "focus_node_id": "PWR-TS-SOUTH"
+  }
+]
